@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contact Us · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<style>
+  body { background: var(--brand-bg); display:flex; flex-direction:column; min-height:100vh; }
+  .wrap { flex:1; display:flex; align-items:center; justify-content:center; padding: 40px 20px; }
+  .box { width: 440px; max-width: 100%; }
+  .box .brand-mark { height: 56px; margin-bottom: 18px; display: block; margin-left: auto; margin-right: auto; }
+  .box h1 { color:#fdf7ea; text-align:center; font-size: 22px; margin-bottom: 22px; }
+  .back-link { display: block; text-align: center; margin-top: 18px; color: var(--brand-gold-light); font-size: 13.5px; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="box">
+  <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+  <h1>Contact Us</h1>
+  <div class="card">
+    <form id="contact-form">
+      <label>Your Name</label><input name="name" required autofocus>
+      <label>Your Email</label><input type="email" name="email" required>
+      <label>Message</label><textarea name="message" rows="5" required></textarea>
+      <div style="margin-top:20px"><button class="btn btn-primary" style="width:100%">Send Message</button></div>
+    </form>
+  </div>
+  <a class="back-link" href="/">&larr; Back to Home</a>
+</div>
+</div>
+<script src="/js/app.js"></script>
+<script>trackPageview();</script>
+<script>
+qs('#contact-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = Object.fromEntries(new FormData(e.target).entries());
+  try {
+    await api('/contact', { method: 'POST', body: data });
+    qs('#contact-form').closest('.card').innerHTML = '<p style="text-align:center;padding:10px 0">Thanks — your message has been sent. We\'ll be in touch.</p>';
+  } catch (err) { toast(err.message, true); }
+});
+renderPublicFooter();
+</script>
+</body>
+</html>

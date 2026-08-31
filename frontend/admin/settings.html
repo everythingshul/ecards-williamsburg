@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+const isSuperAdmin = Auth.user()?.role === 'super_admin';
+// Seasons now lives on its own page (/admin/seasons), gated by its own
+// 'seasons' resource — pulled out of this page specifically because a
+// single nav link/page shared between two independently-gated resources
+// meant blocking just 'settings' didn't actually hide anything if the user
+// still had 'seasons' (its default), and vice versa. This page is 'settings' only.
+if (!Auth.can('settings')) { location.href = '/admin/dashboard'; }
+renderShell('/admin/settings', `
+  <h2>Settings</h2>
+  <div class="tabs">
+    <button class="active" data-t="org">Organization</button>
+    <button data-t="emails">Auto Emails</button>
+    ${isSuperAdmin ? '<button data-t="backups">Backups</button>' : ''}
+  </div>
+
+  <div id="panel-org">
+    <div class="card">
+      <h3>Organization Info & Branding</h3>
+      <label>Organization Name</label><input id="org-name">
+      <div class="grid-2">
+        <div><label>Primary Color</label><input id="org-primary_color" type="color"></div>
+        <div><label>Accent Color</label><input id="org-accent_color" type="color"></div>
+      </div>
+      <label>Support Email</label><input id="org-support_email">
+      <label>Support Phone</label><input id="org-support_phone">
+      <label>Address</label><input id="org-address">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveOrg()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Default Reply-To Email</h3>
+      <p class="small-muted">Where replies to automatic system emails go by default. Leave blank to use the sending address itself. Individual email templates (Auto Emails tab) can override this per-template.</p>
+      <label>Default Reply-To</label><input id="org-reply_to" placeholder="e.g. office@yourorg.org">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveDefaultReplyTo()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Notify on New Signups</h3>
+      <p class="small-muted">Optional — when set, an internal email is sent every time a shul or store submits a new public application (separate from anything sent to the applicant themselves). Shuls and stores are configured separately, and each can list multiple addresses, comma-separated. Leave a field blank to turn that one off.</p>
+      <label>Notify on New Shul Signups</label><input id="org-notify_new_shul_signup_email" placeholder="e.g. office@yourorg.org, gabai-team@yourorg.org">
+      <label style="margin-top:10px">Notify on New Store Signups</label><input id="org-notify_new_store_signup_email" placeholder="e.g. office@yourorg.org, stores-team@yourorg.org">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveNewSignupNotifyEmails()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Notify on Document Signed</h3>
+      <p class="small-muted">Optional — when set, an internal email is sent every time any contract or document is e-signed (shul contracts, store agreements, standalone documents). Multiple addresses can be listed, comma-separated. Leave blank to turn off.</p>
+      <label>Notify Emails</label><input id="org-notify_doc_signed_email" placeholder="e.g. office@yourorg.org">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveDocSignedNotifyEmail()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Our SMS Number</h3>
+      <p class="small-muted">Your SimpleSender sending number. Incoming-message sync (SMS Center &gt; Inbox) uses this to tell replies to you apart from messages you sent — anything addressed to this number is inbound. Update this if the number is ever reassigned.</p>
+      <label>SMS Number</label><input id="org-sms_own_number" placeholder="+18555996232">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveSmsOwnNumber()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Gift Card Loading (disccardpromos)</h3>
+      <p class="small-muted">disccardpromos loads money onto a card by crediting a customer's balance against one of their Packages — there's no separate "assign a card" step. Enter the Package/Discount ID to use; every approved applicant's card amount is loaded against this same package, regardless of season.</p>
+      <div id="giftcard-status" style="margin:10px 0"></div>
+      <label>Package (Discount) ID</label><input id="org-discount_id" placeholder="e.g. 4821">
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn-sm btn-primary" onclick="saveDiscountId()">Save</button>
+        <button class="btn btn-sm btn-outline" onclick="lookUpGiftcardPackages()">Look Up Valid Package IDs</button>
+      </div>
+      <div id="giftcard-packages-result" style="margin-top:10px"></div>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Applicant Info Pushed to disccardpromos</h4>
+      <p class="small-muted">Applicant ID is always sent — it's how a record gets matched to their disccardpromos customer at all. Choose which other fields go along with it, on approval and every save afterward.</p>
+      <div id="push-fields-list" style="margin:10px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px"></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="savePushFields()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Application Restrictions</h3>
+      <label>Allowed Zip Codes <span class="small-muted">(comma-separated, leave blank to accept any zip code)</span></label>
+      <textarea id="org-allowed_zips" rows="3" placeholder="e.g. 11201, 11211, 11213"></textarea>
+      <p class="small-muted">Applicants outside these zip codes are declined automatically at submission. The submitting shul is never told this happened or shown which applicants were declined this way.</p>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveZipRestriction()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Shul Portal</h3>
+      <div class="checkbox-row"><input type="checkbox" id="shul-card-amount-visible"><label style="margin:0">Shuls can see the card amount on their own applicants</label></div>
+      <p class="small-muted">When off, the "Card $" column and field are hidden from the shul portal (list and applicant detail) but remain fully visible to admins.</p>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulCardAmountVisible()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Homepage Popup</h3>
+      <p class="small-muted">Shows once per visit on the public homepage. Turn it off and the homepage looks exactly as if it were never there.</p>
+      <div class="checkbox-row"><input type="checkbox" id="popup-enabled"><label style="margin:0">Show popup on homepage</label></div>
+      <label style="margin-top:14px">Message</label>
+      <textarea id="popup-message" rows="4" placeholder="e.g. Applications for this season close August 30th."></textarea>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="savePopup()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Full System Export</h3>
+      <p class="small-muted">Download everything: every shul, applicant, card, transaction, store, billing record, task, and note, as one Excel workbook with a separate sheet per table.</p>
+      <button class="btn btn-sm btn-primary" onclick="downloadFullExport()">Download Full System Export (.xlsx)</button>
+    </div>
+  </div>
+
+  <div id="panel-emails" style="display:none">
+    <p class="small-muted">Edit the text of automatic system emails (contract ready, approvals, invites, password reset). <code>{{placeholders}}</code> get filled in with real values when each email actually sends — leave them as-is, just move them where you want.</p>
+    <div id="email-templates-list">Loading…</div>
+  </div>
+
+  ${isSuperAdmin ? `
+  <div id="panel-backups" style="display:none">
+    <div class="card">
+      <div class="flex-between"><h3 style="margin:0">Database Backups</h3><div class="pill-row">
+        <button class="btn btn-sm btn-outline" onclick="downloadBackupNow()">Download Backup Now</button>
+        <button class="btn btn-sm btn-primary" onclick="runBackupNow()">Run Backup</button>
+      </div></div>
+      <p class="small-muted">A full snapshot of the database is taken automatically every few hours (kept on this server's disk). "Run Backup" takes one immediately; "Download Backup Now" takes one and downloads it straight to your computer — the only copy that's off this server, so do this periodically and keep it somewhere safe.</p>
+      <div id="backups-list" style="margin-top:14px">Loading…</div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Full Data Export / Migration</h3>
+      <p class="small-muted">The backups above are the database only. This exports <strong>everything</strong> on this server — the database plus every uploaded file (signed contracts, signatures, logos, store bills, form images, update attachments) — as one archive. Use it to move to a different Render account: download it here, then upload it on the new (empty) service's own Settings &gt; Backups page.</p>
+      <div class="pill-row">
+        <button class="btn btn-sm btn-primary" onclick="downloadFullExport()">Download Full Export</button>
+        <button class="btn btn-sm btn-outline" onclick="qs('#migration-import-file').click()">Restore From Full Export…</button>
+        <input type="file" id="migration-import-file" accept=".tar.gz,.gz" style="display:none" onchange="uploadFullImport(this)">
+      </div>
+      <p class="small-muted" style="margin-top:10px">Restore only works on a service that has no shuls/applicants yet — it refuses to overwrite a live instance. The service restarts automatically once the restore finishes; give it about a minute, then log back in.</p>
+    </div>
+  </div>` : ''}
+`);
+
+qsa('.tabs button').forEach(b => b.addEventListener('click', () => {
+  qsa('.tabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+  ['org','emails','backups'].forEach(t => { const el = qs('#panel-'+t); if (el) el.style.display = t === b.dataset.t ? 'block' : 'none'; });
+  if (b.dataset.t === 'emails') loadEmailTemplates();
+  if (b.dataset.t === 'backups') loadBackups();
+}));
+
+async function loadOrg() {
+  const { organization: o } = await api('/orgs/me');
+  qs('#org-name').value = o.name || '';
+  qs('#org-primary_color').value = o.primary_color || '#241a15';
+  qs('#org-accent_color').value = o.accent_color || '#c9a76a';
+  qs('#org-support_email').value = o.support_email || '';
+  qs('#org-support_phone').value = o.support_phone || '';
+  qs('#org-address').value = o.address || '';
+}
+async function loadZipRestriction() {
+  const { settings } = await api('/settings');
+  qs('#org-allowed_zips').value = settings.allowed_zip_codes || '';
+}
+window.saveZipRestriction = async () => {
+  try { await api('/settings', { method: 'PUT', body: { allowed_zip_codes: qs('#org-allowed_zips').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+async function loadDefaultReplyTo() {
+  const { settings } = await api('/settings');
+  qs('#org-reply_to').value = settings.email_reply_to || '';
+}
+window.saveDefaultReplyTo = async () => {
+  try { await api('/settings', { method: 'PUT', body: { email_reply_to: qs('#org-reply_to').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+async function loadNewSignupNotifyEmails() {
+  const { settings } = await api('/settings');
+  qs('#org-notify_new_shul_signup_email').value = settings.notify_new_shul_signup_email || '';
+  qs('#org-notify_new_store_signup_email').value = settings.notify_new_store_signup_email || '';
+}
+window.saveNewSignupNotifyEmails = async () => {
+  try {
+    await api('/settings', { method: 'PUT', body: {
+      notify_new_shul_signup_email: qs('#org-notify_new_shul_signup_email').value,
+      notify_new_store_signup_email: qs('#org-notify_new_store_signup_email').value,
+    } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+async function loadDocSignedNotifyEmail() {
+  const { settings } = await api('/settings');
+  qs('#org-notify_doc_signed_email').value = settings.notify_doc_signed_email || '';
+}
+window.saveDocSignedNotifyEmail = async () => {
+  try {
+    await api('/settings', { method: 'PUT', body: { notify_doc_signed_email: qs('#org-notify_doc_signed_email').value } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+async function loadSmsOwnNumber() {
+  const { settings } = await api('/settings');
+  qs('#org-sms_own_number').value = settings.sms_own_number || '+18555996232';
+}
+window.saveSmsOwnNumber = async () => {
+  try { await api('/settings', { method: 'PUT', body: { sms_own_number: qs('#org-sms_own_number').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+async function loadDiscountId() {
+  const { settings } = await api('/settings');
+  qs('#org-discount_id').value = settings.disccardpromos_discount_id || '';
+  try {
+    const { mockMode, missing } = await api('/settings/giftcard-status');
+    qs('#giftcard-status').innerHTML = mockMode
+      ? `<div style="padding:8px 12px;border-radius:6px;background:#fde8e8;color:#7a1f1f;font-size:13px"><strong>MOCK MODE</strong> — nothing is actually sent to disccardpromos. Every approval "succeeds" but no account/card/funds are created on their side. Missing on the server: ${esc(missing.join(', ') || '(unknown)')}.</div>`
+      : `<div style="padding:8px 12px;border-radius:6px;background:#e8f5e9;color:#1b5e20;font-size:13px"><strong>LIVE</strong> — connected to disccardpromos.</div>`;
+  } catch { /* status check is best-effort, not worth blocking the page on */ }
+}
+window.saveDiscountId = async () => {
+  try { await api('/settings', { method: 'PUT', body: { disccardpromos_discount_id: qs('#org-discount_id').value.trim() } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+// disccardpromos only ever tells you a Package (Discount) ID is wrong when
+// an approval actually fails against it ("Discount id N not found") — this
+// looks up what's really valid on the account right now (via an existing
+// customer's packages array — see routes/settings.js's giftcard-packages
+// for why there's no cleaner way to ask), so a stale/renumbered/wrong ID
+// can be caught and fixed here instead.
+window.lookUpGiftcardPackages = async () => {
+  const el = qs('#giftcard-packages-result');
+  el.innerHTML = '<span class="small-muted">Looking up…</span>';
+  try {
+    const { mockMode, packages, note } = await api('/settings/giftcard-packages');
+    if (mockMode) { el.innerHTML = '<span class="small-muted">disccardpromos is in mock mode — nothing to look up until it\'s live.</span>'; return; }
+    if (note) { el.innerHTML = `<span class="small-muted">${esc(note)}</span>`; return; }
+    if (!packages.length) { el.innerHTML = '<span class="small-muted">No packages found on the account.</span>'; return; }
+    el.innerHTML = `<div class="small-muted">Valid Package IDs on this disccardpromos account:</div>
+      <table style="margin-top:6px"><thead><tr><th>ID</th><th>Name</th><th>Amount</th><th></th></tr></thead><tbody>
+        ${packages.map(p => `<tr><td><code>${esc(String(p.id))}</code></td><td>${esc(p.name || '')}</td><td>${p.amount != null ? esc(String(p.amount)) : ''}</td>
+          <td><button class="btn btn-sm btn-outline" onclick="qs('#org-discount_id').value='${esc(String(p.id))}'">Use this</button></td></tr>`).join('')}
+      </tbody></table>`;
+  } catch (err) { el.innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`; }
+};
+// Keep in sync with PROVIDER_PUSH_FIELDS in routes/applicants.js — the
+// server falls back to "everything" if this setting was never saved, so an
+// org that's never opened this panel sees no change in behavior.
+const PROVIDER_PUSH_FIELDS = [
+  ['first_name', 'First Name'], ['last_name', 'Last Name'], ['home_phone', 'Home Phone'],
+  ['husband_cell', 'Husband Cell'], ['wife_cell', 'Wife Cell'], ['email', 'Email'],
+  ['address', 'Address'], ['city', 'City'], ['state', 'State'], ['zip', 'Zip'],
+];
+async function loadPushFields() {
+  const { settings } = await api('/settings');
+  let selected;
+  try { selected = JSON.parse(settings.disccardpromos_push_fields); } catch { selected = null; }
+  if (!Array.isArray(selected)) selected = PROVIDER_PUSH_FIELDS.map(([key]) => key);
+  qs('#push-fields-list').innerHTML = PROVIDER_PUSH_FIELDS.map(([key, label]) =>
+    `<label class="checkbox-row"><input type="checkbox" class="push-field" value="${key}" ${selected.includes(key) ? 'checked' : ''}> ${esc(label)}</label>`).join('');
+}
+window.savePushFields = async () => {
+  const selected = qsa('.push-field:checked').map(c => c.value);
+  try { await api('/settings', { method: 'PUT', body: { disccardpromos_push_fields: JSON.stringify(selected) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+async function loadPopup() {
+  const { settings } = await api('/settings');
+  qs('#popup-enabled').checked = settings.homepage_popup_enabled === '1';
+  qs('#popup-message').value = settings.homepage_popup_message || '';
+}
+window.savePopup = async () => {
+  try { await api('/settings', { method: 'PUT', body: { homepage_popup_enabled: qs('#popup-enabled').checked ? '1' : '0', homepage_popup_message: qs('#popup-message').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+async function loadShulCardAmountVisible() {
+  const { settings } = await api('/settings');
+  // Defaults to visible (matches pre-toggle behavior) unless explicitly turned off.
+  qs('#shul-card-amount-visible').checked = settings.shul_card_amount_visible !== '0';
+}
+window.saveShulCardAmountVisible = async () => {
+  try { await api('/settings', { method: 'PUT', body: { shul_card_amount_visible: qs('#shul-card-amount-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+window.downloadFullExport = () => downloadAuthed('/system-export', 'kipas-hair-bp-full-export.xlsx');
+
+window.saveOrg = async () => {
+  const body = {
+    name: qs('#org-name').value, primary_color: qs('#org-primary_color').value, accent_color: qs('#org-accent_color').value,
+    support_email: qs('#org-support_email').value, support_phone: qs('#org-support_phone').value, address: qs('#org-address').value,
+  };
+  try { await api('/orgs/me', { method: 'PUT', body }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+
+// Seasons management now lives on its own page — /admin/seasons.html.
+
+async function loadEmailTemplates() {
+  const { templates } = await api('/settings/email-templates');
+  qs('#email-templates-list').innerHTML = templates.map(t => `<div class="card" style="margin-bottom:10px">
+      <div class="flex-between">
+        <strong>${esc(t.label)}</strong>
+        ${t.isCustomized ? badge('customized', 'active') : badge('default', 'inactive')}
+      </div>
+      <p class="small-muted" style="margin-top:6px">Available: ${t.vars.map(v => `<code>{{${esc(v)}}}</code>`).join(' ')}</p>
+      <p class="small-muted">Reply-To: ${t.replyTo ? esc(t.replyTo) : (t.defaultReplyTo ? `${esc(t.defaultReplyTo)} (org default)` : 'sending address (no default set)')}</p>
+      <button class="btn btn-sm btn-outline" onclick="openEditEmailTemplate('${t.key}')">Edit</button>
+      ${t.isCustomized ? `<button class="btn btn-sm btn-outline" onclick="resetEmailTemplate('${t.key}')">Reset to Default</button>` : ''}
+    </div>`).join('');
+  emailTemplatesCache = templates;
+}
+let emailTemplatesCache = [];
+let etBodyEditor = null;
+window.openEditEmailTemplate = (key) => {
+  const t = emailTemplatesCache.find(x => x.key === key);
+  if (!t) return;
+  const body = `
+    <label>Subject</label><input id="et-subject" value="${esc(t.subject)}">
+    <label>Body</label><div id="et-body-rte"></div>
+    <label style="margin-top:14px">Reply-To <span class="small-muted">(leave blank to use ${t.defaultReplyTo ? 'the org default, ' + esc(t.defaultReplyTo) : 'the sending address'})</span></label>
+    <input id="et-replyto" value="${esc(t.replyTo || '')}" placeholder="e.g. approvals@yourorg.org">
+    <p class="small-muted" style="margin-top:10px">Available placeholders: ${t.vars.map(v => `<code>{{${esc(v)}}}</code>`).join(' ')}</p>
+  `;
+  openModal(t.label, body, `<button class="btn btn-primary btn-sm" onclick="saveEmailTemplate('${key}')">Save</button>`);
+  etBodyEditor = createRichTextEditor('et-body-rte', t.body);
+};
+window.saveEmailTemplate = async (key) => {
+  const body = { subject: qs('#et-subject').value, body: etBodyEditor.getHtml(), reply_to: qs('#et-replyto').value };
+  try { await api(`/settings/email-templates/${key}`, { method: 'PUT', body }); toast('Saved'); closeModal(); loadEmailTemplates(); } catch (err) { toast(err.message, true); }
+};
+window.resetEmailTemplate = async (key) => {
+  if (!confirm('Revert this email to the built-in default text?')) return;
+  try { await api(`/settings/email-templates/${key}`, { method: 'DELETE' }); toast('Reset'); loadEmailTemplates(); } catch (err) { toast(err.message, true); }
+};
+
+function fmtBytes(n) { if (n < 1024) return n + ' B'; if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB'; return (n/(1024*1024)).toFixed(1) + ' MB'; }
+async function loadBackups() {
+  if (!isSuperAdmin) return;
+  const { backups } = await api('/settings/backups');
+  qs('#backups-list').innerHTML = backups.length ? `<table><thead><tr><th>Created</th><th>Size</th><th></th></tr></thead><tbody>
+      ${backups.map(b => `<tr><td>${fmtDateTime(b.createdAt)}</td><td>${fmtBytes(b.sizeBytes)}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="downloadAuthed('/settings/backups/${encodeURIComponent(b.filename)}/download','${esc(b.filename)}')">Download</button></td></tr>`).join('')}
+    </tbody></table>` : '<p class="small-muted">No backups yet — the first automatic one runs shortly after this server started.</p>';
+}
+window.runBackupNow = async () => {
+  try { await api('/settings/backups/run', { method: 'POST' }); toast('Backup created'); loadBackups(); } catch (err) { toast(err.message, true); }
+};
+window.downloadBackupNow = () => downloadAuthed('/settings/backups/download-now', `ecards-backup-${Date.now()}.sqlite`);
+window.downloadFullExport = () => downloadAuthed('/migration/export', `kipas-hair-bp-full-data-${Date.now()}.tar.gz`);
+window.uploadFullImport = async (input) => {
+  const file = input.files[0];
+  if (!file) return;
+  if (!confirm(`Restore "${file.name}" onto THIS server? This only works if this service has no shuls/applicants yet, and will restart the app once done.`)) { input.value = ''; return; }
+  const fd = new FormData();
+  fd.append('archive', file);
+  try {
+    const r = await api('/migration/import', { method: 'POST', isForm: true, body: fd });
+    toast(r.message, false);
+  } catch (err) { toast(err.message, true); }
+  input.value = '';
+};
+
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible();
+</script>
+</body>
+</html>

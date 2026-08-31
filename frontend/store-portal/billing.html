@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billing · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('store');
+renderShell('/store-portal/billing', `
+  <div class="flex-between"><h2 style="margin:0">Bills You've Submitted To Us</h2><button class="btn btn-primary btn-sm" id="btn-submit-bill">Submit a Bill</button></div>
+  <p class="small-muted">To bill us back — for example, reimbursement for gift-card redemptions you've already honored — submit a bill below.</p>
+  <div class="card" style="padding:0;overflow-x:auto;margin-top:10px">
+    <table><thead><tr><th>Submitted</th><th>Period</th><th>Amount</th><th>Description</th><th>Attachment</th><th>Status</th></tr></thead>
+    <tbody id="tbody-submitted"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+const u = Auth.user();
+
+async function loadSubmitted() {
+  try {
+    const { bills } = await api(`/stores/${u.store_id}/bill-submissions`);
+    qs('#tbody-submitted').innerHTML = bills.length ? bills.map(b => `<tr>
+        <td>${fmtDateTime(b.submitted_at)}</td><td>${esc(b.period||'')}</td><td>${fmtMoney(b.amount)}</td><td>${esc(b.description||'')}</td>
+        <td>${b.file_name ? `<a href="/api/stores/bill-submissions/${b.id}/file" target="_blank">${esc(b.file_name)}</a>` : '<span class="small-muted">&mdash;</span>'}</td>
+        <td>${badge(b.status, b.status === 'paid' ? 'active' : (b.status === 'reviewed' ? 'pending' : 'submitted'))}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No bills submitted yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+loadSubmitted();
+
+qs('#btn-submit-bill').addEventListener('click', () => {
+  const body = `
+    <label>Period <span class="small-muted">(e.g. "2026-08", optional)</span></label><input id="sb-period">
+    <label>Amount <span class="req">*</span></label><input id="sb-amount" type="number" step="0.01" min="0.01">
+    <label>Description</label><textarea id="sb-description" rows="3" placeholder="What this bill is for"></textarea>
+    <label>Attachment <span class="small-muted">(invoice/receipt, optional)</span></label><input id="sb-file" type="file" accept="image/*,application/pdf">
+  `;
+  openModal('Submit a Bill', body, `<button class="btn btn-primary btn-sm" onclick="submitBill()">Submit</button>`);
+});
+window.submitBill = async () => {
+  const amount = +qs('#sb-amount').value;
+  if (!amount || amount <= 0) return toast('Enter a valid amount', true);
+  const fd = new FormData();
+  fd.append('period', qs('#sb-period').value);
+  fd.append('amount', amount);
+  fd.append('description', qs('#sb-description').value);
+  const file = qs('#sb-file').files[0];
+  if (file) fd.append('file', file);
+  try {
+    await api(`/stores/${u.store_id}/bill-submissions`, { method: 'POST', isForm: true, body: fd });
+    toast('Bill submitted');
+    closeModal();
+    loadSubmitted();
+  } catch (err) { toast(err.message, true); }
+};
+</script>
+</body>
+</html>

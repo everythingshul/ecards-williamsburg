@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Applicants · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('shul');
+renderShell('/shul-portal/dashboard', `
+  <div class="flex-between"><h2>My Applicants</h2>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/applicants/my-export','my-applicants.xlsx')">Export</button>
+      <button class="btn btn-primary btn-sm" id="btn-new">+ Add Applicant</button>
+    </div>
+  </div>
+  <div class="stat-grid" id="shul-stats"><div class="small-muted">Loading…</div></div>
+  <div id="shul-info-banner"></div>
+  <div id="slots-banner"></div>
+  <div id="reenroll-banner"></div>
+  <div id="draft-banner"></div>
+  <div class="toolbar"><input id="f-search" placeholder="Search name…"></div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th></th><th>ID</th><th>Name</th><th>Marital</th><th>Contact</th><th>Children</th><th>Home Yom Tov</th><th>Status</th><th>Card $</th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="9" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+
+function contactLine(a) {
+  const method = a.preferred_contact_method || '';
+  const num = a.preferred_number === 'husband' ? a.husband_cell : a.preferred_number === 'wife' ? a.wife_cell : a.home_phone;
+  return `${esc(method)}${num ? ': ' + esc(num) : ''}${a.email ? '<br>' + esc(a.email) : ''}`;
+}
+
+// Slot usage banner — "used" mirrors the exact rule the server enforces when
+// a new applicant is submitted or a carried-over one is completed
+// (routes/applicants.js: every pending/approved applicant counts against
+// the cap, since pending ones could still be approved). Still-"incomplete"
+// carried-over applicants deliberately don't count yet — nobody's chosen to
+// re-enroll them — so pre-enrolling more candidates than there are slots
+// doesn't make the banner falsely show as already full.
+// missingInfo mirrors the same server-side gate that blocks any applicant
+// submission/re-enrollment for this shul (#147) — shown here up front, and
+// used to disable "+ Add Applicant" instead of letting the click round-trip
+// to the server just to find out.
+let shulInfoIncomplete = false;
+let contractNotSigned = false;
+api(`/shuls/${Auth.user().shul_id}`).then(({ shul, applicants, missingInfo }) => {
+  if (missingInfo && missingInfo.length) {
+    shulInfoIncomplete = true;
+    qs('#shul-info-banner').innerHTML = `<div class="card" style="margin-bottom:16px;border-color:var(--danger)">
+      <strong>Your shul's information is incomplete.</strong> ${missingInfo.map(esc).join('; ')}.
+      You can't submit or re-enroll applicants until this is filled in.
+      <a href="/shul-portal/shul-info">Complete it now</a>.
+    </div>`;
+    const btn = qs('#btn-new');
+    btn.disabled = true; btn.title = 'Complete your shul information first';
+  }
+  // Mirrors the server-side gate on complete-reenrollment/mass-complete-
+  // reenrollment: re-enrolling a carried-over applicant is itself a
+  // commitment this season's contract covers, so it can't happen before the
+  // shul has signed it.
+  if (!['contract_signed', 'approved'].includes(shul.status)) {
+    contractNotSigned = true;
+    qs('#shul-info-banner').insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:16px;border-color:var(--danger)">
+      <strong>Your contract for this season isn't signed yet.</strong> You can't re-enroll carried-over applicants until it's signed.
+    </div>`);
+  }
+  // Always shows how many have been submitted — slots-remaining only makes
+  // sense once the org has actually allocated a number to this shul, but
+  // "how many have I submitted so far" is useful either way.
+  const used = applicants.filter(a => !['rejected', 'incomplete', 'draft'].includes(a.approval_status)).length;
+  const approved = applicants.filter(a => a.approval_status === 'approved').length;
+  const pending = applicants.filter(a => a.approval_status === 'pending').length;
+  const full = shul.slots_allocated && used >= shul.slots_allocated;
+  qs('#shul-stats').innerHTML = [
+    ['Slots Allocated', shul.slots_allocated ?? 0],
+    ['Pending Applicants', pending],
+    ['Total Submitted', used],
+    ['Total Approved', approved],
+  ].map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
+  qs('#slots-banner').innerHTML = (shul.slots_allocated || full) ? `<div class="card" style="margin-bottom:16px;${full ? 'border-color:var(--danger)' : ''}">
+    ${shul.slots_allocated ? `<strong>${Math.max(0, shul.slots_allocated - used)} slot(s) available</strong> of ${shul.slots_allocated} allocated.` : ''}
+    ${full ? ' <strong style="color:var(--danger)">All allocated slots are used.</strong>' : ''}
+  </div>` : '';
+}).catch(() => {});
+
+// Which carried-over applicants the shul has checked off to re-enroll —
+// lets them re-enroll a chosen few instead of only "everything that's
+// ready" (massReenroll below still does that for convenience). Cleared on
+// every load() since the incomplete list itself can change (a completed
+// one drops out, a new carry-forward can add one).
+let selectedReenroll = new Set();
+// Rows created by this shul's own bulk upload (POST /import) that haven't
+// been explicitly submitted yet — see #3: a shul-uploaded new row lands as
+// 'draft', not 'pending', and only counts as a real application once the
+// shul checks it off here and submits.
+let selectedDrafts = new Set();
+
+async function load() {
+  const params = new URLSearchParams({ search: qs('#f-search').value || '' });
+  try {
+    const { applicants, total } = await api('/applicants?' + params);
+    const needsReenrollment = applicants.filter(a => a.approval_status === 'incomplete');
+    selectedReenroll = new Set([...selectedReenroll].filter(id => needsReenrollment.some(a => a.id === id)));
+    qs('#reenroll-banner').innerHTML = needsReenrollment.length
+      ? `<div class="card" style="margin-bottom:16px;border-color:var(--danger)">
+          <strong>${needsReenrollment.length}</strong> carried-over applicant(s) need re-enrollment — check the ones you want below, or click one to review and complete it individually.
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline btn-sm" id="btn-reenroll-selected" onclick="massReenroll(true)" ${contractNotSigned ? 'disabled title="Sign your contract for this season first"' : ''}>Re-enroll Selected (${selectedReenroll.size})</button>
+            <button class="btn btn-outline btn-sm" onclick="massReenroll(false)" ${contractNotSigned ? 'disabled title="Sign your contract for this season first"' : ''}>Re-enroll All Complete</button>
+          </div>
+          <span class="small-muted" style="display:block;margin-top:4px">Only re-enrolls the ones with nothing missing — anyone still needing info stays in the list below.</span>
+        </div>`
+      : '';
+    const drafts = applicants.filter(a => a.approval_status === 'draft');
+    selectedDrafts = new Set([...selectedDrafts].filter(id => drafts.some(a => a.id === id)));
+    qs('#draft-banner').innerHTML = drafts.length
+      ? `<div class="card" style="margin-bottom:16px;border-color:var(--warning,#b7791f)">
+          <strong>${drafts.length}</strong> applicant(s) from your last upload haven't been submitted yet — check the ones you want to send in below.
+          <div style="margin-top:8px">
+            <button class="btn btn-primary btn-sm" id="btn-submit-drafts" onclick="submitDrafts()" ${contractNotSigned ? 'disabled title="Sign your contract for this season first"' : ''}>Submit Selected (${selectedDrafts.size})</button>
+          </div>
+        </div>`
+      : '';
+    qs('#tbody').innerHTML = applicants.length ? applicants.map(a => `<tr onclick="openApplicant('${a.id}')" style="cursor:pointer${a.approval_status==='incomplete'?';background:rgba(183,28,28,.06)':a.approval_status==='draft'?';background:rgba(183,121,28,.08)':''}">
+        <td onclick="event.stopPropagation()">${a.approval_status==='incomplete' ? `<input type="checkbox" class="reenroll-check" data-id="${a.id}" ${selectedReenroll.has(a.id)?'checked':''} onchange="toggleReenrollSelect('${a.id}', this.checked)">`
+          : a.approval_status==='draft' ? `<input type="checkbox" class="draft-check" data-id="${a.id}" ${selectedDrafts.has(a.id)?'checked':''} onchange="toggleDraftSelect('${a.id}', this.checked)">` : ''}</td>
+        <td><code>${esc(a.external_id||'')}</code></td>
+        <td><strong>${esc(a.first_name)} ${esc(a.last_name)}</strong>${a.is_paused?' '+badge('paused','paused'):''}</td>
+        <td>${esc(a.marital_status||'')}</td><td>${contactLine(a)}</td><td>${a.num_children??0}</td>
+        <td>${a.home_for_yomtov?'Yes':'No'}</td><td>${badge(a.approval_status,a.approval_status)}</td><td>${a.card_amount!=null?fmtMoney(a.card_amount):''}</td>
+      </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No applicants submitted yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+window.toggleReenrollSelect = (id, checked) => {
+  if (checked) selectedReenroll.add(id); else selectedReenroll.delete(id);
+  const btn = qs('#btn-reenroll-selected');
+  if (btn) btn.textContent = `Re-enroll Selected (${selectedReenroll.size})`;
+};
+window.toggleDraftSelect = (id, checked) => {
+  if (checked) selectedDrafts.add(id); else selectedDrafts.delete(id);
+  const btn = qs('#btn-submit-drafts');
+  if (btn) btn.textContent = `Submit Selected (${selectedDrafts.size})`;
+};
+window.submitDrafts = async () => {
+  if (!selectedDrafts.size) return toast('Check at least one applicant first', true);
+  try {
+    const r = await api('/applicants/mass-submit-drafts', { method: 'POST', body: { ids: [...selectedDrafts] } });
+    let msg = `Submitted ${r.submitted}`;
+    const notes = [];
+    if (r.skippedIncomplete) notes.push(`${r.skippedIncomplete} still missing information`);
+    if (r.skippedSlotsFull) notes.push(`${r.skippedSlotsFull} skipped — all slots used`);
+    if (notes.length) msg += ` (${notes.join(', ')})`;
+    toast(msg, !r.submitted && (r.skippedIncomplete || r.skippedSlotsFull));
+    load();
+  } catch (err) { toast(err.message, true); }
+};
+qs('#f-search').addEventListener('input', () => load());
+qs('#btn-new').addEventListener('click', () => {
+  const body = `<label>First Name *</label><input id="n-first_name"><label>Last Name *</label><input id="n-last_name">
+    <label>Marital Status</label><select id="n-marital_status"><option value=""></option><option>single</option><option>married</option><option>widowed</option><option>divorced</option></select>
+    <div class="grid-2"><div><label>Home Phone</label><input id="n-home_phone"></div><div><label>Email</label><input id="n-email"></div></div>
+    <div class="grid-2"><div><label>Husband Cell</label><input id="n-husband_cell"></div><div><label>Wife Cell</label><input id="n-wife_cell"></div></div>
+    <div class="grid-2"><div><label>Preferred Contact</label><select id="n-pcm"><option value=""></option><option>phone</option><option>text</option><option>email</option></select></div>
+    <div><label>Number To Use</label><select id="n-pn"><option value=""></option><option>home</option><option>husband</option><option>wife</option></select></div></div>
+    <label>Address</label><input id="n-address">
+    <div class="grid-2"><div><label>City</label><input id="n-city"></div><div><label>State</label><input id="n-state"></div></div>
+    <label>Zip</label><input id="n-zip" style="max-width:160px">
+    <label>Number of Children</label><input id="n-children" type="number" value="0">
+    <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="n-yomtov"><label style="margin:0">Home for Yom Tov</label></div>
+    <label>Comments</label><textarea id="n-comments" rows="2"></textarea>`;
+  openModal('Add Applicant', body, `<button class="btn btn-primary btn-sm" onclick="createApplicant()">Submit</button>`);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
+});
+window.createApplicant = async () => {
+  const b = { first_name: qs('#n-first_name').value, last_name: qs('#n-last_name').value, marital_status: qs('#n-marital_status').value,
+    home_phone: qs('#n-home_phone').value, email: qs('#n-email').value, husband_cell: qs('#n-husband_cell').value, wife_cell: qs('#n-wife_cell').value,
+    preferred_contact_method: qs('#n-pcm').value, preferred_number: qs('#n-pn').value, address: qs('#n-address').value, city: qs('#n-city').value, state: qs('#n-state').value, zip: qs('#n-zip').value,
+    num_children: +qs('#n-children').value, home_for_yomtov: qs('#n-yomtov').checked, comments: qs('#n-comments').value };
+  try { await api('/applicants', { method: 'POST', body: b }); toast('Applicant submitted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+// Everything shown here is exactly what was submitted for this applicant
+// (plus status/card, which answer "what happened to it") — nothing an admin
+// added internally (notes, duplicate-flag reasoning) is ever included; the
+// API already withholds those entirely for the shul role.
+// Carried over from a previous season (see admin's "Carry Forward to
+// Season" action) — not a real submission yet. Renders the fixed Applicant
+// Application question set (utils/builtinSchemas.js), pre-filled with
+// whatever's already known, and requires completing every required field
+// before it counts as a real submission for this season (and this shul's
+// allocated slots).
+async function openReenrollment(a) {
+  const schema = await loadBuiltinSchema('applicant_application');
+  if (!schema) { toast('Could not load the application form — try again shortly.', true); return; }
+  const carriedOver = a.source === 'carried_forward';
+  openModal(`Complete ${carriedOver ? 'Re-enrollment' : 'Submission'}: ${esc(a.first_name)} ${esc(a.last_name)}`,
+    `<p class="small-muted">${carriedOver ? 'This applicant was carried over from a previous season.' : 'This applicant is missing required information.'} Please review and fill in anything missing before submitting.</p>
+     <form id="reenroll-form">${schema.map(f => fieldHtml(f)).join('')}</form>`,
+    `${!a.approved_at ? `<button class="btn btn-danger btn-sm" onclick="removeApplicantShul('${a.id}')">Remove</button>` : ''}<button class="btn btn-primary btn-sm" onclick="submitReenrollment('${a.id}')">Submit</button>`);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('address', { address: 'address', city: 'city', state: 'state', zip: 'zip' }); });
+  // Pre-fill every field the schema rendered with whatever this applicant
+  // already has on file (fieldHtml doesn't set values itself).
+  for (const f of schema) {
+    const el = qs('#' + f.key);
+    if (!el || a[f.key] === undefined || a[f.key] === null) continue;
+    if (f.type === 'checkbox') el.checked = !!a[f.key];
+    else el.value = a[f.key];
+  }
+}
+window.submitReenrollment = async (id) => {
+  const fd = new FormData(qs('#reenroll-form'));
+  const body = {};
+  for (const [k, v] of fd.entries()) body[k] = v;
+  qsa('input[type=checkbox]', qs('#reenroll-form')).forEach(c => body[c.name] = c.checked);
+  try {
+    await api(`/applicants/${id}/complete-reenrollment`, { method: 'POST', body });
+    toast('Re-enrollment submitted');
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+// Server decides per applicant whether their carried-over data already
+// satisfies every required field — this just fires the request and reports
+// what happened; nobody's info is guessed at or partially filled in here.
+window.massReenroll = async (selectedOnly) => {
+  if (selectedOnly && !selectedReenroll.size) return toast('Check at least one applicant first', true);
+  try {
+    const r = await api('/applicants/mass-complete-reenrollment', { method: 'POST', body: selectedOnly ? { ids: [...selectedReenroll] } : {} });
+    let msg = `Re-enrolled ${r.completed}`;
+    const notes = [];
+    if (r.skippedIncomplete) notes.push(`${r.skippedIncomplete} still missing information`);
+    if (r.skippedSlotsFull) notes.push(`${r.skippedSlotsFull} skipped — all slots used`);
+    if (notes.length) msg += ` (${notes.join(', ')})`;
+    toast(msg, !r.completed && (r.skippedIncomplete || r.skippedSlotsFull));
+    load();
+  } catch (err) { toast(err.message, true); }
+};
+async function openApplicant(id) {
+  try {
+    const { applicant: a } = await api(`/applicants/${id}`);
+    if (a.approval_status === 'incomplete') return openReenrollment(a);
+    if (a.approval_status === 'approved') return openApplicantReadOnly(a);
+    return openApplicantEdit(a);
+  } catch (err) { toast(err.message, true); }
+}
+// Once an admin has approved the applicant, the record is locked to the
+// shul — read-only display, same fields the editable view below shows.
+function openApplicantReadOnly(a) {
+  openModal(`${esc(a.first_name)} ${esc(a.last_name)}`, `
+    <div class="grid-2">
+      <div><strong>Applicant ID</strong><br><code>${esc(a.external_id||'')}</code></div>
+      <div><strong>Status</strong><br>${badge(a.approval_status,a.approval_status)}</div>
+    </div>
+    <div class="divider"></div>
+    <div class="grid-2">
+      <div><strong>First Name</strong><br>${esc(a.first_name||'')}</div>
+      <div><strong>Last Name</strong><br>${esc(a.last_name||'')}</div>
+    </div>
+    <div class="grid-2">
+      <div><strong>Marital Status</strong><br>${esc(a.marital_status||'')}</div>
+      <div><strong>Children</strong><br>${a.num_children??0}</div>
+    </div>
+    <div class="grid-2">
+      <div><strong>Home Phone</strong><br>${esc(a.home_phone||'')}</div>
+      <div><strong>Email</strong><br>${esc(a.email||'')}</div>
+    </div>
+    <div class="grid-2">
+      <div><strong>Husband Cell</strong><br>${esc(a.husband_cell||'')}</div>
+      <div><strong>Wife Cell</strong><br>${esc(a.wife_cell||'')}</div>
+    </div>
+    <div class="grid-2">
+      <div><strong>Preferred Contact</strong><br>${esc(a.preferred_contact_method||'')}</div>
+      <div><strong>Number To Use</strong><br>${esc(a.preferred_number||'')}</div>
+    </div>
+    <div class="divider"></div>
+    <p><strong>Address</strong><br>${esc(a.address||'')}</p>
+    <div class="grid-2">
+      <div><strong>City</strong><br>${esc(a.city||'')}</div>
+      <div><strong>State</strong><br>${esc(a.state||'')}</div>
+    </div>
+    <p><strong>Zip</strong><br>${esc(a.zip||'')}</p>
+    <p><strong>Home for Yom Tov</strong><br>${a.home_for_yomtov?'Yes':'No'}</p>
+    <p><strong>Comments</strong><br>${esc(a.comments||'')||'<span class="small-muted">None</span>'}</p>
+    ${'card_amount' in a ? `<div class="divider"></div><p><strong>Card Amount</strong><br>${a.card_amount!=null?fmtMoney(a.card_amount):'Not yet set'}</p>` : ''}
+    ${a.requiresShulContribution ? `<div class="divider"></div><p><strong>Amount Your Shul Gave This Family</strong><br>${a.shul_contribution_amount!=null?fmtMoney(a.shul_contribution_amount):'Not entered'}</p>` : ''}
+    <p class="small-muted">This applicant has been approved and is locked; contact your admin for changes.</p>
+  `, '');
+}
+// Anything not yet approved (draft/pending/rejected) stays editable by the
+// shul — same schema-driven form the public application and re-enrollment
+// flows use, pre-filled with what's already on file. Saving doesn't require
+// every field to be complete (an in-progress edit isn't a submission), only
+// actually submitting (mass-submit-drafts) does.
+async function openApplicantEdit(a) {
+  const schema = await loadBuiltinSchema('applicant_application');
+  if (!schema) { toast('Could not load the application form — try again shortly.', true); return; }
+  openModal(`${esc(a.first_name)} ${esc(a.last_name)}`, `
+    <div class="grid-2">
+      <div><strong>Applicant ID</strong><br><code>${esc(a.external_id||'')}</code></div>
+      <div><strong>Status</strong><br>${badge(a.approval_status,a.approval_status)}</div>
+    </div>
+    <div class="divider"></div>
+    <form id="edit-applicant-form">${schema.map(f => fieldHtml(f)).join('')}</form>
+    ${a.requiresShulContribution ? `<div class="divider"></div>
+    <label>Amount Your Shul Gave This Family ($)</label>
+    <input id="e-shul-contrib-amount" type="number" step="0.01" min="0" value="${a.shul_contribution_amount ?? ''}">
+    <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="e-shul-contrib-confirmed" ${a.shul_contribution_confirmed?'checked':''}>
+      <label for="e-shul-contrib-confirmed" style="margin:0">I confirm this amount is accurate</label></div>
+    <p class="small-muted">This must be entered and confirmed before this applicant can be approved.</p>` : ''}
+  `, `${!a.approved_at ? `<button class="btn btn-danger btn-sm" onclick="removeApplicantShul('${a.id}')">Remove</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveApplicantEdit('${a.id}')">Save</button>`);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('address', { address: 'address', city: 'city', state: 'state', zip: 'zip' }); });
+  for (const f of schema) {
+    const el = qs('#' + f.key);
+    if (!el || a[f.key] === undefined || a[f.key] === null) continue;
+    if (f.type === 'checkbox') el.checked = !!a[f.key];
+    else el.value = a[f.key];
+  }
+}
+window.saveApplicantEdit = async (id) => {
+  const fd = new FormData(qs('#edit-applicant-form'));
+  const body = {};
+  for (const [k, v] of fd.entries()) body[k] = v;
+  qsa('input[type=checkbox]', qs('#edit-applicant-form')).forEach(c => body[c.name] = c.checked);
+  if (qs('#e-shul-contrib-amount')) {
+    body.shul_contribution_amount = qs('#e-shul-contrib-amount').value === '' ? null : +qs('#e-shul-contrib-amount').value;
+    body.shul_contribution_confirmed = qs('#e-shul-contrib-confirmed').checked;
+  }
+  try { await api(`/applicants/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+// Detaches the applicant from this shul rather than truly deleting the
+// record (see routes/applicants.js's POST /:id/soft-reject) — if they were
+// removed by mistake, or re-enroll with any shul later, an admin can still
+// find and restore them. The shul just sees them gone from their list.
+window.removeApplicantShul = async (id) => {
+  if (!confirm('Remove this applicant from your list? They will no longer appear here.')) return;
+  try { await api(`/applicants/${id}/soft-reject`, { method: 'POST' }); toast('Applicant removed'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+load();
+</script>
+</body>
+</html>

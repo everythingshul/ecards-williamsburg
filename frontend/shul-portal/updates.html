@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Updates · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('shul');
+renderShell('/shul-portal/updates', `
+  <h2>Updates</h2>
+  <div class="card" style="margin-bottom:20px">
+    <h3 style="margin-top:0">Contract Status</h3>
+    <div id="contract-wrap">Loading…</div>
+  </div>
+  <h3>Updates from the Office</h3>
+  <div id="inbox-wrap">Loading…</div>
+`);
+(async () => {
+  const u = Auth.user();
+  try {
+    const { contract } = await api(`/shuls/${u.shul_id}`);
+    if (!contract) { qs('#contract-wrap').innerHTML = '<p class="small-muted">No contract on file yet.</p>'; }
+    else {
+      qs('#contract-wrap').innerHTML = `<p><strong>Status:</strong> ${badge(contract.status, contract.status)}</p>
+        ${contract.signed_at ? `<p>Signed by ${esc(contract.signer_name)} on ${fmtDateTime(contract.signed_at)}</p><button class="btn btn-outline btn-sm" onclick="viewAuthed('/shuls/${u.shul_id}/contract/pdf')">View Signed PDF</button>` : '<p class="small-muted">Awaiting signature.</p>'}`;
+    }
+  } catch (err) { qs('#contract-wrap').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+})();
+loadUpdatesInbox('inbox-wrap');
+</script>
+</body>
+</html>

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Form Builder · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+// Read-only (can_view but not can_edit) hides every mutating control —
+// New/Edit/Activate/Deactivate — rather than showing them and letting the
+// backend's requirePermission('forms','can_edit') 403 on click. "Locked
+// out" (no can_view at all) never reaches this page at all: the nav item
+// is hidden (see app.js's NAV_ITEMS) and the backend 403s the whole /forms
+// router before any of this runs.
+const canEditForms = Auth.can('forms', 'can_edit');
+renderShell('/admin/forms', `
+  <div class="flex-between"><h2>Form Builder</h2>${canEditForms ? '<button class="btn btn-primary btn-sm" id="btn-new">+ New Form</button>' : ''}</div>
+  <p class="small-muted">Build custom forms and set them public, limited to a group of shuls, or a single shul/applicant.</p>
+  <h3>Built-In Application Forms</h3>
+  <p class="small-muted">The fixed shul, store, and applicant application pages — always live, not editable here. Copy the link to share.</p>
+  <div id="builtin-links" style="margin-bottom:22px"></div>
+  <div class="divider"></div>
+  <h3>Custom Forms</h3>
+  <div id="forms-list"></div>
+`);
+
+// The three fixed application flows (see utils/builtinSchemas.js) live at
+// permanent URLs, not as editable rows here — an admin just needs the link
+// to share, not a form to build. Ezras Habayis shares the applicant schema
+// but has its own separate public URL/shul (see utils/ezrasHabayis.js).
+const BUILTIN_LINKS = [
+  { label: 'Shul Application', path: '/apply' },
+  { label: 'Store Application', path: '/apply-store' },
+  { label: 'Applicant Application', path: '/apply-ezras-habayis' },
+];
+function renderBuiltinLinks() {
+  qs('#builtin-links').innerHTML = BUILTIN_LINKS.map(({ label, path }) => {
+    const url = location.origin + path;
+    return `<div class="card" style="margin-bottom:10px">
+      <div class="flex-between">
+        <div><strong>${esc(label)}</strong><br><span class="small-muted">${esc(url)}</span></div>
+        <div class="pill-row">
+          <a class="btn btn-sm btn-outline" href="${esc(path)}" target="_blank">Open</a>
+          <button class="btn btn-sm btn-outline" onclick="copyBuiltinLink('${esc(url)}')">Copy Link</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+window.copyBuiltinLink = async (url) => {
+  try { await navigator.clipboard.writeText(url); toast('Link copied'); }
+  catch { toast(url); }
+};
+renderBuiltinLinks();
+
+let fieldDraft = [];
+let formsCache = [];
+let seasonsCache = [];
+
+// Only relevant for forms created before #9 removed the type picker below —
+// any of those three types can still exist on old rows; new forms are
+// always 'general' and fall back to that label (see load()).
+const SECTION_LABEL = { shul_application: 'Shul Application', store_application: 'Store Application', applicant_application: 'Applicant Application' };
+// Every custom form previews through the generic slug-driven renderer —
+// the fixed public pages (apply.html etc.) no longer read from any form
+// row at all (see utils/builtinSchemas.js), so there's no "this form is
+// currently live at the fixed URL" case to special-case anymore.
+function previewLink(f) { return '/form?slug=' + esc(f.slug); }
+function scheduleStatus(f) {
+  const now = new Date();
+  if (!f.is_active) return badge('inactive', 'rejected');
+  if (f.opens_at && now < new Date(f.opens_at)) return badge(`opens ${fmtDate(f.opens_at)}`, 'pending');
+  if (f.closes_at && now > new Date(f.closes_at)) return badge('closed', 'rejected');
+  return badge('open now', 'active');
+}
+
+async function load() {
+  const [{ forms }, { seasons }] = await Promise.all([api('/forms'), api('/seasons')]);
+  formsCache = forms;
+  seasonsCache = seasons;
+  const seasonName = (id) => seasons.find(s => s.id === id)?.name || 'no season';
+  qs('#forms-list').innerHTML = forms.length ? forms.map(f => `<div class="card" style="margin-bottom:12px">
+      <div class="flex-between">
+        <div><strong>${esc(f.name)}</strong> <span class="small-muted">/${esc(f.slug)}</span><br>
+          <span class="small-muted">${esc(SECTION_LABEL[f.type] || 'General Form')} · ${esc(f.visibility)} · ${esc(seasonName(f.season_id))} · ${f.schema_json.length} field(s)${f.opens_at ? ` · opens ${fmtDate(f.opens_at)}` : ''}${f.closes_at ? ` · closes ${fmtDate(f.closes_at)}` : ''}</span></div>
+        <div class="pill-row">
+          ${scheduleStatus(f)}
+          <a class="btn btn-sm btn-outline" href="${previewLink(f)}" target="_blank">Preview Link</a>
+          <button class="btn btn-sm btn-outline" onclick="openEditForm('${f.id}')">${canEditForms ? 'Edit' : 'View'}</button>
+          <button class="btn btn-sm btn-outline" onclick="openResponses('${f.id}')">Responses</button>
+          ${canEditForms ? `<button class="btn btn-sm btn-outline" onclick="toggleForm('${f.id}', ${f.is_active ? 'false' : 'true'})">${f.is_active ? 'Deactivate' : 'Activate'}</button>` : ''}
+        </div>
+      </div>
+    </div>`).join('') : '<p class="small-muted">No forms yet.</p>';
+}
+window.toggleForm = async (id, activate) => { try { await api(`/forms/${id}`, { method: 'PUT', body: { is_active: activate === 'true' } }); load(); } catch (err) { toast(err.message, true); } };
+
+qs('#btn-new')?.addEventListener('click', () => {
+  fieldDraft = [{ key: '', label: '', type: 'text', required: false }];
+  openModal('New Form', formBody(), `<button class="btn btn-primary btn-sm" onclick="createForm()">Create Form</button>`);
+  renderFields();
+});
+
+window.openEditForm = (id) => {
+  const f = formsCache.find(x => x.id === id);
+  if (!f) return;
+  fieldDraft = JSON.parse(JSON.stringify(f.schema_json));
+  // Read-only: wrap the whole body in a disabled <fieldset> so every input,
+  // select, and the "+ Add Field"/remove-field buttons rendered inside it
+  // (including ones renderFields() adds afterward) are inert — same content,
+  // genuinely can't be touched, rather than showing live controls that just
+  // 403 on submit.
+  const body = canEditForms ? formBody({ ...f, editing: true }) : `<fieldset disabled style="border:0;padding:0;margin:0">${formBody({ ...f, editing: true })}</fieldset>`;
+  openModal(canEditForms ? 'Edit Form' : 'View Form (read-only)', body, canEditForms ? `<button class="btn btn-primary btn-sm" onclick="saveEditForm('${id}')">Save</button>` : '');
+  renderFields();
+};
+window.saveEditForm = async (id) => {
+  // datetime-local inputs give wall-clock time with no timezone — resolve
+  // against the browser's own timezone into a real UTC instant before
+  // sending, since the server (a different timezone on Render) compares
+  // opens_at/closes_at as absolute instants, not wall-clock strings.
+  const opensVal = qs('#f-opens').value, closesVal = qs('#f-closes').value;
+  const body = {
+    name: qs('#f-name').value, visibility: qs('#f-visibility').value, schema: fieldDraft, season_id: qs('#f-season').value, slug: qs('#f-slug').value,
+    opens_at: opensVal ? new Date(opensVal).toISOString() : null, closes_at: closesVal ? new Date(closesVal).toISOString() : null,
+  };
+  try { await api(`/forms/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+function toLocalInputValue(iso) { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
+
+function formBody(existing = null) {
+  return `
+    <label>Form Name *</label><input id="f-name" value="${existing ? esc(existing.name) : ''}">
+    ${existing?.editing && SECTION_LABEL[existing.type] ? `<p class="small-muted">${esc(SECTION_LABEL[existing.type])} — built before general forms replaced this category; keeps behaving the same way.</p>` : ''}
+    <label>Visibility</label><select id="f-visibility"><option value="public" ${existing?.visibility==='public'?'selected':''}>Public (anyone with the link)</option><option value="group" ${existing?.visibility==='group'?'selected':''}>Group of Shuls</option><option value="individual" ${existing?.visibility==='individual'?'selected':''}>Individual Shul</option></select>
+    <label>Season *</label><select id="f-season">${seasonsCache.map(s => `<option value="${s.id}" ${(existing ? existing.season_id === s.id : s.is_active) ? 'selected' : ''}>${esc(s.name)}${s.is_active?' (active)':''}</option>`).join('')}</select>
+    <label>URL Slug *</label><input id="f-slug" placeholder="e.g. shul-registration-2026" value="${existing ? esc(existing.slug) : ''}">
+    ${existing?.editing ? `
+    <div class="grid-2">
+      <div><label>Opens <span class="small-muted">(blank = always open)</span></label><input type="datetime-local" id="f-opens" value="${toLocalInputValue(existing.opens_at)}"></div>
+      <div><label>Closes <span class="small-muted">(blank = never closes)</span></label><input type="datetime-local" id="f-closes" value="${toLocalInputValue(existing.closes_at)}"></div>
+    </div>` : ''}
+    <div class="divider"></div>
+    <div class="flex-between"><h4 style="margin:0">Fields</h4><button type="button" class="btn btn-sm btn-outline" onclick="addField()">+ Add Field</button></div>
+    <div id="field-list"></div>
+  `;
+}
+// 'header' and 'image' are presentational blocks, not real inputs — no Field
+// Key (nothing to submit under), no Required (nothing to require). They
+// still live in the same schema array/order as real fields, so an admin can
+// interleave section headings and images between groups of fields.
+const BLOCK_TYPES = ['header', 'image'];
+// One option per line in the textarea, "value|label" (or just "label" to
+// use the same text for both) — round-tripped to/from field.options
+// ({value,label}[]) so a select field's real dropdown values can differ
+// from what's displayed (e.g. home_for_yomtov: 1|Yes).
+function optionsToText(options) { return (options || []).map(o => (o.value === o.label ? o.label : `${o.value}|${o.label}`)).join('\n'); }
+function parseOptionsText(text) {
+  return String(text || '').split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+    const idx = line.indexOf('|');
+    return idx === -1 ? { value: line, label: line } : { value: line.slice(0, idx).trim(), label: line.slice(idx + 1).trim() };
+  });
+}
+function renderFields() {
+  qs('#field-list').innerHTML = fieldDraft.map((f, i) => {
+    const isBlock = BLOCK_TYPES.includes(f.type);
+    const isImage = f.type === 'image';
+    const isNumber = f.type === 'number';
+    const isSelect = f.type === 'select';
+    return `<div class="card" style="margin:8px 0;padding:12px">
+      <div class="grid-2">
+        ${isBlock ? '' : `<div><label style="margin-top:0">Field Key</label><input value="${esc(f.key)}" onchange="fieldDraft[${i}].key=this.value"></div>`}
+        <div style="${isBlock ? 'grid-column:1/-1' : ''}"><label style="margin-top:0">${isImage ? 'Alt Text' : 'Label'}</label><input value="${esc(f.label)}" onchange="fieldDraft[${i}].label=this.value"></div>
+      </div>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Type</label><select onchange="fieldDraft[${i}].type=this.value; renderFields()">
+          ${['text','email','tel','number','textarea','checkbox','select','header','image'].map(t => `<option ${f.type===t?'selected':''}>${t}</option>`).join('')}
+        </select></div>
+        ${isBlock ? '' : `<div><label style="margin-top:0">Required</label><select onchange="fieldDraft[${i}].required=this.value==='1'"><option value="1" ${f.required?'selected':''}>Yes</option><option value="0" ${!f.required?'selected':''}>No</option></select></div>`}
+      </div>
+      <div style="margin-top:8px"><label style="margin-top:0">Alignment</label><select onchange="fieldDraft[${i}].align=this.value||undefined">
+        <option value="" ${!f.align?'selected':''}>Left (default)</option>
+        <option value="center" ${f.align==='center'?'selected':''}>Center</option>
+        <option value="right" ${f.align==='right'?'selected':''}>Right</option>
+      </select></div>
+      ${isBlock ? '' : `<div class="checkbox-row" style="margin-top:8px">
+        <input type="checkbox" id="fd-override-${i}" ${f.admin_override?'checked':''} onchange="fieldDraft[${i}].admin_override=this.checked">
+        <label style="margin:0" for="fd-override-${i}">Admin can override — skip this field's requirement when an admin adds/imports on someone's behalf</label>
+      </div>`}
+      ${isNumber ? `<div class="grid-2" style="margin-top:8px">
+        <div><label style="margin-top:0">Minimum <span class="small-muted">(optional)</span></label><input type="number" value="${f.min ?? ''}" onchange="fieldDraft[${i}].min=this.value===''?undefined:+this.value"></div>
+        <div><label style="margin-top:0">Maximum <span class="small-muted">(optional)</span></label><input type="number" value="${f.max ?? ''}" onchange="fieldDraft[${i}].max=this.value===''?undefined:+this.value"></div>
+      </div>` : ''}
+      ${isSelect ? `<div style="margin-top:8px">
+        <label style="margin-top:0">Options <span class="small-muted">(one per line — "value|label", or just a label to use it as both)</span></label>
+        <textarea rows="4" onchange="updateFieldOptions(${i}, this.value)">${esc(optionsToText(f.options))}</textarea>
+        <label style="margin-top:8px">Expected Answer <span class="small-muted">(optional — for review only, never shown to whoever fills out the form)</span></label>
+        <select onchange="fieldDraft[${i}].expectedAnswer=this.value||undefined">
+          <option value="">(none)</option>
+          ${(f.options||[]).map(o => `<option value="${esc(o.value)}" ${f.expectedAnswer===o.value?'selected':''}>${esc(o.label)}</option>`).join('')}
+        </select>
+      </div>` : ''}
+      ${isImage ? `<div style="margin-top:8px">
+        <input type="file" accept="image/*" onchange="uploadFieldImage(${i}, this)">
+        ${f.url ? `<img src="${esc(f.url)}" style="max-width:200px;max-height:120px;display:block;margin-top:8px;border-radius:6px">` : '<p class="small-muted">No image uploaded yet.</p>'}
+      </div>` : ''}
+      <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="removeField(${i})">Remove</button>
+    </div>`;
+  }).join('');
+}
+window.updateFieldOptions = (i, text) => { fieldDraft[i].options = parseOptionsText(text); renderFields(); };
+window.addField = () => { fieldDraft.push({ key: '', label: '', type: 'text', required: false }); renderFields(); };
+window.removeField = (i) => { fieldDraft.splice(i, 1); renderFields(); };
+window.uploadFieldImage = async (i, input) => {
+  const file = input.files[0];
+  if (!file) return;
+  const fd = new FormData(); fd.append('image', file);
+  try {
+    const { url } = await api('/forms/upload-image', { method: 'POST', isForm: true, body: fd });
+    fieldDraft[i].url = url;
+    renderFields();
+    toast('Image uploaded');
+  } catch (err) { toast(err.message, true); }
+};
+
+window.createForm = async () => {
+  const body = { name: qs('#f-name').value, visibility: qs('#f-visibility').value, slug: qs('#f-slug').value, schema: fieldDraft, season_id: qs('#f-season').value };
+  try { await api('/forms', { method: 'POST', body }); toast('Form created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+// Every raw submission to this form — the exportable "response table",
+// independent of whether the submission also created a real shul/applicant/
+// store record (see recordFormResponse() server-side). expectedAnswer is
+// admin-only config (see the field editor above) — it's checked here, on
+// the admin-only Responses view, and never sent to the public form itself
+// (routes/forms.js strips it before any public response).
+let responsesState = null;
+
+// Rebuilds just the response rows against the current search filter — a
+// plain client-side substring match across every visible field (plus the
+// submitted date and which record type it created, if any), since these
+// response tables are rarely more than a few hundred rows.
+function renderResponseRows() {
+  const { schema, responses, filter } = responsesState;
+  const q = (filter || '').trim().toLowerCase();
+  const filtered = !q ? responses : responses.filter(r => {
+    if (String(r.entity_type || 'response only').toLowerCase().includes(q)) return true;
+    if (fmtDateTime(r.created_at).toLowerCase().includes(q)) return true;
+    return schema.some(fld => String(r.data[fld.key] ?? '').toLowerCase().includes(q));
+  });
+  if (!filtered.length) return `<p class="small-muted">${responses.length ? 'No responses match your search.' : 'No responses yet.'}</p>`;
+  return `<div style="overflow-x:auto"><table><thead><tr><th>Submitted</th><th>Record</th>${schema.map(fld => `<th>${esc(fld.label || fld.key)}</th>`).join('')}<th></th></tr></thead><tbody>
+      ${filtered.map(r => `<tr><td>${fmtDateTime(r.created_at)}</td><td>${r.entity_type ? esc(r.entity_type) : '<span class="small-muted">response only</span>'}</td>
+        ${schema.map(fld => {
+          const val = r.data[fld.key];
+          const matched = fld.expectedAnswer !== undefined && fld.expectedAnswer !== '' && String(val ?? '') === String(fld.expectedAnswer);
+          return `<td>${esc(val ?? '')}${matched ? ' ' + badge('matches expected', 'active') : ''}</td>`;
+        }).join('')}
+        <td><button class="btn btn-sm btn-outline" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteResponse('${r.id}')">Delete</button></td>
+      </tr>`).join('')}
+    </tbody></table></div>`;
+}
+// Updates the already-open modal in place (row count in the title, the
+// table body) — never re-opens it, so filtering/deleting never stacks a
+// second modal on top of the first.
+function refreshResponsesUI() {
+  const table = qs('#resp-table');
+  if (table) table.innerHTML = renderResponseRows();
+  const titleEl = document.querySelector('#ec-modal .modal-header h3');
+  if (titleEl) titleEl.textContent = `${responsesState.name}: Responses (${responsesState.responses.length})`;
+}
+
+window.openResponses = async (id) => {
+  const f = formsCache.find(x => x.id === id);
+  if (!f) return;
+  try {
+    const { responses } = await api(`/forms/${id}/responses`);
+    const schema = f.schema_json.filter(fld => !['header', 'image'].includes(fld.type));
+    responsesState = { formId: id, name: f.name, slug: f.slug, schema, responses, filter: '' };
+    const body = `<input id="resp-filter" placeholder="Search responses…" style="margin-bottom:12px;width:100%;max-width:340px">
+      <div id="resp-table">${renderResponseRows()}</div>`;
+    const footer = `<button class="btn btn-outline btn-sm" onclick="downloadAuthed('/forms/${id}/responses/export','${esc(f.slug || 'form')}-responses.xlsx')">Export Excel</button>`;
+    openModal(`${f.name}: Responses (${responses.length})`, body, footer, { wide: true });
+    qs('#resp-filter').addEventListener('input', (e) => { responsesState.filter = e.target.value; refreshResponsesUI(); });
+  } catch (err) { toast(err.message, true); }
+};
+
+window.deleteResponse = async (responseId) => {
+  if (!responsesState) return;
+  if (!confirm('Delete this response? This removes only the logged submission row — any shul/applicant/store record it created stays and must be deleted separately from its own list.')) return;
+  try {
+    await api(`/forms/${responsesState.formId}/responses/${responseId}`, { method: 'DELETE' });
+    responsesState.responses = responsesState.responses.filter(r => r.id !== responseId);
+    refreshResponsesUI();
+    toast('Response deleted');
+  } catch (err) { toast(err.message, true); }
+};
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Site Content · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+if (!Auth.can('site_content')) { location.href = '/admin/dashboard'; }
+// Read-only (can_view but not can_edit): the entire page is wrapped in a
+// disabled <fieldset>, which natively inerts every input/textarea/select/
+// button inside it (including the "+ Add …" buttons for buttons/schedule
+// cards/FAQ items) — same content, genuinely can't be touched, rather than
+// live controls that just 403 on save.
+const canEditContent = Auth.can('site_content', 'can_edit');
+renderShell('/admin/site-content', `
+  <h2>Site Content</h2>
+  <fieldset id="content-fieldset" ${canEditContent ? '' : 'disabled'} style="border:0;padding:0;margin:0">
+    <div class="card">
+      <h3>Hero Section</h3>
+      <p class="small-muted">The large banner at the top of the homepage.</p>
+      <label>Eyebrow Text <span class="small-muted">(small text above the headline; leave blank to use the organization name)</span></label>
+      <input id="content-hero-eyebrow" placeholder="e.g. Kipas Hair BP Platform">
+      <label>Headline <span class="small-muted">(leave blank to use the organization name)</span></label>
+      <input id="content-hero-heading" placeholder="e.g. Kipas Hair BP Platform">
+      <label style="margin-top:14px">Buttons <span class="small-muted">(leave empty to use the default set)</span></label>
+      <div id="hero-buttons-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addContentButton('hero')">+ Add Button</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveHeroSection()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Linked Image</h3>
+      <p class="small-muted">An image shown on the public homepage, with an optional button linking to it at full size. Leave no image uploaded to not show this section at all.</p>
+      <div id="homepage-image-preview" style="margin-bottom:10px"></div>
+      <input type="file" id="homepage-image-file" accept="image/*">
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="uploadHomepageImage()">Upload Image</button>
+        <button class="btn btn-sm btn-outline" id="btn-remove-homepage-image" style="display:none" onclick="removeHomepageImage()">Remove</button>
+      </div>
+      <label style="margin-top:14px">Alt Text <span class="small-muted">(for screen readers)</span></label>
+      <input id="homepage-image-alt" placeholder="e.g. Our volunteers at the annual dinner">
+      <div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="homepage-image-button-enabled"><label style="margin:0">Show a button to view the image</label></div>
+      <label>Button Text</label>
+      <input id="homepage-image-button-text" placeholder="e.g. View Photo">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveHomepageImageSettings()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Schedule Section</h3>
+      <p class="small-muted">The "When applications are open" cards on the homepage. Each card shows the open/close window of the form it's linked to.</p>
+      <label>Heading <span class="small-muted">(leave blank for the default)</span></label>
+      <input id="content-schedule-heading" placeholder="e.g. When applications are open">
+      <label style="margin-top:14px">Cards</label>
+      <div id="schedule-items-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addScheduleItem()">+ Add Card</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveScheduleSection()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Header Buttons</h3>
+      <p class="small-muted">Shown at the top of the public homepage. Leave empty to use the default ("Sign In").</p>
+      <div id="header-buttons-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addContentButton('header')">+ Add Button</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:10px;margin-left:8px" onclick="saveContentButtons('header')">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Footer Buttons</h3>
+      <p class="small-muted">Shown at the bottom of the public homepage. Leave empty to use the default set.</p>
+      <div id="footer-buttons-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addContentButton('footer')">+ Add Button</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:10px;margin-left:8px" onclick="saveContentButtons('footer')">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>About Section</h3>
+      <label>Heading <span class="small-muted">(leave blank for the default)</span></label>
+      <input id="content-about-heading" placeholder="e.g. About">
+      <label>About Text <span class="small-muted">(leave blank to use the default mission statement)</span></label>
+      <textarea id="content-about" rows="4"></textarea>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveAboutText()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="flex-between"><h3 style="margin:0">FAQ</h3><a href="/faq" target="_blank" class="btn btn-sm btn-outline">View Public Page</a></div>
+      <p class="small-muted">Shown at <code>/faq</code>.</p>
+      <div id="faq-items-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addFaqItem()">+ Add Question</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:10px;margin-left:8px" onclick="saveFaqItems()">Save</button>
+    </div>
+  </fieldset>
+  <div class="card" style="margin-top:16px">
+    <div class="flex-between"><h3 style="margin:0">Contact Form Submissions</h3><a href="/contact" target="_blank" class="btn btn-sm btn-outline">View Public Page</a></div>
+    <p class="small-muted">Every submission also emails the organization's Support Email address (Settings &gt; Organization), if one is set.</p>
+    <div id="contact-submissions-list" style="margin-top:10px">Loading…</div>
+  </div>
+`);
+
+const CONTENT_BUTTON_SETTING_KEY = { header: 'header_nav_buttons', footer: 'footer_nav_buttons', hero: 'cta_buttons' };
+// Mirrors the fallback values in frontend/index.html — shown here so the admin
+// edits/removes what's actually live instead of starting from a blank slate.
+const DEFAULT_HEADER_BUTTONS = [{ label: 'Sign In', url: '/login' }];
+const DEFAULT_FOOTER_BUTTONS = [
+  { label: 'Register a Shul', url: '/apply' },
+  { label: 'Apply as a Store', url: '/apply-store' },
+  { label: 'Ezras Habayis Application', url: '/apply-ezras-habayis' },
+  { label: 'FAQ', url: '/faq' },
+  { label: 'Contact Us', url: '/contact' },
+  { label: 'Sign In', url: '/login' },
+];
+const DEFAULT_CTA_BUTTONS = [
+  { label: 'Register Your Shul', url: '/apply' },
+  { label: 'Apply as a Participating Store', url: '/apply-store' },
+  { label: 'Ezras Habayis Application', url: '/apply-ezras-habayis' },
+  { label: 'Sign In', url: '/login' },
+];
+const DEFAULT_ABOUT_TEXT = "We exist to make it simple, dignified, and reliable for shuls to help their families before Yom Tov. Every shul that signs on gets a clear process, every applicant gets a fair and timely answer, and every card is tracked from issuance to the register, so generosity never gets lost in paperwork.";
+const DEFAULT_SCHEDULE_ITEMS = [
+  { formSlug: 'shul-application', label: 'Shul Registration' },
+  { formSlug: 'store-application', label: 'Store Application' },
+  { formSlug: 'ezras-habayis-application', label: 'Ezras Habayis Application' },
+];
+let buttonDrafts = { header: [], footer: [], hero: [] };
+let faqItemsDraft = [];
+let scheduleItemsDraft = [];
+let allFormsForSchedule = [];
+function wireButtonInputs(kind) {
+  const draft = buttonDrafts[kind];
+  qsa(`#${kind}-buttons-list .cb-label`).forEach(el => el.addEventListener('input', () => { draft[+el.dataset.idx].label = el.value; }));
+  qsa(`#${kind}-buttons-list .cb-url`).forEach(el => el.addEventListener('input', () => { draft[+el.dataset.idx].url = el.value; }));
+}
+function renderContentButtons(kind) {
+  const draft = buttonDrafts[kind];
+  qs(`#${kind}-buttons-list`).innerHTML = draft.length ? draft.map((b, i) => `<div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+      <input placeholder="Label" value="${esc(b.label||'')}" style="flex:1" class="cb-label" data-idx="${i}">
+      <input placeholder="/url or https://…" value="${esc(b.url||'')}" style="flex:1" class="cb-url" data-idx="${i}">
+      <button type="button" class="btn btn-sm btn-outline" onclick="removeContentButton('${kind}',${i})">Remove</button>
+    </div>`).join('') : '<p class="small-muted">No buttons — none will show on the site.</p>';
+  wireButtonInputs(kind);
+}
+window.addContentButton = (kind) => {
+  buttonDrafts[kind].push({ label: '', url: '' });
+  renderContentButtons(kind);
+};
+window.removeContentButton = (kind, i) => {
+  buttonDrafts[kind].splice(i, 1);
+  renderContentButtons(kind);
+};
+window.saveContentButtons = async (kind) => {
+  const draft = buttonDrafts[kind].filter(b => b.label && b.url);
+  try { await api('/site-content', { method: 'PUT', body: { [CONTENT_BUTTON_SETTING_KEY[kind]]: JSON.stringify(draft) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+window.saveHeroSection = async () => {
+  const draft = buttonDrafts.hero.filter(b => b.label && b.url);
+  try {
+    await api('/site-content', { method: 'PUT', body: {
+      cta_buttons: JSON.stringify(draft),
+      homepage_hero_eyebrow: qs('#content-hero-eyebrow').value,
+      homepage_hero_heading: qs('#content-hero-heading').value,
+    } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+// Two kinds of card: 'form' looks up a real form's own scheduling
+// (open/opens/closes) and renders it automatically on the homepage;
+// 'custom' is just whatever text is typed here — for anything on the
+// schedule that isn't itself a submittable form (a deadline reminder, an
+// event date, a note). Items saved before this distinction existed have no
+// `type` at all and are treated as 'form', same as they always behaved.
+function renderScheduleItems() {
+  const options = allFormsForSchedule.map(f => `<option value="${esc(f.slug)}">${esc(f.name)}</option>`).join('');
+  qs('#schedule-items-list').innerHTML = scheduleItemsDraft.length ? scheduleItemsDraft.map((it, i) => {
+    const type = it.type || 'form';
+    return `<div class="card" style="margin:8px 0;padding:12px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="si-type" data-idx="${i}" style="max-width:180px"><option value="form" ${type==='form'?'selected':''}>Linked to a form</option><option value="custom" ${type==='custom'?'selected':''}>Custom</option></select>
+        <input placeholder="Card label" value="${esc(it.label||'')}" style="flex:1" class="si-label" data-idx="${i}">
+        <button type="button" class="btn btn-sm btn-outline" onclick="removeScheduleItem(${i})">Remove</button>
+      </div>
+      ${type === 'form'
+        ? `<select class="si-slug" data-idx="${i}" style="margin-top:8px">${options}</select>`
+        : `<input class="si-window" data-idx="${i}" placeholder="Window text (optional) — e.g. Opens September 1st" style="margin-top:8px">
+           <textarea class="si-description" data-idx="${i}" placeholder="Description (optional)" rows="2" style="margin-top:8px"></textarea>`}
+    </div>`;
+  }).join('') : '<p class="small-muted">No cards — the schedule section will be empty.</p>';
+  qsa('.si-type').forEach(el => el.addEventListener('change', () => { scheduleItemsDraft[+el.dataset.idx].type = el.value; renderScheduleItems(); }));
+  qsa('.si-label').forEach(el => el.addEventListener('input', () => { scheduleItemsDraft[+el.dataset.idx].label = el.value; }));
+  qsa('.si-slug').forEach(el => { el.value = scheduleItemsDraft[+el.dataset.idx].formSlug || ''; el.addEventListener('change', () => { scheduleItemsDraft[+el.dataset.idx].formSlug = el.value; }); });
+  qsa('.si-window').forEach(el => { el.value = scheduleItemsDraft[+el.dataset.idx].window || ''; el.addEventListener('input', () => { scheduleItemsDraft[+el.dataset.idx].window = el.value; }); });
+  qsa('.si-description').forEach(el => { el.value = scheduleItemsDraft[+el.dataset.idx].description || ''; el.addEventListener('input', () => { scheduleItemsDraft[+el.dataset.idx].description = el.value; }); });
+}
+window.addScheduleItem = () => {
+  scheduleItemsDraft.push({ type: 'form', label: '', formSlug: allFormsForSchedule[0]?.slug || '' });
+  renderScheduleItems();
+};
+window.removeScheduleItem = (i) => {
+  scheduleItemsDraft.splice(i, 1);
+  renderScheduleItems();
+};
+window.saveScheduleSection = async () => {
+  const draft = scheduleItemsDraft.filter(it => it.label && ((it.type || 'form') === 'form' ? it.formSlug : true));
+  try {
+    await api('/site-content', { method: 'PUT', body: {
+      homepage_schedule_heading: qs('#content-schedule-heading').value,
+      schedule_items: JSON.stringify(draft),
+    } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+
+function renderFaqItems() {
+  qs('#faq-items-list').innerHTML = faqItemsDraft.length ? faqItemsDraft.map((f, i) => `<div class="card" style="margin:8px 0;padding:12px">
+      <label style="margin-top:0">Question</label><input class="faq-q" data-idx="${i}" value="${esc(f.question||'')}">
+      <label>Answer</label><textarea class="faq-a" data-idx="${i}" rows="2">${esc(f.answer||'')}</textarea>
+      <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="removeFaqItem(${i})">Remove</button>
+    </div>`).join('') : '<p class="small-muted">No questions yet.</p>';
+  qsa('.faq-q').forEach(el => el.addEventListener('input', () => { faqItemsDraft[+el.dataset.idx].question = el.value; }));
+  qsa('.faq-a').forEach(el => el.addEventListener('input', () => { faqItemsDraft[+el.dataset.idx].answer = el.value; }));
+}
+window.addFaqItem = () => { faqItemsDraft.push({ question: '', answer: '' }); renderFaqItems(); };
+window.removeFaqItem = (i) => { faqItemsDraft.splice(i, 1); renderFaqItems(); };
+window.saveFaqItems = async () => {
+  const draft = faqItemsDraft.filter(f => f.question && f.answer);
+  try { await api('/site-content', { method: 'PUT', body: { faq_items: JSON.stringify(draft) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+
+window.saveAboutText = async () => {
+  try {
+    await api('/site-content', { method: 'PUT', body: { homepage_about_text: qs('#content-about').value, homepage_about_heading: qs('#content-about-heading').value } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+
+let homepageImageUrl = '';
+function renderHomepageImagePreview(url) {
+  homepageImageUrl = url || '';
+  qs('#homepage-image-preview').innerHTML = homepageImageUrl
+    ? `<img src="${esc(homepageImageUrl)}" style="max-width:240px;max-height:160px;border-radius:8px;border:1px solid var(--border)">`
+    : '<p class="small-muted">No image uploaded yet.</p>';
+  qs('#btn-remove-homepage-image').style.display = homepageImageUrl ? 'inline-flex' : 'none';
+}
+window.uploadHomepageImage = async () => {
+  const file = qs('#homepage-image-file').files[0];
+  if (!file) return toast('Choose an image file first', true);
+  const fd = new FormData(); fd.append('image', file);
+  try {
+    const { url } = await api('/site-content/homepage-image', { method: 'POST', isForm: true, body: fd });
+    renderHomepageImagePreview(url);
+    await api('/site-content', { method: 'PUT', body: { homepage_image_url: url } });
+    toast('Image uploaded'); qs('#homepage-image-file').value = '';
+  } catch (err) { toast(err.message, true); }
+};
+window.removeHomepageImage = async () => {
+  if (!confirm('Remove this image? The linked-image section will stop showing on the homepage.')) return;
+  try { await api('/site-content', { method: 'PUT', body: { homepage_image_url: '' } }); renderHomepageImagePreview(''); toast('Removed'); } catch (err) { toast(err.message, true); }
+};
+window.saveHomepageImageSettings = async () => {
+  try {
+    await api('/site-content', { method: 'PUT', body: {
+      homepage_image_alt: qs('#homepage-image-alt').value,
+      homepage_image_button_enabled: qs('#homepage-image-button-enabled').checked ? '1' : '0',
+      homepage_image_button_text: qs('#homepage-image-button-text').value || 'View',
+    } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadContactSubmissions() {
+  try {
+    const { submissions } = await api('/contact');
+    qs('#contact-submissions-list').innerHTML = submissions.length ? submissions.map(s => `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div class="flex-between"><strong>${esc(s.name)}</strong><span class="small-muted">${fmtDateTime(s.created_at)}</span></div>
+        <div class="small-muted">${esc(s.email)}</div>
+        <p style="margin-top:6px;white-space:pre-wrap">${esc(s.message)}</p>
+      </div>`).join('') : '<p class="small-muted">No submissions yet.</p>';
+  } catch (err) { qs('#contact-submissions-list').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+}
+
+async function load() {
+  const [{ settings }, { forms }, { organization }] = await Promise.all([api('/site-content'), api('/forms'), api('/orgs/me').catch(() => ({ organization: null }))]);
+  const parseList = (v) => { try { const p = JSON.parse(v || '[]'); return Array.isArray(p) ? p : []; } catch { return []; } };
+  const listOrDefault = (v, fallback) => { const p = parseList(v); return p.length ? p : fallback.map(b => ({ ...b })); };
+  const orgName = organization?.name || 'Kipas Hair BP Platform';
+  buttonDrafts.header = listOrDefault(settings.header_nav_buttons, DEFAULT_HEADER_BUTTONS);
+  buttonDrafts.footer = listOrDefault(settings.footer_nav_buttons, DEFAULT_FOOTER_BUTTONS);
+  buttonDrafts.hero = listOrDefault(settings.cta_buttons, DEFAULT_CTA_BUTTONS);
+  faqItemsDraft = parseList(settings.faq_items);
+  allFormsForSchedule = forms.filter(f => f.is_active).map(f => ({ slug: f.slug, name: f.name }));
+  scheduleItemsDraft = listOrDefault(settings.schedule_items, DEFAULT_SCHEDULE_ITEMS);
+  qs('#content-hero-eyebrow').value = settings.homepage_hero_eyebrow || orgName;
+  qs('#content-hero-heading').value = settings.homepage_hero_heading || orgName;
+  qs('#content-schedule-heading').value = settings.homepage_schedule_heading || 'When applications are open';
+  qs('#content-about-heading').value = settings.homepage_about_heading || 'About';
+  qs('#content-about').value = settings.homepage_about_text || DEFAULT_ABOUT_TEXT;
+  qs('#homepage-image-alt').value = settings.homepage_image_alt || '';
+  qs('#homepage-image-button-enabled').checked = settings.homepage_image_button_enabled === '1';
+  qs('#homepage-image-button-text').value = settings.homepage_image_button_text || 'View';
+  renderHomepageImagePreview(settings.homepage_image_url || '');
+  renderContentButtons('header');
+  renderContentButtons('footer');
+  renderContentButtons('hero');
+  renderScheduleItems();
+  renderFaqItems();
+  loadContactSubmissions();
+}
+load();
+</script>
+</body>
+</html>

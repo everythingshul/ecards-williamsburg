@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/analytics', `
+  <div class="flex-between">
+    <h2>Analytics</h2>
+    <select id="an-days">
+      <option value="7">Last 7 days</option>
+      <option value="14">Last 14 days</option>
+      <option value="30" selected>Last 30 days</option>
+      <option value="60">Last 60 days</option>
+      <option value="90">Last 90 days</option>
+    </select>
+  </div>
+  <p class="small-muted">Traffic on the public site — home, apply forms, FAQ, contact, and any custom forms. Counted from an anonymous per-browser id, not tied to any account.</p>
+  <div class="stat-grid" id="an-stats"><div class="small-muted">Loading…</div></div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3 style="margin:0 0 10px">Daily Views</h3>
+    <div style="overflow-x:auto">
+      <table><thead><tr><th>Date</th><th>Views</th></tr></thead>
+      <tbody id="an-daily-tbody"><tr><td colspan="2" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3 style="margin:0 0 10px">Pages</h3>
+    <div style="overflow-x:auto">
+      <table><thead><tr><th>Page</th><th>Views</th><th>Unique Visitors</th></tr></thead>
+      <tbody id="an-pages-tbody"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 10px">Top Referrers</h3>
+    <div id="an-referrers"><p class="small-muted">Loading…</p></div>
+  </div>
+`);
+
+// Known public page paths get a friendlier label than the raw path; a
+// dynamic form's path (e.g. "/form?slug=my-form") shows the slug inline so
+// different custom forms are distinguishable in the table without a lookup.
+const PAGE_LABELS = {
+  '/': 'Home', '/apply': 'Shul Registration', '/apply-store': 'Store Application',
+  '/apply-ezras-habayis': 'Ezras Habayis Application', '/faq': 'FAQ', '/contact': 'Contact Us', '/login': 'Sign In',
+};
+function pageLabel(path) {
+  if (PAGE_LABELS[path]) return PAGE_LABELS[path];
+  const slugMatch = path.match(/^\/form\?slug=(.+)$/);
+  if (slugMatch) return `Form: ${decodeURIComponent(slugMatch[1])}`;
+  return path;
+}
+
+async function loadAnalytics() {
+  const days = qs('#an-days').value;
+  qs('#an-stats').innerHTML = '<div class="small-muted">Loading…</div>';
+  qs('#an-daily-tbody').innerHTML = '<tr><td colspan="2" class="empty-state">Loading…</td></tr>';
+  qs('#an-pages-tbody').innerHTML = '<tr><td colspan="3" class="empty-state">Loading…</td></tr>';
+  qs('#an-referrers').innerHTML = '<p class="small-muted">Loading…</p>';
+  try {
+    const { pages, daily, referrers, totalViews, totalUniqueVisitors } = await api(`/analytics/summary?days=${days}`);
+    qs('#an-stats').innerHTML = [['Total Views', totalViews], ['Unique Visitors', totalUniqueVisitors]]
+      .map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
+
+    const maxViews = Math.max(1, ...daily.map(d => d.views));
+    qs('#an-daily-tbody').innerHTML = daily.slice().reverse().map(d => `<tr>
+        <td>${fmtDate(d.date)}</td>
+        <td style="min-width:200px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1;background:var(--border);border-radius:4px;height:8px;overflow:hidden"><div style="width:${(d.views / maxViews) * 100}%;background:var(--brand-gold-dark);height:100%"></div></div>
+            <span>${d.views}</span>
+          </div>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="2" class="empty-state">No views in this window.</td></tr>';
+
+    qs('#an-pages-tbody').innerHTML = pages.length ? pages.map(p => `<tr><td>${esc(pageLabel(p.path))}</td><td>${p.views}</td><td>${p.uniqueVisitors}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty-state">No pageviews recorded in this window.</td></tr>';
+
+    qs('#an-referrers').innerHTML = referrers.length ? referrers.map(r => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span>${esc(r.host)}</span><strong>${r.count}</strong>
+      </div>`).join('') : '<p class="small-muted">No external referrers recorded in this window.</p>';
+  } catch (err) { toast(err.message, true); }
+}
+qs('#an-days').addEventListener('change', loadAnalytics);
+loadAnalytics();
+</script>
+</body>
+</html>

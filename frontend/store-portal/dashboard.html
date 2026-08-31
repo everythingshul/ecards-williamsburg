@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Portal · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('store');
+renderShell('/store-portal/dashboard', `
+  <h2>Store Overview</h2>
+  <div id="onboarding-banner"></div>
+  <div class="card" id="wrap">Loading…</div>
+`);
+(async () => {
+  const u = Auth.user();
+  try {
+    const { store: s } = await api(`/stores/${u.store_id}`);
+    if ((s.onboarding_step || 0) < 3) {
+      qs('#onboarding-banner').innerHTML = `<div class="card" style="border-color:var(--warn);margin-bottom:16px">
+        <div class="flex-between"><span>Your store setup isn't finished yet.</span><a class="btn btn-sm btn-primary" href="/store-portal/onboarding">Finish Setup</a></div></div>`;
+    }
+    qs('#wrap').innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-tile"><div class="num">${badge(s.setup_status, s.setup_status)}</div><div class="label">Setup Status</div></div>
+      </div>
+      <div class="divider"></div>
+      <h3>Store Info</h3>
+      <p>${esc(s.name)}<br>${esc(s.address||'')} ${esc(s.city||'')}, ${esc(s.state||'')}<br>${esc(s.phone||'')}</p>`;
+  } catch (err) { qs('#wrap').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+})();
+</script>
+</body>
+</html>

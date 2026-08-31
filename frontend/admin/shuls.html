@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shuls · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/shuls', `
+  <div class="flex-between">
+    <h2>Shuls</h2>
+    <div class="pill-row">
+      <button class="btn btn-outline btn-sm" id="btn-template">Download Import Template</button>
+      <button class="btn btn-outline btn-sm" id="btn-import">Mass Upload</button>
+      <button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button>
+      <button class="btn btn-outline btn-sm" id="btn-columns">Customize Columns</button>
+      <button class="btn btn-primary btn-sm" id="btn-new">+ Add Shul</button>
+    </div>
+  </div>
+  <div class="toolbar">
+    <input id="f-search" placeholder="Search name, city, Rav, Gabai…">
+    <select id="f-status"><option value="">All statuses</option><option value="submitted">Submitted</option><option value="contract_sent">Contract Sent</option><option value="contract_signed">Contract Signed</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+    <select id="f-paused"><option value="">Paused: All</option><option value="1">Paused only</option><option value="0">Not paused</option></select>
+    <select id="f-season"></select>
+    <button class="btn btn-outline btn-sm" id="f-dupes">Duplicates</button>
+    <select id="f-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select>
+    <select id="mass-action">
+      <option value="approve">Approve</option>
+      <option value="reject">Reject</option>
+      <option value="set-pending">Set to Pending</option>
+      <option value="invite">Invite to Portal</option>
+      <option value="send-contract">Send Contract</option>
+      <option value="pause">Pause</option>
+      <option value="unpause">Unpause</option>
+      <option value="carry-forward">Carry Forward to Season…</option>
+      <option value="delete">Delete Permanently</option>
+    </select>
+    <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
+  </div>
+  <div id="live-banner"></div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table id="tbl">
+      <thead id="thead"></thead>
+      <tbody id="tbody"><tr><td class="empty-state">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="paginator" id="pager"></div>
+`);
+
+let state = { search:'', status:'', paused:'', season_id:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
+let selected = new Set();
+if (new URLSearchParams(location.search).get('dup') === '1') showDuplicates();
+
+// Every field a column can show, plus how to render it. Which of these
+// show, and in what order, is per-admin (Customize Columns button, saved
+// via attachColumnCustomizer) — same pattern as the Applicants list.
+// A carried-forward shul (source==='carried_forward') that hasn't been
+// approved or rejected yet shows its own invite/contract readiness instead
+// of the plain 'submitted' badge — "invited" tracks portal_user_id
+// (carry-forward no longer creates one automatically, see
+// carryForwardShul in routes/shuls.js), "contract sent" tracks the normal
+// status progression. Once approved/rejected, the ordinary status badge
+// takes back over — there's nothing left to distinguish at that point.
+function carryOverLabel(s) {
+  if (s.source !== 'carried_forward' || ['approved', 'rejected'].includes(s.status)) return null;
+  const invited = !!s.portal_user_id;
+  const contractSent = ['contract_sent', 'contract_signed'].includes(s.status);
+  if (invited && contractSent) return { text: 'All Set', cls: 'active' };
+  if (invited) return { text: 'Invited - No Contract', cls: 'pending' };
+  if (contractSent) return { text: 'Contract Sent - Uninvited', cls: 'pending' };
+  return { text: 'Carried Over', cls: 'pending' };
+}
+function statusCell(s) {
+  const label = carryOverLabel(s);
+  return label ? badge(label.text, label.cls) : badge(s.status, s.status);
+}
+const SHUL_COLUMNS = [
+  { key: 'name', label: 'Shul', sort: 'name_en', render: s => `<strong>${esc(s.name_en)}</strong>${s.name_he ? `<br><span dir="rtl" class="small-muted">${esc(s.name_he)}</span>` : ''}${s.is_paused ? ' ' + badge('paused','paused') : ''}` },
+  { key: 'state_city', label: 'State / City', render: s => `${esc(s.state)}, ${esc(s.city)}` },
+  { key: 'address', label: 'Address', render: s => esc(s.address||'') },
+  { key: 'zip', label: 'Zip', render: s => esc(s.zip||'') },
+  { key: 'rav', label: 'Rav', render: s => `${esc(s.ruv_first_name)} ${esc(s.ruv_last_name)}<br><span class="small-muted">${esc(s.ruv_phone)}</span>` },
+  { key: 'gabai', label: 'Gabai', render: s => `${esc(s.gabai_first_name)} ${esc(s.gabai_last_name)}<br><span class="small-muted">${esc(s.gabai_cell)}</span>` },
+  { key: 'gabai_email', label: 'Gabai Email', render: s => esc(s.gabai_email||'') },
+  { key: 'status', label: 'Status', sort: 'status', render: statusCell },
+  { key: 'slots_allocated', label: 'Slots', sort: 'slots_allocated', render: s => s.slots_allocated ?? 0 },
+  { key: 'applicant_count', label: 'Applicants', render: s => s.applicant_count },
+  { key: 'created_at', label: 'Submitted', sort: 'created_at', render: s => fmtDate(s.created_at) },
+];
+const DEFAULT_SHUL_COLUMNS = ['name','state_city','rav','gabai','status','slots_allocated','applicant_count','created_at'];
+let activeColumns = DEFAULT_SHUL_COLUMNS;
+
+function renderThead() {
+  const cols = activeColumns.map(k => SHUL_COLUMNS.find(c => c.key === k)).filter(Boolean);
+  qs('#thead').innerHTML = `<tr>
+    <th style="width:34px"><input type="checkbox" id="chk-all"></th>
+    ${cols.map(c => `<th ${c.sort ? `data-sort="${c.sort}"` : ''}>${esc(c.label)}</th>`).join('')}
+    <th></th>
+  </tr>`;
+  qs('#chk-all').addEventListener('change', (e) => { qsa('.row-chk:not(:disabled)').forEach(c => { c.checked = e.target.checked; c.dispatchEvent(new Event('change')); }); });
+}
+qs('#thead').parentElement.addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  state.dir = (state.sort === key && state.dir === 'DESC') ? 'ASC' : 'DESC';
+  state.sort = key; load();
+});
+
+async function load() {
+  const params = new URLSearchParams({ search: state.search, status: state.status, paused: state.paused, season_id: state.season_id, sort: state.sort, dir: state.dir, page: state.page, pageSize: state.pageSize });
+  try {
+    const { shuls, total } = await api('/shuls?' + params);
+    const cols = activeColumns.map(k => SHUL_COLUMNS.find(c => c.key === k)).filter(Boolean);
+    if (!shuls.length) { qs('#tbody').innerHTML = `<tr><td colspan="${cols.length+2}" class="empty-state">No shuls found.</td></tr>`; }
+    else qs('#tbody').innerHTML = shuls.map(s => rowHtml(s, cols)).join('');
+    const pages = Math.max(1, Math.ceil(total / state.pageSize));
+    qs('#pager').innerHTML = `<button class="btn btn-sm btn-outline" ${state.page<=1?'disabled':''} onclick="changePage(-1)">Prev</button> Page ${state.page} of ${pages} (${total} total) <button class="btn btn-sm btn-outline" ${state.page>=pages?'disabled':''} onclick="changePage(1)">Next</button>`;
+    qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
+  } catch (err) { toast(err.message, true); }
+}
+function changePage(d) { state.page += d; load(); }
+
+function rowHtml(s, cols) {
+  return `<tr data-shul-id="${s.id}" onclick="openShul('${s.id}')" style="cursor:pointer">
+    <td onclick="event.stopPropagation()"><input type="checkbox" class="row-chk" data-id="${s.id}"></td>
+    ${cols.map(c => `<td>${c.render(s)}</td>`).join('')}
+    <td><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();openShul('${s.id}')">View</button></td>
+  </tr>`;
+}
+
+// The detail popup always fetches fresh data (GET /shuls/:id), but merely
+// opening it never touched the list row underneath — so a shul that
+// changed status entirely outside this page (most commonly: a shul signing
+// their own contract via their public link, which the admin never triggers
+// or sees happen) showed the right thing in the popup but a stale badge in
+// the list until a full reload. Patches just that one row in place with
+// whatever the popup just fetched, so viewing it is enough to catch the
+// list up too.
+function patchShulRow(s) {
+  const tr = qs(`tr[data-shul-id="${s.id}"]`);
+  if (!tr) return;
+  const cols = activeColumns.map(k => SHUL_COLUMNS.find(c => c.key === k)).filter(Boolean);
+  const wasChecked = tr.querySelector('.row-chk')?.checked;
+  tr.outerHTML = rowHtml(s, cols);
+  const chk = qs(`tr[data-shul-id="${s.id}"] .row-chk`);
+  if (chk) { chk.checked = !!wasChecked; chk.addEventListener('change', onCheck); }
+}
+
+function onCheck(e) {
+  const id = e.target.dataset.id;
+  if (e.target.checked) selected.add(id); else selected.delete(id);
+  qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
+  qs('#btn-mass-apply').disabled = selected.size === 0;
+}
+
+qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page = 1; load(); }, 350));
+qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page = 1; load(); });
+qs('#f-paused').addEventListener('change', () => { state.paused = qs('#f-paused').value; state.page = 1; load(); });
+qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; state.page = 1; load(); });
+qs('#f-pagesize').value = state.pageSize;
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; load(); });
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+qs('#btn-template').addEventListener('click', () => downloadAuthed('/shuls/import/template', 'shul_import_template.xlsx'));
+qs('#btn-new').addEventListener('click', () => openShulForm());
+qs('#btn-import').addEventListener('click', () => openImportModal());
+qs('#btn-export').addEventListener('click', () => downloadAuthed('/shuls/export?' + new URLSearchParams({ search: state.search, status: state.status, paused: state.paused, season_id: state.season_id }), 'shuls.xlsx'));
+qs('#f-dupes').addEventListener('click', showDuplicates);
+// One entry per option in #mass-action — confirm() is skipped when null
+// (approve prompts for slots instead, which doubles as its own gate: a
+// null slots value from the cancelled prompt aborts via run() returning
+// null). summarize() turns each endpoint's own count shape into one line.
+const MASS_ACTIONS = {
+  approve: {
+    confirm: null,
+    run: async (ids) => {
+      const slots = prompt('Number of slots to allocate for each selected shul this season:', '0');
+      if (slots === null) return null;
+      return api('/shuls/mass-approve', { method: 'POST', body: { ids, slots_allocated: +slots } });
+    },
+    summarize: r => { let msg = `Approved ${r.approved}, skipped ${r.skipped} (paused, or contract not yet sent)`; if (r.emailErrors) msg += ` — ${r.emailErrors} account setup email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
+  },
+  reject: {
+    confirm: n => `Reject ${n} selected shul(s)?`,
+    run: (ids) => api('/shuls/mass-reject', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Rejected ${r.rejected}, skipped ${r.skipped}` }),
+  },
+  'set-pending': {
+    confirm: n => `Move ${n} selected shul(s) back to pending?`,
+    run: (ids) => api('/shuls/mass-set-pending', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }),
+  },
+  invite: {
+    confirm: n => `Invite ${n} selected shul(s) to the portal? Each gets a portal login (if it doesn't have one yet) and an email with a link to set up their account.`,
+    run: (ids) => api('/shuls/mass-invite', { method: 'POST', body: { ids } }),
+    summarize: r => { let msg = `Invited ${r.invited}, skipped ${r.skipped}`; if (r.emailErrors) msg += ` — ${r.emailErrors} email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
+  },
+  'send-contract': {
+    confirm: n => `Send this season's contract to ${n} selected shul(s)? Each gets an emailed link to review and sign it.`,
+    run: (ids) => api('/shuls/mass-send-contract', { method: 'POST', body: { ids } }),
+    summarize: r => { let msg = `Sent ${r.sent}, skipped ${r.skipped} (no gabai email on file, or already signed)`; if (r.emailErrors) msg += ` — ${r.emailErrors} email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
+  },
+  pause: {
+    confirm: n => `Pause ${n} selected shul(s)?`,
+    run: (ids) => api('/shuls/mass-pause', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Paused ${r.paused}, skipped ${r.skipped}` }),
+  },
+  unpause: {
+    confirm: n => `Unpause ${n} selected shul(s)?`,
+    run: (ids) => api('/shuls/mass-unpause', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Unpaused ${r.unpaused}, skipped ${r.skipped}` }),
+  },
+  delete: {
+    confirm: n => `Permanently delete ${n} selected shul(s)? This removes each shul, its contract, and notes completely and cannot be undone. Their applicants are kept but unlinked.`,
+    run: (ids) => api('/shuls/mass-delete-permanent', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}` }),
+  },
+  'carry-forward': {
+    confirm: null,
+    run: (ids) => openMassCarryForwardModal(ids),
+    summarize: r => {
+      let msg = `Carried forward ${r.carried} shul(s) with ${r.applicantsCarried} applicant(s), skipped ${r.skipped} shul(s)`;
+      if (r.applicantsSkipped) msg += ` (${r.applicantsSkipped} applicant(s) already carried into that season)`;
+      if (r.duplicatesFlagged) msg += ` — ${r.duplicatesFlagged} flagged as possible duplicate(s)`;
+      return { msg, isError: !!r.duplicatesFlagged };
+    },
+  },
+};
+
+// Same action as the single-shul "Carry Forward to Season…" button, run
+// across every selected shul at once — always carries ALL of each shul's
+// current-season applicants (no per-shul picker in a bulk action, same
+// reasoning as mass-approve's one uniform slots_allocated). Resolves to null
+// (aborting the mass-action, matching approve's cancelled-prompt behavior)
+// if the admin closes the modal without submitting.
+function openMassCarryForwardModal(ids) {
+  return new Promise(async (resolve) => {
+    let seasons = [];
+    try { ({ seasons } = await api('/seasons')); } catch { /* season list just won't show options if this fails */ }
+    const body = `<p class="small-muted">Carries all <strong>${ids.length}</strong> selected shul(s) — and every applicant currently under each — into a different season. Each shul reuses a matching shul there if one already exists (by Gabai email, else name), otherwise creates one in pending status. No email is sent — use the "Invite to Portal" and "Send Contract" mass actions afterward when you're ready. Any applicant already carried into that season is skipped, not duplicated.</p>
+      <label>Target Season</label>
+      <select id="mcf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+      <label style="margin-top:12px">Slots Allocated <span class="small-muted">(applied to each shul that needs a new record created there)</span></label>
+      <input id="mcf-slots" type="number" value="0" style="max-width:160px">`;
+    openModal('Carry Forward to Season (Mass)', body, `<button class="btn btn-primary btn-sm" id="mcf-go">Carry Forward</button>`);
+    // openModal/closeModal don't offer an on-close hook, so a plain "click
+    // the backdrop or × instead of submitting" would leave this promise
+    // pending forever — watch for the modal actually leaving the DOM
+    // (however it happens) and resolve(null) then, same as approve's
+    // cancelled-prompt behavior aborts the mass-action cleanly.
+    let resolved = false;
+    const finish = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    const modalEl = document.getElementById('ec-modal');
+    const observer = new MutationObserver(() => {
+      if (modalEl && !document.body.contains(modalEl)) { observer.disconnect(); finish(null); }
+    });
+    observer.observe(document.body, { childList: true });
+    qs('#mcf-go').addEventListener('click', async () => {
+      const season_id = qs('#mcf-season')?.value;
+      if (!season_id) return toast('No season selected', true);
+      try {
+        const r = await api('/shuls/mass-carry-forward', { method: 'POST', body: { ids, season_id, slots_allocated: +qs('#mcf-slots').value || 0 } });
+        observer.disconnect();
+        closeModal();
+        finish(r);
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+qs('#btn-mass-apply').addEventListener('click', async () => {
+  const action = MASS_ACTIONS[qs('#mass-action').value];
+  const ids = Array.from(selected);
+  if (action.confirm && !confirm(action.confirm(ids.length))) return;
+  try {
+    const r = await action.run(ids);
+    if (!r) return;
+    const { msg, isError } = action.summarize(r);
+    toast(msg, !!isError);
+    selected.clear(); load();
+  } catch (err) { toast(err.message, true); }
+});
+
+async function openShul(id) {
+  try {
+    const { shul, notes, contract, applicants, flags } = await api(`/shuls/${id}`);
+    // Match the list route's applicant_count (GET /shuls) — 'incomplete'
+    // (carried forward, not yet re-enrolled this season) isn't a real
+    // submission and shouldn't inflate the count shown on the row.
+    patchShulRow({ ...shul, applicant_count: applicants.filter(a => a.approval_status !== 'incomplete').length });
+    const body = `
+      <div class="tabs" id="stabs">
+        <button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button>
+        <button data-t="contract">Contract</button><button data-t="applicants">Applicants (${applicants.length})</button>
+        <button data-t="messages">Messages</button><button data-t="history">History</button>
+      </div>
+      <div id="tab-info">
+        <div class="grid-2">
+          <div><strong>Status</strong><br>${badge(shul.status, shul.status)} ${shul.is_paused ? badge('paused','paused') : ''}</div>
+          <div><label>Slots Allocated</label><input id="e-slots_allocated" type="number" value="${shul.slots_allocated ?? 0}"></div>
+        </div>
+        <div class="divider"></div>
+        <div class="grid-2">
+          <div><label>Shul Name (English)</label><input id="e-name_en" value="${esc(shul.name_en||'')}"></div>
+          <div><label>Shul Name (Hebrew)</label><input id="e-name_he" value="${esc(shul.name_he||'')}" dir="rtl"></div>
+        </div>
+        <label>Address</label><input id="e-address" value="${esc(shul.address||'')}">
+        <div class="grid-2">
+          <div><label>City</label><input id="e-city" value="${esc(shul.city||'')}"></div>
+          <div><label>State</label><input id="e-state" value="${esc(shul.state||'')}"></div>
+        </div>
+        <label>Zip</label><input id="e-zip" value="${esc(shul.zip||'')}" style="max-width:160px">
+        <div class="divider"></div>
+        <strong>Rav</strong>
+        <div class="grid-2">
+          <div><label>First Name</label><input id="e-ruv_first_name" value="${esc(shul.ruv_first_name||'')}"></div>
+          <div><label>Last Name</label><input id="e-ruv_last_name" value="${esc(shul.ruv_last_name||'')}"></div>
+        </div>
+        <label>Phone</label><input id="e-ruv_phone" value="${esc(shul.ruv_phone||'')}">
+        <label>Address</label><input id="e-ruv_address" value="${esc(shul.ruv_address||'')}">
+        <div class="grid-2">
+          <div><label>City</label><input id="e-ruv_city" value="${esc(shul.ruv_city||'')}"></div>
+          <div><label>State</label><input id="e-ruv_state" value="${esc(shul.ruv_state||'')}"></div>
+        </div>
+        <label>Zip</label><input id="e-ruv_zip" value="${esc(shul.ruv_zip||'')}" style="max-width:160px">
+        <div class="divider"></div>
+        <strong>Gabai</strong>
+        <div class="grid-2">
+          <div><label>First Name</label><input id="e-gabai_first_name" value="${esc(shul.gabai_first_name||'')}"></div>
+          <div><label>Last Name</label><input id="e-gabai_last_name" value="${esc(shul.gabai_last_name||'')}"></div>
+        </div>
+        <div class="grid-2">
+          <div><label>Cell</label><input id="e-gabai_cell" value="${esc(shul.gabai_cell||'')}"></div>
+          <div><label>Email</label><input id="e-gabai_email" value="${esc(shul.gabai_email||'')}"></div>
+        </div>
+        <label>Address</label><input id="e-gabai_address" value="${esc(shul.gabai_address||'')}">
+        <div class="grid-2">
+          <div><label>City</label><input id="e-gabai_city" value="${esc(shul.gabai_city||'')}"></div>
+          <div><label>State</label><input id="e-gabai_state" value="${esc(shul.gabai_state||'')}"></div>
+        </div>
+        <label>Zip</label><input id="e-gabai_zip" value="${esc(shul.gabai_zip||'')}" style="max-width:160px">
+        <div class="divider"></div>
+        <label>Default Minimum Contribution ($) <span class="small-muted">(internal — never shown to this shul; used unless a specific applicant has its own override)</span></label>
+        <input id="e-min_contribution_default" type="number" step="0.01" min="0" value="${shul.min_contribution_default ?? ''}" placeholder="No minimum">
+        <div class="divider"></div>
+        <label>Permanent Comments (internal — carries forward to future seasons)</label>
+        <textarea id="e-permanent_comments" rows="3">${esc(shul.permanent_comments||'')}</textarea>
+        ${flags.length ? `<div class="divider"></div><div style="color:var(--danger)"><strong>&#9888; Duplicate flag open.</strong> Resolve from the Shuls > Duplicates review.</div>` : ''}
+      </div>
+      <div id="tab-notes" style="display:none">
+        <div style="display:flex;gap:8px"><input id="new-note" placeholder="Add an internal note…"><button class="btn btn-sm btn-primary" onclick="addShulNote('${id}')">Add</button></div>
+        <div style="margin-top:14px">${notes.map(n => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div>${esc(n.note)}</div><div class="small-muted">${esc(n.first_name||'')} ${esc(n.last_name||'')} · ${fmtDateTime(n.created_at)}</div></div>`).join('') || '<p class="small-muted">No notes yet.</p>'}</div>
+      </div>
+      <div id="tab-contract" style="display:none">
+        ${contract ? `<p>Status: ${badge(contract.status, contract.status)}</p>${contract.signed_at ? `<p>Signed by ${esc(contract.signer_name)} on ${fmtDateTime(contract.signed_at)}</p><button class="btn btn-sm btn-outline" onclick="viewAuthed('/shuls/${id}/contract/pdf')">View Signed PDF</button> <button class="btn btn-sm btn-outline" onclick="retractContractSignature('${id}')">Retract Signature</button>` : `<button class="btn btn-sm btn-primary" onclick="resendContract('${id}')">Resend Signing Link</button>`}` : `<p class="small-muted">No contract generated yet.</p><button class="btn btn-sm btn-primary" onclick="sendContract('${id}')">Generate & Email Contract</button>`}
+      </div>
+      <div id="tab-applicants" style="display:none">
+        ${applicants.length ? `<table><thead><tr><th>Name</th><th>Status</th></tr></thead><tbody>${applicants.map(a=>`<tr><td>${esc(a.first_name)} ${esc(a.last_name)}</td><td>${badge(a.approval_status, a.approval_status)}</td></tr>`).join('')}</tbody></table>` : '<p class="small-muted">No applicants submitted yet.</p>'}
+      </div>
+      <div id="tab-messages" style="display:none">
+        <div id="tab-messages-list"><p class="small-muted">Loading…</p></div>
+      </div>
+      <div id="tab-history" style="display:none">
+        <div id="tab-history-list"><p class="small-muted">Loading…</p></div>
+      </div>
+    `;
+    const footer = `
+      <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Shul', '/shuls/${id}/other-seasons', 'openShul')">View Other Seasons</button>
+      <button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button>
+      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('shul','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">+ Add Task</button>
+      ${shul.is_paused ? `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',false)">Unpause</button>` : `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',true)">Pause</button>`}
+      ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteShul('${id}')">Delete Permanently</button>` : ''}
+      ${!shul.portal_user_id ? `<button class="btn btn-outline btn-sm" onclick="inviteShul('${id}')">Invite to Portal</button>` : ''}
+      ${['approved','rejected'].includes(shul.status) ? `<button class="btn btn-outline btn-sm" onclick="setShulPending('${id}')">Set to Pending</button>` : ''}
+      ${shul.status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="rejectShul('${id}')">Reject</button><button class="btn btn-primary btn-sm" onclick="approveShul('${id}')">Approve</button>` : `<button class="btn btn-outline btn-sm" onclick="resendWelcome('${id}')">Resend Welcome Email</button>`}
+      ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Set Password</button>` : ''}
+      <button class="btn btn-primary btn-sm" onclick="saveShul('${id}')">Save</button>`;
+    carryForwardContext = { id, name: shul.name_en, applicants };
+    openModal(shul.name_en, body, footer);
+    qsa('#stabs button').forEach(b => b.addEventListener('click', () => {
+      qsa('#stabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+      ['info','notes','contract','applicants','messages','history'].forEach(t => qs('#tab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+    }));
+    loadMessagesTab('shul', id, 'tab-messages-list', shul.gabai_cell || shul.ruv_phone || '', shul.gabai_email || '', shul);
+    loadHistoryTab('shul', id, 'tab-history-list');
+    loadGoogleMaps().then(() => {
+      attachPlacesAutocomplete('e-address', { address: 'e-address', city: 'e-city', state: 'e-state', zip: 'e-zip' });
+      attachPlacesAutocomplete('e-ruv_address', { address: 'e-ruv_address', city: 'e-ruv_city', state: 'e-ruv_state', zip: 'e-ruv_zip' });
+      attachPlacesAutocomplete('e-gabai_address', { address: 'e-gabai_address', city: 'e-gabai_city', state: 'e-gabai_state', zip: 'e-gabai_zip' });
+    });
+  } catch (err) { toast(err.message, true); }
+}
+
+window.saveShul = async (id) => {
+  const fields = ['name_en','name_he','address','city','state','zip','ruv_first_name','ruv_last_name','ruv_phone','ruv_address','ruv_city','ruv_state','ruv_zip',
+    'gabai_first_name','gabai_last_name','gabai_cell','gabai_email','gabai_address','gabai_city','gabai_state','gabai_zip','permanent_comments'];
+  const body = Object.fromEntries(fields.map(f => [f, qs('#e-'+f).value]));
+  body.slots_allocated = +qs('#e-slots_allocated').value;
+  const minContrib = qs('#e-min_contribution_default').value;
+  body.min_contribution_default = minContrib === '' ? null : +minContrib;
+  try { await api(`/shuls/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.addShulNote = async (id) => {
+  const note = qs('#new-note').value.trim(); if (!note) return;
+  try { await api(`/shuls/${id}/notes`, { method: 'POST', body: { note } }); closeModal(); openShul(id); } catch (err) { toast(err.message, true); }
+};
+window.approveShul = async (id) => {
+  const slots = prompt('Number of slots to allocate for this shul this season:', qs('#edit-slots')?.value || '0');
+  if (slots === null) return;
+  try {
+    const r = await api(`/shuls/${id}/approve`, { method: 'POST', body: { slots_allocated: +slots } });
+    toast(r.emailError ? `Shul approved, but the account setup email failed to send: ${r.emailError}` : 'Shul approved. Account setup email sent.', !!r.emailError);
+    closeModal(); load();
+  } catch (err) {
+    if (err.data?.code === 'CONTRACT_NOT_SENT' && confirm(`${err.message}\n\nClick OK to approve anyway without a contract on file (bypass).`)) {
+      try {
+        const r = await api(`/shuls/${id}/approve`, { method: 'POST', body: { slots_allocated: +slots, bypass_contract: true } });
+        toast(r.emailError ? `Shul approved, but the account setup email failed to send: ${r.emailError}` : 'Shul approved. Account setup email sent.', !!r.emailError);
+        closeModal(); load();
+      } catch (err2) { toast(err2.message, true); }
+      return;
+    }
+    toast(err.message, true);
+  }
+};
+window.rejectShul = async (id) => { if (!confirm('Reject this shul application?')) return; try { await api(`/shuls/${id}/reject`, { method: 'POST' }); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+window.setShulPending = async (id) => { try { await api(`/shuls/${id}/set-pending`, { method: 'POST' }); toast('Moved back to pending'); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+window.deleteShul = async (id) => {
+  if (!confirm('Permanently delete this shul? This removes the shul, its contract, and notes completely and cannot be undone. Its applicants are kept but unlinked from this shul.')) return;
+  try { await api(`/shuls/${id}/permanent`, { method: 'DELETE' }); toast('Shul deleted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.resendWelcome = async (id) => {
+  try {
+    const r = await api(`/shuls/${id}/resend-welcome`, { method: 'POST' });
+    toast(r.emailError ? `Could not send: ${r.emailError}` : 'Welcome email re-sent', !!r.emailError);
+  } catch (err) { toast(err.message, true); }
+};
+window.pauseToggle = async (id, pause) => { try { await api(`/shuls/${id}/${pause?'pause':'unpause'}`, { method: 'POST' }); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+window.inviteShul = async (id) => {
+  try { const r = await api(`/shuls/${id}/invite`, { method: 'POST' }); toast(r.emailError ? `Could not send: ${r.emailError}` : 'Invited to portal', !!r.emailError); closeModal(); openShul(id); } catch (err) { toast(err.message, true); }
+};
+window.sendContract = async (id) => {
+  try { const r = await api(`/shuls/${id}/send-contract`, { method: 'POST' }); toast(r.emailError ? `Contract generated, but email failed: ${r.emailError}` : 'Contract emailed', !!r.emailError); closeModal(); openShul(id); } catch (err) { toast(err.message, true); }
+};
+window.resendContract = async (id) => {
+  try { const r = await api(`/shuls/${id}/send-contract`, { method: 'POST' }); toast(r.emailError ? `Email failed: ${r.emailError}` : 'Contract re-emailed', !!r.emailError); } catch (err) { toast(err.message, true); }
+};
+window.retractContractSignature = async (id) => {
+  if (!confirm('Retract this signature? The contract will go back to unsigned and can be signed again.')) return;
+  try { await api(`/shuls/${id}/contract/retract`, { method: 'POST' }); toast('Signature retracted'); closeModal(); openShul(id); } catch (err) { toast(err.message, true); }
+};
+
+function openShulForm() {
+  const body = `
+    <label>Shul Name (English) *</label><input id="n-name_en">
+    <label>Shul Name (Hebrew)</label><input id="n-name_he" dir="rtl">
+    <label>Address *</label><input id="n-address">
+    <div class="grid-2"><div><label>City *</label><input id="n-city"></div><div><label>State *</label><input id="n-state"></div></div>
+    <label>Zip *</label><input id="n-zip" style="max-width:160px">
+    <div class="divider"></div>
+    <div class="grid-2"><div><label>Rav First Name *</label><input id="n-ruv_first_name"></div><div><label>Rav Last Name *</label><input id="n-ruv_last_name"></div></div>
+    <label>Rav Phone *</label><input id="n-ruv_phone">
+    <div class="divider"></div>
+    <div class="grid-2"><div><label>Gabai First Name *</label><input id="n-gabai_first_name"></div><div><label>Gabai Last Name *</label><input id="n-gabai_last_name"></div></div>
+    <div class="grid-2"><div><label>Gabai Cell *</label><input id="n-gabai_cell"></div><div><label>Gabai Email *</label><input id="n-gabai_email"></div></div>
+    <label>Slots Allocated</label><input id="n-slots_allocated" type="number" value="0" style="max-width:160px">`;
+  openModal('Add Shul', body, `<button class="btn btn-primary btn-sm" onclick="createShul()">Create</button>`);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
+}
+window.createShul = async () => {
+  const fields = ['name_en','name_he','address','city','state','zip','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email','slots_allocated'];
+  const body = Object.fromEntries(fields.map(f => [f, qs('#n-'+f)?.value]));
+  try { await api('/shuls', { method: 'POST', body }); toast('Shul created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+async function openImportModal() {
+  let seasons = [];
+  try { ({ seasons } = await api('/seasons')); } catch { /* season picker just won't show options if this fails */ }
+  const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. New shuls are matched for duplicates automatically; both accounts are paused if one is found. To mass-edit existing shuls, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that shul (only the cells you actually changed), instead of creating a new one.</p>
+    <input type="file" id="import-file" accept=".xlsx">
+    <label style="margin-top:12px">Season <span class="small-muted">(for a one-time backfill of a past/other season — defaults to the current season)</span></label>
+    <select id="import-season">${seasons.map(s => `<option value="${s.id}" ${s.is_active ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="import-contracts"><label style="margin:0">Automatically email contracts to non-duplicate rows</label></div>
+    <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="import-bypass"><label style="margin:0">Bypass missing required fields (admin only — rows with blanks are still imported; name and gabai email still required)</label></div>
+    <div id="import-result" style="margin-top:14px"></div>`;
+  openModal('Mass Upload Shuls', body, `<button class="btn btn-primary btn-sm" id="btn-run-import" onclick="runImport()">Upload</button>`);
+}
+window.runImport = async () => {
+  const btn = qs('#btn-run-import');
+  if (btn.disabled) return;
+  const file = qs('#import-file').files[0];
+  if (!file) return toast('Choose a file first', true);
+  const fd = new FormData(); fd.append('file', file); fd.append('send_contracts', qs('#import-contracts').checked); fd.append('bypass_required', qs('#import-bypass').checked);
+  const seasonId = qs('#import-season')?.value;
+  if (seasonId) fd.append('season_id', seasonId);
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    const r = await api('/shuls/import', { method: 'POST', isForm: true, body: fd });
+    qs('#import-result').innerHTML = `<p><strong>${r.success}</strong> created, <strong>${r.updated}</strong> updated, <strong>${r.duplicates}</strong> flagged as duplicates, <strong>${r.errors.length}</strong> errors.</p>` +
+      (r.errors.length ? `<ul>${r.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>` : '');
+    load();
+  } catch (err) {
+    if (err.data?.errors) {
+      qs('#import-result').innerHTML = `<p style="color:var(--danger)"><strong>${esc(err.message)}</strong></p><ul>${err.data.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>`;
+    } else toast(err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Upload';
+  }
+};
+
+// Carry-forward: a shul (and some/all of its current applicants) into a
+// different season without a fresh application. carryForwardContext is set
+// by openShul() right before its modal opens, since the applicant list and
+// shul name/id are already loaded there — avoids re-fetching or trying to
+// smuggle a JSON blob through an onclick attribute (shul/applicant names
+// can contain quotes that would break out of it).
+let carryForwardContext = null;
+window.openCarryForwardModal = async () => {
+  const { id, name, applicants } = carryForwardContext || {};
+  if (!id) return;
+  let seasons = [];
+  try { ({ seasons } = await api('/seasons')); } catch { /* season list just won't show options if this fails */ }
+  const body = `<p class="small-muted">Carries <strong>${esc(name)}</strong> into a different season — reuses a matching shul there if one already exists (by Gabai email, else name), otherwise creates one in pending status. No email is sent — invite it to the portal and send its contract whenever you're ready. Each applicant can only be carried into a given season once — re-running this won't create duplicates.</p>
+    <label>Target Season</label>
+    <select id="cf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+    <label style="margin-top:12px">Slots Allocated <span class="small-muted">(only used if a new shul record is created for that season)</span></label>
+    <input id="cf-slots" type="number" value="0" style="max-width:160px">
+    <label style="margin-top:14px">Applicants to carry over <span class="small-muted">(they'll need to complete any missing info before counting as a real submission)</span></label>
+    <div style="margin-bottom:6px"><button type="button" class="btn btn-outline btn-sm" onclick="qsa('.cf-applicant').forEach(c=>c.checked=true)">Select All</button> <button type="button" class="btn btn-outline btn-sm" onclick="qsa('.cf-applicant').forEach(c=>c.checked=false)">Select None</button></div>
+    <div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
+      ${applicants.length ? applicants.map(a => `<div class="checkbox-row"><input type="checkbox" class="cf-applicant" value="${a.id}" checked><label style="margin:0">${esc(a.first_name)} ${esc(a.last_name)} ${badge(a.approval_status, a.approval_status)}</label></div>`).join('') : '<p class="small-muted">This shul has no applicants in its current season.</p>'}
+    </div>
+    <div id="cf-result" style="margin-top:14px"></div>`;
+  openModal('Carry Forward to Season', body, `<button class="btn btn-primary btn-sm" onclick="runCarryForward()">Carry Forward</button>`);
+};
+window.runCarryForward = async () => {
+  const { id } = carryForwardContext || {};
+  const seasonId = qs('#cf-season')?.value;
+  if (!seasonId) return toast('No season selected', true);
+  const applicant_ids = qsa('.cf-applicant').filter(c => c.checked).map(c => c.value);
+  try {
+    const r = await api(`/shuls/${id}/carry-forward`, { method: 'POST', body: { season_id: seasonId, slots_allocated: +qs('#cf-slots').value || 0, applicant_ids } });
+    qs('#cf-result').innerHTML = `<p><strong>${r.shulCreated ? 'Created' : 'Reused'}</strong> the shul in the target season, carried over <strong>${r.applicantsCarried}</strong> applicant(s) as needing re-enrollment${r.applicantsSkipped ? ` (${r.applicantsSkipped} already carried into that season, skipped)` : ''}.${r.duplicate ? ` <span style="color:var(--danger)">A possible duplicate was flagged in the target season — see Duplicates.</span>` : ''}</p>`;
+    load();
+  } catch (err) { toast(err.message, true); }
+};
+
+let dupFlagsCache = [];
+const SHUL_COMPARE_FIELDS = [
+  ['name_en','Name (English)'], ['name_he','Name (Hebrew)'], ['address','Address'], ['city','City'], ['state','State'], ['zip','Zip'],
+  ['ruv_first_name','Rav First Name'], ['ruv_last_name','Rav Last Name'], ['ruv_phone','Rav Phone'],
+  ['gabai_first_name','Gabai First Name'], ['gabai_last_name','Gabai Last Name'], ['gabai_cell','Gabai Cell'], ['gabai_email','Gabai Email'],
+  ['status','Status'], ['slots_allocated','Slots Allocated'], ['source','Source'],
+];
+// Keep in sync with SHUL_MERGE_FIELDS in services/duplicates.js — real
+// identity/contact data an admin can pick a per-field winner for when
+// merging. status/slots_allocated/source/portal_user_id aren't "merged";
+// the surviving (primary) record keeps its own.
+const SHUL_MERGE_FIELDS = [
+  ['name_en','Name (English)'], ['name_he','Name (Hebrew)'], ['address','Address'], ['city','City'], ['state','State'], ['zip','Zip'],
+  ['ruv_first_name','Rav First Name'], ['ruv_last_name','Rav Last Name'], ['ruv_phone','Rav Phone'],
+  ['ruv_address','Rav Address'], ['ruv_city','Rav City'], ['ruv_state','Rav State'], ['ruv_zip','Rav Zip'],
+  ['gabai_first_name','Gabai First Name'], ['gabai_last_name','Gabai Last Name'], ['gabai_cell','Gabai Cell'], ['gabai_email','Gabai Email'],
+  ['gabai_address','Gabai Address'], ['gabai_city','Gabai City'], ['gabai_state','Gabai State'], ['gabai_zip','Gabai Zip'],
+];
+
+async function showDuplicates() {
+  try {
+    const { flags } = await api('/shuls/duplicates/open' + (state.season_id ? `?season_id=${state.season_id}` : ''));
+    dupFlagsCache = flags;
+    const body = flags.length ? flags.map(f => `<div class="card" style="margin-bottom:10px">
+        <strong>${esc(f.entity?.name_en)}</strong> (${fmtDate(f.entity?.created_at)}) may duplicate <strong>${esc(f.matched?.name_en)}</strong> (${fmtDate(f.matched?.created_at)})<br>
+        <span class="small-muted">Reason: ${esc(f.reason)}</span>
+        <div style="margin-top:10px">
+          <button class="btn btn-sm btn-outline" onclick="compareDup('${f.id}')">Compare Side-by-Side</button>
+          <button class="btn btn-sm btn-primary" onclick="openMergeView('${f.id}')">Merge &amp; Resolve</button>
+          <button class="btn btn-sm btn-outline" onclick="resolveDup('${f.id}','bypass')">Bypass (not a duplicate)</button>
+          <button class="btn btn-sm btn-outline" onclick="resolveDup('${f.id}','resolve')">Mark Resolved</button>
+        </div>
+      </div>`).join('') : '<p class="small-muted">No open duplicate flags.</p>';
+    openModal('Duplicate Shul Flags', body);
+  } catch (err) { toast(err.message, true); }
+}
+window.compareDup = (flagId) => {
+  const f = dupFlagsCache.find(x => x.id === flagId);
+  if (!f) return;
+  const body = `<p class="small-muted">Reason flagged: ${esc(f.reason)}</p>` + renderCompareTable(SHUL_COMPARE_FIELDS, f.entity, f.matched);
+  const footer = `<button class="btn btn-outline btn-sm" onclick="showDuplicates()">Back to List</button>
+    <button class="btn btn-outline btn-sm" onclick="openMergeView('${flagId}')">Merge &amp; Resolve</button>
+    <button class="btn btn-outline btn-sm" onclick="resolveDup('${flagId}','bypass')">Bypass</button>
+    <button class="btn btn-primary btn-sm" onclick="resolveDup('${flagId}','resolve')">Mark Resolved</button>`;
+  openModal('Compare Records', body, footer);
+};
+window.resolveDup = async (id, action) => { try { await api(`/shuls/duplicates/${id}/resolve`, { method: 'POST', body: { action } }); closeModal(); showDuplicates(); load(); } catch (err) { toast(err.message, true); } };
+
+// The merge group can chain past just the flag's original pair if one of
+// them was already merged into a third shul earlier (see
+// getShulMergeGroupIds server-side) — always fetches the full connected
+// group, not just the two entities the flag itself names.
+let shulMergeGroupCache = null;
+window.openMergeView = async (flagId) => {
+  try {
+    const group = await api(`/shuls/duplicates/${flagId}/group`);
+    shulMergeGroupCache = group;
+    renderShulMergeView();
+  } catch (err) { toast(err.message, true); }
+};
+function renderShulMergeView() {
+  const { flag, members } = shulMergeGroupCache;
+  const cols = members.map((m, i) => `<th style="min-width:180px">
+      <div class="checkbox-row" style="margin-bottom:4px"><input type="radio" name="shul-merge-primary" value="${esc(m.id)}" id="smp-${i}" ${i===0?'checked':''}>
+        <label for="smp-${i}" style="margin:0"><strong>${esc(m.name_en)}</strong></label></div>
+      <span class="small-muted">${esc(m.status)}${m.applicant_count!=null?` · ${m.applicant_count} applicant(s)`:''}</span>
+    </th>`).join('');
+  const rows = SHUL_MERGE_FIELDS.map(([key, label]) => {
+    const cells = members.map((m, i) => {
+      const v = m[key];
+      return `<td><label class="checkbox-row" style="margin:0"><input type="radio" name="smf-${key}" value="${esc(String(v ?? ''))}" ${i===0?'checked':''}> <span>${esc(String(v ?? ''))}</span></label></td>`;
+    }).join('');
+    return `<tr><td class="small-muted" style="white-space:nowrap">${esc(label)}</td>${cells}</tr>`;
+  }).join('');
+  const body = `
+    <p class="small-muted">Reason flagged: ${esc(flag.reason)}. ${members.length > 2 ? `This is a group of ${members.length} records.` : ''}
+    Pick which record is <strong>Primary</strong> (that's the one that keeps going forward) — every other member's applicants (in the primary's season) move onto it, and it's never deleted, just marked merged. Then pick which value to keep for each field — you can mix and match from any record.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th></th>${cols}</tr></thead><tbody>${rows}</tbody></table></div>
+  `;
+  const footer = `<button class="btn btn-outline btn-sm" onclick="showDuplicates()">Back to List</button>
+    <button class="btn btn-outline btn-sm" onclick="resolveDup('${flag.id}','bypass')">Bypass (not a duplicate)</button>
+    <button class="btn btn-primary btn-sm" onclick="submitShulMerge('${flag.id}')">Merge &amp; Resolve</button>`;
+  openModal('Compare & Merge Shuls', body, footer);
+}
+window.submitShulMerge = async (flagId) => {
+  const primaryId = qs('input[name="shul-merge-primary"]:checked')?.value;
+  if (!primaryId) return toast('Pick a primary record', true);
+  const values = {};
+  for (const [key] of SHUL_MERGE_FIELDS) {
+    const el = qs(`input[name="smf-${key}"]:checked`);
+    if (el) values[key] = el.value;
+  }
+  try {
+    const r = await api(`/shuls/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values } });
+    toast(`Merged — ${r.applicantsReassigned} applicant(s) moved to the surviving shul`);
+    closeModal(); showDuplicates(); load();
+  } catch (err) { toast(err.message, true); }
+};
+
+attachColumnCustomizer('btn-columns', 'columns_shuls', SHUL_COLUMNS, DEFAULT_SHUL_COLUMNS, (order) => { activeColumns = order; renderThead(); load(); })
+  .then(order => { activeColumns = order; renderThead(); });
+populateSeasonFilter('f-season').then(activeId => { state.season_id = activeId; load(); });
+
+// Deep link from the "Notify on Document Signed" admin email (?id=<shulId>)
+// straight into that shul's popup.
+const deepLinkShulId = new URLSearchParams(location.search).get('id');
+if (deepLinkShulId) openShul(deepLinkShulId);
+
+// A shul can sign their contract entirely outside this admin's session
+// (their own public link) — patchShulRow() catches that the moment this
+// admin views that shul's popup, but if the list was just left open and
+// nothing was ever clicked, re-fetch it whenever the tab regains focus so
+// it doesn't sit stale indefinitely.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+attachLiveRefresh('live-banner', async () => {
+  const params = new URLSearchParams({ search: state.search, status: state.status, season_id: state.season_id, pageSize: 1 });
+  const { total } = await api('/shuls?' + params);
+  return total;
+}, load);
+</script>
+</body>
+</html>

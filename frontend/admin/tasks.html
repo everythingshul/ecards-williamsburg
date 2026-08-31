@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/tasks', `
+  <div class="flex-between"><h2>Tasks</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button><button class="btn btn-primary btn-sm" id="btn-new">+ New Task</button></div></div>
+  <div class="toolbar">
+    <select id="f-assigned"><option value="">Everyone</option><option value="me">Assigned to Me</option></select>
+    <select id="f-status"><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In Progress</option><option value="done">Done</option></select>
+    <label class="checkbox-row"><input type="checkbox" id="f-overdue"> Overdue only</label>
+    <select id="mass-action">
+      <option value="status-open">Mark Open</option>
+      <option value="status-in_progress">Mark In Progress</option>
+      <option value="status-done">Mark Done</option>
+      <option value="reassign">Reassign To…</option>
+      <option value="delete">Delete</option>
+    </select>
+    <select id="mass-reassign-target" style="display:none"></select>
+    <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
+  </div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th style="width:34px"><input type="checkbox" id="chk-all"></th><th></th><th>Title</th><th>Linked To</th><th>Assigned To</th><th>Due</th><th>Priority</th><th>Status</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="9" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+let selected = new Set();
+
+let usersCache = [];
+// Fetching the assignee list requires org_admin/super_admin (GET /api/users
+// is admin-only, unlike most other resources). Staff can still fully use
+// Tasks — they just won't get an assignee picker — so every caller of this
+// must not let a failed fetch (a 403 for staff) block the rest of the page.
+async function loadUsers() { try { const { users } = await api('/users'); usersCache = users.filter(u => u.is_active); } catch { usersCache = []; } }
+
+function fmtDueBadge(dueDate, status) {
+  if (!dueDate) return '<span class="small-muted">No due date</span>';
+  const today = new Date().toISOString().slice(0, 10);
+  const label = fmtDate(dueDate);
+  if (status === 'done') return `<span class="small-muted">${label}</span>`;
+  if (dueDate < today) return `<span style="color:var(--danger);font-weight:600">${label} (overdue)</span>`;
+  if (dueDate === today) return `<span style="color:var(--warn);font-weight:600">${label} (today)</span>`;
+  return label;
+}
+
+async function load() {
+  const params = new URLSearchParams();
+  if (qs('#f-assigned').value) params.set('assigned_to', qs('#f-assigned').value);
+  if (qs('#f-status').value) params.set('status', qs('#f-status').value);
+  if (qs('#f-overdue').checked) params.set('overdue', 'true');
+  try {
+    const { tasks } = await api('/tasks?' + params);
+    qs('#tbody').innerHTML = tasks.length ? tasks.map(t => `<tr>
+        <td onclick="event.stopPropagation()"><input type="checkbox" class="row-chk" data-id="${t.id}"></td>
+        <td><input type="checkbox" ${t.status==='done'?'checked':''} onchange="toggleDone('${t.id}', this.checked)"></td>
+        <td><strong style="${t.status==='done'?'text-decoration:line-through;color:var(--text-muted)':''}">${esc(t.title)}</strong>${t.description ? `<br><span class="small-muted">${esc(t.description)}</span>` : ''}${t.creator_first_name ? `<br><span class="small-muted">Created by ${esc(t.creator_first_name)} ${esc(t.creator_last_name||'')}</span>` : ''}</td>
+        <td>${t.entity_label ? `<span class="small-muted">${esc(t.entity_type)}: ${esc(t.entity_label)}</span>` : ''}</td>
+        <td>${t.assignee_first_name ? esc(t.assignee_first_name) + ' ' + esc(t.assignee_last_name||'') : '<span class="small-muted">Unassigned</span>'}</td>
+        <td>${fmtDueBadge(t.due_date, t.status)}</td>
+        <td>${badge(t.priority, t.priority==='high'?'rejected':(t.priority==='low'?'submitted':'pending'))}</td>
+        <td>${badge(t.status.replace('_',' '), t.status==='done'?'active':(t.status==='in_progress'?'sent':'pending'))}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="openTask('${t.id}')">Edit</button></td>
+      </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No tasks found.</td></tr>';
+    qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
+  } catch (err) { toast(err.message, true); }
+}
+window.toggleDone = async (id, checked) => { try { await api(`/tasks/${id}/status`, { method: 'POST', body: { status: checked ? 'done' : 'open' } }); load(); } catch (err) { toast(err.message, true); } };
+
+qs('#chk-all').addEventListener('change', (e) => { qsa('.row-chk').forEach(c => { c.checked = e.target.checked; c.dispatchEvent(new Event('change')); }); });
+function onCheck(e) {
+  const id = e.target.dataset.id;
+  if (e.target.checked) selected.add(id); else selected.delete(id);
+  qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
+  qs('#btn-mass-apply').disabled = selected.size === 0;
+}
+
+qs('#f-assigned').addEventListener('change', load);
+qs('#f-status').addEventListener('change', load);
+qs('#f-overdue').addEventListener('change', load);
+
+function assigneeOptions(selectedId) {
+  return `<option value="">Unassigned</option>` + usersCache.map(u => `<option value="${u.id}" ${u.id===selectedId?'selected':''}>${esc(u.first_name)} ${esc(u.last_name||'')} (${esc(roleLabel(u.role))})</option>`).join('');
+}
+
+function taskFormBody(t = {}) {
+  return `
+    <label>Title <span class="req">*</span></label><input id="tk-title" value="${esc(t.title||'')}">
+    <label>Description</label><textarea id="tk-description" rows="3">${esc(t.description||'')}</textarea>
+    <div class="grid-2">
+      <div><label>Assign To</label><select id="tk-assigned_to">${assigneeOptions(t.assigned_to)}</select></div>
+      <div><label>Priority</label><select id="tk-priority"><option value="low" ${t.priority==='low'?'selected':''}>Low</option><option value="normal" ${(!t.priority||t.priority==='normal')?'selected':''}>Normal</option><option value="high" ${t.priority==='high'?'selected':''}>High</option></select></div>
+    </div>
+    <label>Due Date</label><input type="date" id="tk-due_date" value="${t.due_date||''}" style="max-width:200px">
+    <p class="small-muted" style="margin-top:6px">If a due date is set, the assignee gets an automatic email reminder as it approaches or if it's overdue.</p>
+    <input type="hidden" id="tk-entity_type" value="${esc(t.entity_type||'')}">
+    <input type="hidden" id="tk-entity_id" value="${esc(t.entity_id||'')}">
+    ${t.entity_label ? `<p class="small-muted">Linked to ${esc(t.entity_type)}: <strong>${esc(t.entity_label)}</strong></p>` : ''}
+  `;
+}
+
+qs('#btn-new').addEventListener('click', async () => {
+  if (!usersCache.length) await loadUsers();
+  openModal('New Task', taskFormBody(), `<button class="btn btn-primary btn-sm" onclick="createTask()">Create Task</button>`);
+});
+qs('#btn-export').addEventListener('click', () => {
+  const params = new URLSearchParams();
+  if (qs('#f-assigned').value) params.set('assigned_to', qs('#f-assigned').value);
+  if (qs('#f-status').value) params.set('status', qs('#f-status').value);
+  if (qs('#f-overdue').checked) params.set('overdue', 'true');
+  downloadAuthed('/tasks/export?' + params, 'tasks.xlsx');
+});
+window.createTask = async () => {
+  const title = qs('#tk-title').value.trim();
+  if (!title) return toast('Title is required', true);
+  const body = {
+    title, description: qs('#tk-description').value, assigned_to: qs('#tk-assigned_to').value || null,
+    priority: qs('#tk-priority').value, due_date: qs('#tk-due_date').value || null,
+    entity_type: qs('#tk-entity_type').value || null, entity_id: qs('#tk-entity_id').value || null,
+  };
+  try { await api('/tasks', { method: 'POST', body }); toast('Task created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+window.openTask = async (id) => {
+  if (!usersCache.length) await loadUsers();
+  try {
+    const { task } = await api(`/tasks/${id}`);
+    const footer = `<button class="btn btn-danger btn-sm" onclick="deleteTask('${id}')">Delete</button>
+      ${task.status !== 'done' ? `<button class="btn btn-outline btn-sm" onclick="setStatus('${id}','in_progress')">Mark In Progress</button><button class="btn btn-outline btn-sm" onclick="setStatus('${id}','done')">Mark Done</button>` : `<button class="btn btn-outline btn-sm" onclick="setStatus('${id}','open')">Reopen</button>`}
+      <button class="btn btn-primary btn-sm" onclick="saveTask('${id}')">Save</button>`;
+    openModal('Edit Task', taskFormBody(task), footer);
+  } catch (err) { toast(err.message, true); }
+};
+window.saveTask = async (id) => {
+  const body = {
+    title: qs('#tk-title').value, description: qs('#tk-description').value, assigned_to: qs('#tk-assigned_to').value || null,
+    priority: qs('#tk-priority').value, due_date: qs('#tk-due_date').value || null,
+  };
+  try { await api(`/tasks/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.setStatus = async (id, status) => { try { await api(`/tasks/${id}/status`, { method: 'POST', body: { status } }); toast('Updated'); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+window.deleteTask = async (id) => { if (!confirm('Delete this task?')) return; try { await api(`/tasks/${id}`, { method: 'DELETE' }); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+
+qs('#mass-action').addEventListener('change', () => {
+  const isReassign = qs('#mass-action').value === 'reassign';
+  qs('#mass-reassign-target').style.display = isReassign ? '' : 'none';
+  if (isReassign) qs('#mass-reassign-target').innerHTML = assigneeOptions();
+});
+const MASS_ACTIONS = {
+  'status-open': { confirm: n => `Mark ${n} selected task(s) Open?`, run: (ids) => api('/tasks/mass-status', { method: 'POST', body: { ids, status: 'open' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-in_progress': { confirm: n => `Mark ${n} selected task(s) In Progress?`, run: (ids) => api('/tasks/mass-status', { method: 'POST', body: { ids, status: 'in_progress' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-done': { confirm: n => `Mark ${n} selected task(s) Done?`, run: (ids) => api('/tasks/mass-status', { method: 'POST', body: { ids, status: 'done' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  reassign: {
+    confirm: null,
+    run: (ids) => api('/tasks/mass-reassign', { method: 'POST', body: { ids, assigned_to: qs('#mass-reassign-target').value || null } }),
+    summarize: r => ({ msg: `Reassigned ${r.updated}, skipped ${r.skipped}` }),
+  },
+  delete: {
+    confirm: n => `Delete ${n} selected task(s)? This cannot be undone.`,
+    run: (ids) => api('/tasks/mass-delete', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}` }),
+  },
+};
+qs('#btn-mass-apply').addEventListener('click', async () => {
+  const action = MASS_ACTIONS[qs('#mass-action').value];
+  const ids = Array.from(selected);
+  if (action.confirm && !confirm(action.confirm(ids.length))) return;
+  try {
+    const r = await action.run(ids);
+    if (!r) return;
+    const { msg, isError } = action.summarize(r);
+    toast(msg, !!isError);
+    selected.clear(); load();
+  } catch (err) { toast(err.message, true); }
+});
+
+loadUsers().then(load);
+</script>
+</body>
+</html>

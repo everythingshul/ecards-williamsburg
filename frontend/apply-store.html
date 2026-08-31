@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Application · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+</head>
+<body>
+<div class="public-wrap">
+  <div class="public-header">
+    <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+    <h1>Store Application</h1>
+    <p class="small-muted">Fill out your store's information below. After submitting, you'll review and sign your participation agreement right here.</p>
+  </div>
+
+  <form id="apply-form" class="card">
+    <div id="dyn-fields"><p class="small-muted">Loading…</p></div>
+    <div style="margin-top:26px;text-align:right">
+      <button type="submit" class="btn btn-primary" id="submit-btn">Continue to Agreement</button>
+    </div>
+  </form>
+
+  <div class="card" id="contract-section" style="display:none;margin-top:20px;max-width:900px;margin-left:auto;margin-right:auto">
+    <div class="flex-between" style="flex-wrap:wrap;gap:10px">
+      <h3 style="margin:0">Review & Sign Your Participation Agreement</h3>
+      <button type="button" class="btn btn-outline btn-sm" id="print-before-btn">Print / Download</button>
+    </div>
+    <p class="small-muted">Fill in each highlighted field directly on the document below, then sign at the bottom.</p>
+    <div id="pdf-pages"></div>
+    <div class="divider"></div>
+    <label>Signer Full Name <span class="req">*</span></label>
+    <input id="signer_name" dir="auto" placeholder="Type your full legal name" style="margin-bottom:16px">
+    <div id="consent-holder"></div>
+    <div style="margin-top:20px;text-align:right">
+      <button class="btn btn-primary" id="sign-btn">Sign & Submit Application</button>
+    </div>
+  </div>
+
+  <div class="card" id="done-section" style="display:none;text-align:center">
+    <h3>&#10003; Application Submitted</h3>
+    <p class="small-muted" id="done-message"></p>
+    <button type="button" class="btn btn-outline btn-sm" id="print-after-btn" style="display:none">Print / Download Signed Agreement</button>
+  </div>
+</div>
+<script src="/js/app.js"></script>
+<script>trackPageview();</script>
+<script>renderPublicFooter();</script>
+<script>
+// Fixed question set for Store Application (utils/builtinSchemas.js) — no
+// longer editable through Form Builder.
+// Manager fields are wrapped in their own div so the same_person checkbox
+// can hide them (and drop their `required`) without touching the shared
+// fieldHtml renderer — server-side validation (formValidation.js's
+// requiredUnless) is the real enforcement; this is just so the form doesn't
+// visually ask for info it won't actually require.
+const MANAGER_KEYS = ['manager_name', 'manager_phone', 'manager_email'];
+let storeId = null, signToken = null;
+let contractFields = [{ id: 'signature', type: 'signature', label: 'Signature', required: true }];
+let contractPdfUrl = '';
+let contractAtSignup = true;
+
+// Whether an agreement needs to be signed in this same sitting, or is
+// instead emailed separately later (Settings > Documents > Store Agreement)
+// — decides the submit button's label up front.
+api('/orgs/resolve').then(({ content }) => {
+  contractAtSignup = content?.storeContractAtSignup !== false;
+  if (!contractAtSignup) qs('#submit-btn').textContent = 'Submit';
+}).catch(() => {});
+
+(async () => {
+  const schema = await loadBuiltinSchema('store_application');
+  if (!schema) { qs('#dyn-fields').innerHTML = '<p class="small-muted">This form isn\'t available right now — please try again shortly.</p>'; return; }
+  const managerFields = schema.filter(f => MANAGER_KEYS.includes(f.key));
+  const otherFields = schema.filter(f => !MANAGER_KEYS.includes(f.key));
+  const sameIdx = otherFields.findIndex(f => f.key === 'same_person');
+  const before = otherFields.slice(0, sameIdx + 1).map(f => fieldHtml(f)).join('');
+  const after = otherFields.slice(sameIdx + 1).map(f => fieldHtml(f)).join('');
+  qs('#dyn-fields').innerHTML = `${before}<div id="manager-fields">${managerFields.map(f => fieldHtml(f)).join('')}</div>${after}`;
+  const sameCheckbox = qs('#same_person');
+  function syncManagerFields() {
+    const same = sameCheckbox.checked;
+    qs('#manager-fields').style.display = same ? 'none' : '';
+    qsa('#manager-fields input').forEach(input => { input.required = !same; if (same) input.value = ''; });
+  }
+  if (sameCheckbox) { sameCheckbox.addEventListener('change', syncManagerFields); syncManagerFields(); }
+  loadGoogleMaps().then(() => {
+    attachPlacesAutocomplete('address', { address:'address', city:'city', state:'state', zip:'zip' });
+  });
+})();
+
+qs('#apply-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = qs('#submit-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  const data = Object.fromEntries(new FormData(e.target).entries());
+  qsa('input[type=checkbox]', e.target).forEach(c => data[c.name] = c.checked);
+  try {
+    const { store, message } = await api('/stores/apply', { method: 'POST', body: data });
+    storeId = store.id;
+    if (!contractAtSignup) {
+      qs('#apply-form').style.display = 'none';
+      qs('#done-section').style.display = 'block';
+      qs('#done-message').textContent = message;
+      return;
+    }
+    const { sign_token } = await api(`/stores/${storeId}/generate-contract`, { method: 'POST' });
+    signToken = sign_token;
+    const { fields } = await api(`/documents/sign/${signToken}`);
+    if (fields && fields.length) contractFields = fields;
+    qs('#apply-form').style.display = 'none';
+    qs('#contract-section').style.display = 'block';
+    qs('#consent-holder').innerHTML = esignConsentHtml('sign');
+    contractPdfUrl = `/api/documents/sign/${signToken}/pdf-preview`;
+    qs('#print-before-btn').addEventListener('click', () => window.open(contractPdfUrl, '_blank'));
+    await renderPdfSigningPages(contractPdfUrl, contractFields, 'pdf-pages');
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = contractAtSignup ? 'Continue to Agreement' : 'Submit';
+  }
+});
+
+qs('#sign-btn').addEventListener('click', async () => {
+  const signerName = qs('#signer_name').value.trim();
+  if (!signerName) return toast('Please type your full name', true);
+  if (!esignConsentChecked('sign')) return;
+  const values = await collectSignValues(contractFields);
+  if (!values) return;
+  const btn = qs('#sign-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  try {
+    await api(`/documents/sign/${signToken}/sign`, { method: 'POST', body: { signer_name: signerName, values, consent: true } });
+    qs('#contract-section').style.display = 'none';
+    qs('#done-section').style.display = 'block';
+    qs('#done-message').textContent = 'Thank you! Your agreement has been signed. Our team will review your application and follow up on next steps.';
+    const printBtn = qs('#print-after-btn');
+    printBtn.style.display = 'inline-flex';
+    printBtn.addEventListener('click', () => window.open(contractPdfUrl, '_blank'));
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Sign & Submit Application';
+  }
+});
+</script>
+</body>
+</html>

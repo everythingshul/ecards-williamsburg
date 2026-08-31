@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<style>
+  body { background: var(--brand-bg); color: var(--text-on-dark); }
+  .site-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 32px; max-width: 900px; margin: 0 auto; }
+  .site-header .brand { display: flex; align-items: center; gap: 12px; }
+  .site-header .brand-text { font-family: Georgia, serif; line-height: 1.2; }
+  .site-header .brand-text strong { color: #fdf7ea; font-size: 16px; display: block; }
+  .site-header .brand-text span { color: #b8a688; font-size: 11px; letter-spacing: .3px; }
+  .wrap { max-width: 700px; margin: 0 auto; padding: 20px 20px 80px; }
+  .wrap h1 { color: #fdf7ea; text-align: center; margin-bottom: 40px; }
+  .faq-item { background: #fff; border-radius: 12px; padding: 22px 26px; margin-bottom: 14px; box-shadow: var(--shadow); }
+  .faq-item h3 { font-size: 16px; margin-bottom: 8px; color: var(--text-dark); }
+  .faq-item p { color: var(--text-body); font-size: 14.5px; line-height: 1.7; white-space: pre-wrap; margin: 0; }
+  .back-link { display: block; text-align: center; margin-top: 30px; color: var(--brand-gold-light); font-size: 13.5px; text-decoration: none; }
+</style>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="brand">
+      <img src="/img/org-logo.png" alt="Organization logo" style="height:42px;width:auto">
+      <div class="brand-text"><strong id="org-name-nav">Kipas Hair BP</strong><span>Platform</span></div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <h1>Frequently Asked Questions</h1>
+    <div id="faq-list"><p class="small-muted" style="color:#c9bda3;text-align:center">Loading…</p></div>
+    <a class="back-link" href="/">&larr; Back to Home</a>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>trackPageview();</script>
+  <script>
+    api('/orgs/resolve').then(({ org, content }) => {
+      if (org?.name) { document.getElementById('org-name-nav').textContent = org.name; document.title = `FAQ · ${org.name}`; }
+      const items = content?.faqItems || [];
+      qs('#faq-list').innerHTML = items.length
+        ? items.map(f => `<div class="faq-item"><h3>${esc(f.question)}</h3><p>${esc(f.answer)}</p></div>`).join('')
+        : '<p style="color:#c9bda3;text-align:center">No questions have been posted yet.</p>';
+    }).catch(() => { qs('#faq-list').innerHTML = '<p style="color:#c9bda3;text-align:center">Unable to load FAQs right now.</p>'; });
+    renderPublicFooter();
+  </script>
+</body>
+</html>

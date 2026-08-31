@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stores · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/stores', `
+  <div class="flex-between"><h2>Participating Stores</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-template">Download Template</button><button class="btn btn-outline btn-sm" id="btn-import">Mass Upload</button><button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button><button class="btn btn-primary btn-sm" id="btn-new">+ Add Store</button></div></div>
+  <div class="toolbar"><input id="f-search" placeholder="Search store name or city…"><select id="f-status"><option value="">All statuses</option><option value="pending">Pending</option><option value="in_progress">In Progress</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="rejected">Rejected</option></select><select id="f-source"><option value="">All sources</option><option value="application">Self-Applied</option><option value="admin">Admin Added</option></select>
+    <select id="f-season"></select>
+    <select id="mass-action">
+      <option value="status-pending">Set to Pending</option>
+      <option value="status-in_progress">Set to In Progress</option>
+      <option value="status-active">Set to Active</option>
+      <option value="status-inactive">Set to Inactive</option>
+      <option value="status-rejected">Reject</option>
+      <option value="invite">Invite to Portal</option>
+      <option value="carry-forward">Carry Forward to Season…</option>
+      <option value="delete">Delete Permanently</option>
+    </select>
+    <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
+  </div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th style="width:34px"><input type="checkbox" id="chk-all"></th><th>Store</th><th>POS System</th><th>Discount</th><th>Manager</th><th>Owner</th><th>Setup Status</th><th>Onboarding</th><th>Live Spend</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="10" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+
+let state = { search:'', status:'', source:'', season_id:'' };
+let selected = new Set();
+async function load() {
+  const params = new URLSearchParams({ search: state.search, setup_status: state.status, season_id: state.season_id });
+  try {
+    let { stores } = await api('/stores?' + params);
+    if (state.source) stores = stores.filter(s => (s.source || 'admin') === state.source);
+    qs('#tbody').innerHTML = stores.length ? stores.map(s => `<tr>
+        <td onclick="event.stopPropagation()"><input type="checkbox" class="row-chk" data-id="${s.id}"></td>
+        <td><strong>${esc(s.name)}</strong>${s.source === 'application' ? ' ' + badge('applied','pending') : ''}<br><span class="small-muted">${esc(s.address||'')} ${esc(s.city||'')}, ${esc(s.state||'')}</span></td>
+        <td>${esc(s.pos_system||'')}</td>
+        <td>${esc(s.discount||'')}</td>
+        <td>${esc(s.manager_name||'')}<br><span class="small-muted">${esc(s.manager_phone||'')}</span></td>
+        <td>${esc(s.owner_name||'')}<br><span class="small-muted">${esc(s.owner_phone||'')}</span></td>
+        <td>${badge(s.setup_status,s.setup_status)}${s.has_provider_account ? ' <span class="small-muted">(existing account)</span>' : ''}</td>
+        <td>${(s.onboarding_step||0) >= 3 ? badge('complete','active') : (s.portal_user_id ? `Step ${s.onboarding_step||0} of 3` : 'Not invited')}</td>
+        <td><strong>${fmtMoney(s.total_purchases)}</strong>${s.total_refunds ? `<br><span class="small-muted">Refunds: ${fmtMoney(s.total_refunds)}</span>` : ''}<br><span class="small-muted">${s.txn_count} txn${s.txn_count===1?'':'s'}</span></td>
+        <td><button class="btn btn-sm btn-outline" onclick="openStore('${s.id}')">Manage</button></td>
+      </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No stores yet.</td></tr>';
+    qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
+  } catch (err) { toast(err.message, true); }
+}
+qs('#chk-all').addEventListener('change', (e) => { qsa('.row-chk').forEach(c => { c.checked = e.target.checked; c.dispatchEvent(new Event('change')); }); });
+function onCheck(e) {
+  const id = e.target.dataset.id;
+  if (e.target.checked) selected.add(id); else selected.delete(id);
+  qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
+  qs('#btn-mass-apply').disabled = selected.size === 0;
+}
+qs('#f-source').addEventListener('change', () => { state.source = qs('#f-source').value; load(); });
+qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; load(); }, 350));
+qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; load(); });
+qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; load(); });
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+qs('#btn-new').addEventListener('click', () => openStoreForm());
+qs('#btn-template').addEventListener('click', () => downloadAuthed('/stores/import/template', 'store_import_template.xlsx'));
+qs('#btn-import').addEventListener('click', () => openImportModal());
+qs('#btn-export').addEventListener('click', () => downloadAuthed('/stores/export?' + new URLSearchParams({ search: state.search, setup_status: state.status, season_id: state.season_id }), 'stores.xlsx'));
+
+const MASS_ACTIONS = {
+  'status-pending': { confirm: n => `Set ${n} selected store(s) to Pending?`, run: (ids) => api('/stores/mass-set-status', { method: 'POST', body: { ids, setup_status: 'pending' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-in_progress': { confirm: n => `Set ${n} selected store(s) to In Progress?`, run: (ids) => api('/stores/mass-set-status', { method: 'POST', body: { ids, setup_status: 'in_progress' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-active': { confirm: n => `Set ${n} selected store(s) to Active?`, run: (ids) => api('/stores/mass-set-status', { method: 'POST', body: { ids, setup_status: 'active' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-inactive': { confirm: n => `Set ${n} selected store(s) to Inactive?`, run: (ids) => api('/stores/mass-set-status', { method: 'POST', body: { ids, setup_status: 'inactive' } }), summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}` }) },
+  'status-rejected': { confirm: n => `Reject ${n} selected store(s)?`, run: (ids) => api('/stores/mass-set-status', { method: 'POST', body: { ids, setup_status: 'rejected' } }), summarize: r => ({ msg: `Rejected ${r.updated}, skipped ${r.skipped}` }) },
+  invite: {
+    confirm: n => `Invite ${n} selected store(s) to their portal? Each uses their owner or manager email on file.`,
+    run: (ids) => api('/stores/mass-invite', { method: 'POST', body: { ids } }),
+    summarize: r => { let msg = `Invited ${r.invited}, skipped ${r.skipped} (no email on file, or agreement not yet sent)`; if (r.emailErrors) msg += ` — ${r.emailErrors} invite email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
+  },
+  'carry-forward': {
+    confirm: null,
+    run: (ids) => openMassCarryForwardModal(ids),
+    summarize: r => ({ msg: `Carried forward ${r.carried} store(s), skipped ${r.skipped}` }),
+  },
+  delete: {
+    confirm: n => `Permanently delete ${n} selected store(s)? This removes each store and its billing records completely and cannot be undone.`,
+    run: (ids) => api('/stores/mass-delete-permanent', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}` }),
+  },
+};
+qs('#btn-mass-apply').addEventListener('click', async () => {
+  const action = MASS_ACTIONS[qs('#mass-action').value];
+  const ids = Array.from(selected);
+  if (action.confirm && !confirm(action.confirm(ids.length))) return;
+  try {
+    const r = await action.run(ids);
+    if (!r) return;
+    const { msg, isError } = action.summarize(r);
+    toast(msg, !!isError);
+    selected.clear(); load();
+  } catch (err) { toast(err.message, true); }
+});
+
+async function openStore(id) {
+  try {
+    const [{ store: s, transactionTotals }, { bills: submittedBills }] = await Promise.all([
+      api(`/stores/${id}`), api(`/stores/${id}/bill-submissions`),
+    ]);
+    const body = `
+      <div class="tabs" id="stabs"><button class="active" data-t="info">Info</button><button data-t="billing">Billing (${submittedBills.length})</button><button data-t="documents">Documents</button><button data-t="history">History</button></div>
+      <div id="stab-info">
+        <div class="grid-2">
+          <div><label>Store Name</label><input id="e-name" value="${esc(s.name)}"></div>
+          <div><label>Setup Status</label><select id="e-status"><option ${s.setup_status==='pending'?'selected':''}>pending</option><option ${s.setup_status==='in_progress'?'selected':''}>in_progress</option><option ${s.setup_status==='active'?'selected':''}>active</option><option ${s.setup_status==='inactive'?'selected':''}>inactive</option><option ${s.setup_status==='rejected'?'selected':''}>rejected</option></select></div>
+        </div>
+        <p class="small-muted">Source: ${s.source === 'application' ? 'Self-applied' : 'Added by admin'} · Onboarding: ${(s.onboarding_step||0) >= 3 ? 'Complete' : (s.portal_user_id ? `Step ${s.onboarding_step||0} of 3` : 'Not yet invited to portal')}</p>
+        <label>Address</label><input id="e-address" value="${esc(s.address||'')}">
+        <div class="grid-2"><div><label>City</label><input id="e-city" value="${esc(s.city||'')}"></div><div><label>State</label><input id="e-state" value="${esc(s.state||'')}"></div></div>
+        <label>Zip</label><input id="e-zip" value="${esc(s.zip||'')}" style="max-width:160px">
+        <label>Phone</label><input id="e-phone" value="${esc(s.phone||'')}">
+        <label>Which POS system do you have? <span class="req">*</span></label><input id="e-pos_system" value="${esc(s.pos_system||'')}">
+        <label>Discount <span class="small-muted">(admin only — never shown to the store)</span></label><input id="e-discount" value="${esc(s.discount||'')}">
+        <div class="divider"></div>
+        <div class="checkbox-row"><input type="checkbox" id="e-same_person" ${s.same_person?'checked':''} onchange="qs('#e-manager-fields').style.display=this.checked?'none':''"><label style="margin:0">Manager and owner are the same person</label></div>
+        <div id="e-manager-fields" style="display:${s.same_person?'none':''}">
+          <div class="grid-2">
+            <div><label>Manager Name</label><input id="e-manager_name" value="${esc(s.manager_name||'')}"></div>
+            <div><label>Manager Phone</label><input id="e-manager_phone" value="${esc(s.manager_phone||'')}"></div>
+          </div>
+          <label>Manager Email</label><input id="e-manager_email" value="${esc(s.manager_email||'')}">
+        </div>
+        <div class="grid-2">
+          <div><label>Owner Name</label><input id="e-owner_name" value="${esc(s.owner_name||'')}"></div>
+          <div><label>Owner Phone</label><input id="e-owner_phone" value="${esc(s.owner_phone||'')}"></div>
+        </div>
+        <label>Owner Email</label><input id="e-owner_email" value="${esc(s.owner_email||'')}">
+        <label>Comments</label><textarea id="e-comments" rows="3">${esc(s.comments||'')}</textarea>
+        <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="e-has_account" ${s.has_provider_account?'checked':''}><label style="margin:0">Already has a disccardpromos account</label></div>
+        <div class="divider"></div>
+        <p class="small-muted">Transactions: ${transactionTotals.count} · Purchases: ${fmtMoney(transactionTotals.total_purchases)} · Refunds: ${fmtMoney(transactionTotals.total_refunds)}</p>
+      </div>
+      <div id="stab-billing" style="display:none">
+        <div class="flex-between"><h4 style="margin:0">Bills This Store Submitted</h4><button class="btn btn-sm btn-outline" onclick="openLogBillModal('${id}')">Log a Bill They Sent Us</button></div>
+        <p class="small-muted">We don't bill stores — they bill us (e.g. reimbursement for gift-card redemptions). Bills submitted through their portal appear here; use "Log a Bill" to record one that came in by email or paper.</p>
+        <div>${submittedBills.length ? submittedBills.map(b => `<div class="card" style="margin-bottom:10px">
+            <div class="flex-between"><strong>${fmtMoney(b.amount)}</strong>${badge(b.status, b.status === 'paid' ? 'active' : (b.status === 'reviewed' ? 'pending' : 'submitted'))}</div>
+            <p class="small-muted">${b.period ? `Period: ${esc(b.period)} · ` : ''}${esc(b.description||'')}</p>
+            ${b.file_name ? `<p class="small-muted"><a href="/api/stores/bill-submissions/${b.id}/file" target="_blank">${esc(b.file_name)}</a></p>` : ''}
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-sm btn-outline" onclick="markBillReviewed('${id}','${b.id}')">Mark Reviewed</button>
+              <button class="btn btn-sm btn-outline" onclick="markBillPaid('${id}','${b.id}')">Mark Paid</button>
+            </div>
+          </div>`).join('') : '<p class="small-muted">No bills submitted yet.</p>'}</div>
+      </div>
+      <div id="stab-documents" style="display:none">
+        <div id="stab-documents-list"><p class="small-muted">Loading…</p></div>
+      </div>
+      <div id="stab-history" style="display:none">
+        <div id="stab-history-list"><p class="small-muted">Loading…</p></div>
+      </div>`;
+    const footer = `<button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Store', '/stores/${id}/other-seasons', 'openStore')">View Other Seasons</button><button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button><button class="btn btn-outline btn-sm" onclick="inviteStore('${id}')">Invite to Portal</button>${s.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${s.portal_user_id}','${esc(s.name).replace(/'/g,"\\'")}')">Set Password</button>` : ''}${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStore('${id}')">Delete Permanently</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveStore('${id}')">Save</button>`;
+    carryForwardContext = { id, name: s.name };
+    openModal(s.name, body, footer);
+    qsa('#stabs button').forEach(b => b.addEventListener('click', () => {
+      qsa('#stabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+      ['info','billing','documents','history'].forEach(t => qs('#stab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+    }));
+    loadDocumentsTab('store', id, 'stab-documents-list', s.owner_email || s.manager_email || '');
+    loadHistoryTab('store', id, 'stab-history-list');
+    loadGoogleMaps().then(() => { attachPlacesAutocomplete('e-address', { address: 'e-address', city: 'e-city', state: 'e-state', zip: 'e-zip' }); });
+  } catch (err) { toast(err.message, true); }
+}
+
+window.saveStore = async (id) => {
+  const fields = ['name','address','city','state','zip','phone','pos_system','discount','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','comments'];
+  const body = Object.fromEntries(fields.map(f => [f, qs('#e-'+f).value]));
+  body.setup_status = qs('#e-status').value; body.has_provider_account = qs('#e-has_account').checked;
+  body.same_person = qs('#e-same_person').checked;
+  if (body.same_person) { body.manager_name = body.owner_name; body.manager_phone = body.owner_phone; body.manager_email = body.owner_email; }
+  try { await api(`/stores/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.inviteStore = async (id) => {
+  try {
+    const r = await api(`/stores/${id}/invite`, { method: 'POST' });
+    toast(r.emailError ? `Invite created, but email failed: ${r.emailError}` : 'Invite sent', !!r.emailError);
+  } catch (err) {
+    if (err.data?.code === 'CONTRACT_NOT_SENT' && confirm(`${err.message}\n\nClick OK to invite anyway without an agreement on file (bypass).`)) {
+      try {
+        const r = await api(`/stores/${id}/invite`, { method: 'POST', body: { bypass_contract: true } });
+        toast(r.emailError ? `Invite created, but email failed: ${r.emailError}` : 'Invite sent', !!r.emailError);
+      } catch (err2) { toast(err2.message, true); }
+      return;
+    }
+    toast(err.message, true);
+  }
+};
+window.deleteStore = async (id) => {
+  if (!confirm('Permanently delete this store? This removes the store and its billing records completely and cannot be undone.')) return;
+  try { await api(`/stores/${id}/permanent`, { method: 'DELETE' }); toast('Store deleted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.markBillReviewed = async (storeId, billId) => { try { await api(`/stores/bill-submissions/${billId}`, { method: 'PUT', body: { status: 'reviewed' } }); toast('Marked reviewed'); closeModal(); openStore(storeId); } catch (err) { toast(err.message, true); } };
+window.markBillPaid = async (storeId, billId) => { try { await api(`/stores/bill-submissions/${billId}`, { method: 'PUT', body: { status: 'paid' } }); toast('Marked paid'); closeModal(); openStore(storeId); } catch (err) { toast(err.message, true); } };
+
+// Admin logging a bill that came in outside the store's own portal (email,
+// paper) — same store_bill_submissions row a store creates themselves via
+// POST /:id/bill-submissions, just entered on their behalf.
+window.openLogBillModal = (storeId) => {
+  closeModal();
+  const body = `
+    <label>Period <span class="small-muted">(e.g. "2026-08", optional)</span></label><input id="lb-period">
+    <label>Amount <span class="req">*</span></label><input id="lb-amount" type="number" step="0.01" min="0.01">
+    <label>Description</label><textarea id="lb-description" rows="3" placeholder="What this bill is for"></textarea>
+    <label>Attachment <span class="small-muted">(optional)</span></label><input id="lb-file" type="file" accept="image/*,application/pdf">
+  `;
+  openModal('Log a Bill They Sent Us', body, `<button class="btn btn-primary btn-sm" onclick="submitLoggedBill('${storeId}')">Save</button>`);
+};
+window.submitLoggedBill = async (storeId) => {
+  const amount = +qs('#lb-amount').value;
+  if (!amount || amount <= 0) return toast('Enter a valid amount', true);
+  const fd = new FormData();
+  fd.append('period', qs('#lb-period').value);
+  fd.append('amount', amount);
+  fd.append('description', qs('#lb-description').value);
+  const file = qs('#lb-file').files[0];
+  if (file) fd.append('file', file);
+  try {
+    await api(`/stores/${storeId}/bill-submissions`, { method: 'POST', isForm: true, body: fd });
+    toast('Bill logged');
+    closeModal();
+    openStore(storeId);
+  } catch (err) { toast(err.message, true); }
+};
+
+function openStoreForm() {
+  const body = `<label>Store Name *</label><input id="n-name">
+    <label>Address <span class="req">*</span></label><input id="n-address">
+    <div class="grid-2"><div><label>City</label><input id="n-city"></div><div><label>State</label><input id="n-state"></div></div>
+    <label>Zip</label><input id="n-zip" style="max-width:160px">
+    <label>Phone <span class="req">*</span></label><input id="n-phone">
+    <label>Which POS system do you have? <span class="req">*</span></label><input id="n-pos_system">
+    <div class="grid-2"><div><label>Manager Name</label><input id="n-manager_name"></div><div><label>Manager Phone</label><input id="n-manager_phone"></div></div>
+    <label>Manager Email</label><input id="n-manager_email">
+    <div class="grid-2"><div><label>Owner Name</label><input id="n-owner_name"></div><div><label>Owner Phone</label><input id="n-owner_phone"></div></div>
+    <label>Owner Email</label><input id="n-owner_email">`;
+  openModal('Add Store', body, `<button class="btn btn-primary btn-sm" onclick="createStore()">Create</button>`);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
+}
+window.createStore = async () => {
+  const fields = ['name','address','city','state','zip','phone','pos_system','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email'];
+  const body = Object.fromEntries(fields.map(f => [f, qs('#n-'+f).value]));
+  try { await api('/stores', { method: 'POST', body }); toast('Store created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+// Carry-forward: a known, returning store into a different season without a
+// fresh application — mirrors shuls.js's carry-forward, minus the
+// applicant-carrying step (stores don't have applicants under them).
+// carryForwardContext is set by openStore() right before its modal opens.
+let carryForwardContext = null;
+window.openCarryForwardModal = async () => {
+  const { id, name } = carryForwardContext || {};
+  if (!id) return;
+  let seasons = [];
+  try { ({ seasons } = await api('/seasons')); } catch { /* season list just won't show options if this fails */ }
+  const body = `<p class="small-muted">Carries <strong>${esc(name)}</strong> into a different season — reuses a matching store there if one already exists (by owner/manager email, else name), otherwise creates one, emails a link to set up their account password, and sends a fresh participation agreement to sign.</p>
+    <label>Target Season</label>
+    <select id="cf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+    <div id="cf-result" style="margin-top:14px"></div>`;
+  openModal('Carry Forward to Season', body, `<button class="btn btn-primary btn-sm" onclick="runCarryForward()">Carry Forward</button>`);
+};
+window.runCarryForward = async () => {
+  const { id } = carryForwardContext || {};
+  const seasonId = qs('#cf-season')?.value;
+  if (!seasonId) return toast('No season selected', true);
+  try {
+    const r = await api(`/stores/${id}/carry-forward`, { method: 'POST', body: { season_id: seasonId } });
+    qs('#cf-result').innerHTML = `<p><strong>${r.storeCreated ? 'Created' : 'Reused'}</strong> the store in the target season.${r.emailError ? ` <span style="color:var(--danger)">Password setup email failed: ${esc(r.emailError)}</span>` : ''}${r.agreementEmailError ? ` <span style="color:var(--danger)">Agreement email failed: ${esc(r.agreementEmailError)}</span>` : ''}</p>`;
+    load();
+  } catch (err) { toast(err.message, true); }
+};
+
+// Same action as the single-store button, run across every selected store
+// at once. Resolves to null (aborting the mass-action, matching the
+// cancelled-prompt behavior elsewhere) if the admin closes the modal
+// without submitting.
+function openMassCarryForwardModal(ids) {
+  return new Promise(async (resolve) => {
+    let seasons = [];
+    try { ({ seasons } = await api('/seasons')); } catch { /* season list just won't show options if this fails */ }
+    const body = `<p class="small-muted">Carries all <strong>${ids.length}</strong> selected store(s) into a different season. Each store reuses a matching store there if one already exists (by owner/manager email, else name), otherwise creates one and sends the usual invite + agreement emails.</p>
+      <label>Target Season</label>
+      <select id="mcf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>`;
+    openModal('Carry Forward to Season (Mass)', body, `<button class="btn btn-primary btn-sm" id="mcf-go">Carry Forward</button>`);
+    let resolved = false;
+    const finish = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    const modalEl = document.getElementById('ec-modal');
+    const observer = new MutationObserver(() => {
+      if (modalEl && !document.body.contains(modalEl)) { observer.disconnect(); finish(null); }
+    });
+    observer.observe(document.body, { childList: true });
+    qs('#mcf-go').addEventListener('click', async () => {
+      const season_id = qs('#mcf-season')?.value;
+      if (!season_id) return toast('No season selected', true);
+      try {
+        const r = await api('/stores/mass-carry-forward', { method: 'POST', body: { ids, season_id } });
+        observer.disconnect();
+        closeModal();
+        finish(r);
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
+async function openImportModal() {
+  let seasons = [];
+  try { ({ seasons } = await api('/seasons')); } catch { /* season picker just won't show options if this fails */ }
+  const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. To mass-edit existing stores, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that store (only the cells you actually changed), instead of creating a new one. Nothing is imported until you click Upload below, and if any row has an error the whole file is rejected — no partial imports.</p>
+    <input type="file" id="import-file" accept=".xlsx">
+    <label style="margin-top:12px">Season <span class="small-muted">(for a one-time backfill of a past/other season — defaults to the current season)</span></label>
+    <select id="import-season">${seasons.map(s => `<option value="${s.id}" ${s.is_active ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="import-bypass"><label style="margin:0">Bypass missing required fields (admin only — rows with blanks are still imported; name and owner email still required)</label></div>
+    <div id="import-result" style="margin-top:14px"></div>`;
+  openModal('Mass Upload Stores', body, `<button class="btn btn-primary btn-sm" id="btn-run-import" onclick="runImport()">Upload</button>`);
+}
+window.runImport = async () => {
+  const btn = qs('#btn-run-import');
+  if (btn.disabled) return;
+  const file = qs('#import-file').files[0];
+  if (!file) return toast('Choose a file first', true);
+  const fd = new FormData(); fd.append('file', file); fd.append('bypass_required', qs('#import-bypass').checked);
+  const seasonId = qs('#import-season')?.value;
+  if (seasonId) fd.append('season_id', seasonId);
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    const r = await api('/stores/import', { method: 'POST', isForm: true, body: fd });
+    qs('#import-result').innerHTML = `<p><strong>${r.success}</strong> created, <strong>${r.updated}</strong> updated, <strong>${r.errors.length}</strong> errors.</p>` +
+      (r.errors.length ? `<ul>${r.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>` : '');
+    load();
+  } catch (err) {
+    if (err.data?.errors) {
+      qs('#import-result').innerHTML = `<p style="color:var(--danger)"><strong>${esc(err.message)}</strong></p><ul>${err.data.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>`;
+    } else toast(err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Upload';
+  }
+};
+
+populateSeasonFilter('f-season').then(activeId => { state.season_id = activeId; load(); });
+
+// Deep link from the "Notify on Document Signed" admin email (?id=<storeId>)
+// straight into that store's popup.
+const deepLinkStoreId = new URLSearchParams(location.search).get('id');
+if (deepLinkStoreId) openStore(deepLinkStoreId);
+
+// A record can change status entirely outside this admin's session (e.g.
+// a document signed via a public link) — re-fetch the list whenever the
+// tab regains focus so it doesn't sit stale indefinitely.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

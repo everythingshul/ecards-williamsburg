@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Application Form · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+</head>
+<body>
+<div class="public-wrap">
+  <div class="public-header"><img class="brand-mark" src="/img/org-logo.png" alt="Organization logo"><h1 id="form-title">Application</h1></div>
+  <form id="dyn-form" class="card"></form>
+  <div class="card" id="done-section" style="display:none;text-align:center"><h3>&#10003; Submitted</h3><p class="small-muted">Thank you. Your submission has been received.</p></div>
+</div>
+<script src="/js/app.js"></script>
+<script>trackPageview();</script>
+<script>renderPublicFooter();</script>
+<script>
+const slug = new URLSearchParams(location.search).get('slug');
+let shulOptions = [];
+
+let currentSchema = [];
+(async () => {
+  if (!slug) { qs('#dyn-form').innerHTML = '<p>No form specified.</p>'; return; }
+  try {
+    const [{ form }, { shuls }] = await Promise.all([api(`/forms/public/${slug}`), api('/shuls/public/list')]);
+    shulOptions = shuls;
+    currentSchema = form.schema_json;
+    qs('#form-title').textContent = form.name;
+    qs('#dyn-form').innerHTML = currentSchema.map(f => fieldHtml(f, shulOptions)).join('') + `<div style="margin-top:22px;text-align:right"><button class="btn btn-primary">Submit</button></div>`;
+  } catch (err) {
+    qs('#dyn-form').innerHTML = `<p>${esc(err.message)}</p>`;
+  }
+})();
+
+qs('#dyn-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const body = {};
+  for (const [k, v] of fd.entries()) body[k] = v;
+  qsa('input[type=checkbox]', e.target).forEach(c => body[c.name] = c.checked);
+  try {
+    await api(`/forms/public/${slug}/submit`, { method: 'POST', body });
+    qs('#dyn-form').style.display = 'none';
+    qs('#done-section').style.display = 'block';
+  } catch (err) { toast(err.message, true); }
+});
+</script>
+</body>
+</html>

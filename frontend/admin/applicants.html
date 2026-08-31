@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Applicants · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/applicants', `
+  <div class="flex-between">
+    <h2>Applicants</h2>
+    <div class="pill-row">
+      <button class="btn btn-outline btn-sm" id="btn-template">Download Import Template</button>
+      <button class="btn btn-outline btn-sm" id="btn-import">Mass Upload</button>
+      <button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button>
+      <button class="btn btn-outline btn-sm" id="f-dupes">Duplicates</button>
+      <button class="btn btn-outline btn-sm" id="btn-columns">Customize Columns</button>
+      <button class="btn btn-primary btn-sm" id="btn-new">+ Add Applicant</button>
+    </div>
+  </div>
+  <div id="cap-banner"></div>
+  <div class="toolbar">
+    <input id="f-search" placeholder="Search name, phone, email…">
+    <select id="f-status"><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="soft_rejected">Soft Reject</option></select>
+    <select id="f-paused"><option value="">Paused: All</option><option value="1">Paused only</option><option value="0">Not paused</option></select>
+    <select id="f-marital"><option value="">Any marital status</option><option value="single">Single</option><option value="married">Married</option><option value="widowed">Widowed</option><option value="divorced">Divorced</option></select>
+    <select id="f-shul"><option value="">All Shuls</option></select>
+    <select id="f-season"></select>
+    <select id="f-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select>
+    <select id="mass-action">
+      <option value="approve">Approve</option>
+      <option value="reject">Reject</option>
+      <option value="set-pending">Set to Pending</option>
+      <option value="delete">Delete Permanently</option>
+    </select>
+    <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
+  </div>
+  <div id="live-banner"></div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table id="tbl">
+      <thead id="thead"></thead>
+      <tbody id="tbody"><tr><td class="empty-state">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="paginator" id="pager"></div>
+`);
+
+let state = { search:'', status:'', paused:'', marital_status:'', shul_id:'', season_id:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
+let selected = new Set();
+
+// Every field a column can show, plus how to render it — the checkbox
+// (selection) column is always first and never customizable, so it's not
+// in this list. Which of these show, and in what order, is per-admin
+// (Customize Columns button, saved via attachColumnCustomizer).
+function contactLine(a) {
+  const method = a.preferred_contact_method || '';
+  const num = a.preferred_number === 'husband' ? a.husband_cell : a.preferred_number === 'wife' ? a.wife_cell : a.home_phone;
+  return `${esc(method)}${num ? ': ' + esc(num) : ''}${a.email ? '<br>' + esc(a.email) : ''}`;
+}
+const APPLICANT_COLUMNS = [
+  { key: 'external_id', label: 'ID', sort: 'external_id', render: a => `<code>${esc(a.external_id||'')}</code>` },
+  { key: 'name', label: 'Name', sort: 'last_name', render: a => `<strong>${esc(a.first_name)} ${esc(a.last_name)}</strong>${a.is_paused ? ' ' + badge('paused','paused') : ''}` },
+  { key: 'shul', label: 'Shul', render: a => esc(a.shul_name || (a.approval_status === 'soft_rejected' && a.previous_shul_name ? `Previously: ${a.previous_shul_name}` : '')) },
+  { key: 'marital_status', label: 'Marital', render: a => esc(a.marital_status||'') },
+  { key: 'contact', label: 'Contact', render: a => contactLine(a) },
+  { key: 'email', label: 'Email', render: a => esc(a.email||'') },
+  { key: 'home_phone', label: 'Home Phone', render: a => esc(a.home_phone||'') },
+  { key: 'husband_cell', label: 'Husband Cell', render: a => esc(a.husband_cell||'') },
+  { key: 'wife_cell', label: 'Wife Cell', render: a => esc(a.wife_cell||'') },
+  { key: 'address', label: 'Address', render: a => esc([a.address,a.city,a.state,a.zip].filter(Boolean).join(', ')) },
+  { key: 'num_children', label: 'Children', render: a => a.num_children ?? 0 },
+  { key: 'home_for_yomtov', label: 'Home Yom Tov', render: a => a.home_for_yomtov ? 'Yes' : 'No' },
+  { key: 'approval_status', label: 'Status', sort: 'approval_status', render: a => badge(a.approval_status, a.approval_status) },
+  { key: 'card_amount', label: 'Card $', sort: 'card_amount', render: a => a.card_amount != null ? fmtMoney(a.card_amount) : '' },
+  { key: 'comments', label: 'Comments', render: a => esc(a.comments||'') },
+  { key: 'created_at', label: 'Submitted', sort: 'created_at', render: a => fmtDate(a.created_at) },
+];
+const DEFAULT_APPLICANT_COLUMNS = ['external_id','name','shul','marital_status','contact','num_children','home_for_yomtov','approval_status','card_amount','created_at'];
+let activeColumns = DEFAULT_APPLICANT_COLUMNS;
+
+function renderThead() {
+  const cols = activeColumns.map(k => APPLICANT_COLUMNS.find(c => c.key === k)).filter(Boolean);
+  qs('#thead').innerHTML = `<tr>
+    <th style="width:34px"><input type="checkbox" id="chk-all"></th>
+    ${cols.map(c => `<th ${c.sort ? `data-sort="${c.sort}"` : ''}>${esc(c.label)}</th>`).join('')}
+    <th></th>
+  </tr>`;
+  qs('#chk-all').addEventListener('change', (e) => { qsa('.row-chk:not(:disabled)').forEach(c => { c.checked = e.target.checked; c.dispatchEvent(new Event('change')); }); });
+}
+qs('#thead').parentElement.addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  state.dir = (state.sort === key && state.dir === 'DESC') ? 'ASC' : 'DESC';
+  state.sort = key; load();
+});
+
+async function load() {
+  const params = new URLSearchParams(Object.fromEntries(Object.entries(state).filter(([,v]) => v !== '')));
+  try {
+    const { applicants, total } = await api('/applicants?' + params);
+    const cols = activeColumns.map(k => APPLICANT_COLUMNS.find(c => c.key === k)).filter(Boolean);
+    qs('#tbody').innerHTML = applicants.length ? applicants.map(a => rowHtml(a, cols)).join('') : `<tr><td colspan="${cols.length+2}" class="empty-state">No applicants found.</td></tr>`;
+    const pages = Math.max(1, Math.ceil(total / state.pageSize));
+    qs('#pager').innerHTML = `<button class="btn btn-sm btn-outline" ${state.page<=1?'disabled':''} onclick="changePage(-1)">Prev</button> Page ${state.page} of ${pages} (${total} total) <button class="btn btn-sm btn-outline" ${state.page>=pages?'disabled':''} onclick="changePage(1)">Next</button>`;
+    qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
+  } catch (err) { toast(err.message, true); }
+}
+function changePage(d) { state.page += d; load(); }
+
+function rowHtml(a, cols) {
+  return `<tr onclick="openApplicant('${a.id}')" style="cursor:pointer">
+    <td onclick="event.stopPropagation()"><input type="checkbox" class="row-chk" data-id="${a.id}"></td>
+    ${cols.map(c => `<td>${c.render(a)}</td>`).join('')}
+    <td><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();openApplicant('${a.id}')">View</button></td>
+  </tr>`;
+}
+
+function onCheck(e) {
+  const id = e.target.dataset.id;
+  if (e.target.checked) selected.add(id); else selected.delete(id);
+  qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
+  qs('#btn-mass-apply').disabled = selected.size === 0;
+}
+
+qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page = 1; load(); }, 350));
+qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page = 1; load(); });
+qs('#f-paused').addEventListener('change', () => { state.paused = qs('#f-paused').value; state.page = 1; load(); });
+qs('#f-marital').addEventListener('change', () => { state.marital_status = qs('#f-marital').value; state.page = 1; load(); });
+qs('#f-shul').addEventListener('change', () => { state.shul_id = qs('#f-shul').value; state.page = 1; load(); });
+qs('#f-season').addEventListener('change', () => {
+  state.season_id = qs('#f-season').value; state.page = 1;
+  // The shul filter is scoped to the season (a shul is a fresh row every
+  // season) — a shul picked under the old season almost certainly isn't a
+  // valid id in the new one, so reset the filter along with the list rather
+  // than silently keep filtering by a shul_id that can never match anything.
+  state.shul_id = ''; populateShulFilter('f-shul', state.season_id);
+  load();
+});
+qs('#f-pagesize').value = state.pageSize;
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; load(); });
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+qs('#btn-template').addEventListener('click', () => downloadAuthed('/applicants/import/template', 'applicant_import_template.xlsx'));
+qs('#btn-export').addEventListener('click', () => downloadAuthed('/applicants/export?' + new URLSearchParams(Object.fromEntries(Object.entries(state).filter(([k,v]) => v !== '' && !['sort','dir','page','pageSize'].includes(k)))), 'applicants.xlsx'));
+qs('#btn-new').addEventListener('click', () => openApplicantForm());
+qs('#btn-import').addEventListener('click', () => openImportModal());
+qs('#f-dupes').addEventListener('click', showDuplicates);
+const MASS_ACTIONS = {
+  approve: {
+    confirm: null,
+    run: (ids) => {
+      const amount = prompt("Card amount to set for all selected (leave blank to use each applicant's existing/default amount):", '');
+      const body = { ids };
+      if (amount !== null && amount !== '') body.card_amount = +amount;
+      return api('/applicants/mass-approve', { method: 'POST', body });
+    },
+    summarize: r => {
+      let msg = `Approved ${r.approved}, skipped ${r.skipped}${r.capReached ? ' (season capacity reached)' : ' (paused)'}`;
+      if (r.contributionBlocked) msg += ` — ${r.contributionBlocked} skipped: shul contribution not confirmed / below minimum`;
+      if (r.providerErrors) {
+        msg += ` — ${r.providerErrors} disccardpromos issue(s)`;
+        // Real per-applicant reasons, not just a bare count — see the
+        // comment on providerErrorDetails in the mass-approve route. Only
+        // the first few are shown inline (a large batch could otherwise
+        // produce an unreadably long toast); providerErrorsHint still covers
+        // the single most common case (no Package/Discount ID configured).
+        if (r.providerErrorDetails?.length) msg += `: ${r.providerErrorDetails.slice(0, 3).join('; ')}${r.providerErrorDetails.length > 3 ? `; +${r.providerErrorDetails.length - 3} more (see Recent Actions for the full list)` : ''}`;
+        else if (r.providerErrorsHint) msg += `: ${r.providerErrorsHint}`;
+      }
+      // Not an "error" (an intentionally-comped applicant looks identical),
+      // but used to be silent — indistinguishable from funds genuinely
+      // loading. If this fires for most/all of a batch, the amount typed
+      // into the prompt above was left blank AND the applicants' own Card
+      // Amount / the season's default are $0 or unset.
+      if (r.zeroAmountSkipped) msg += ` — ${r.zeroAmountSkipped} had a $0 card amount, nothing sent to disccardpromos`;
+      return { msg, isError: !!r.providerErrors || !!r.contributionBlocked || !!r.zeroAmountSkipped };
+    },
+  },
+  reject: {
+    confirm: n => `Reject ${n} selected applicant(s)?`,
+    run: (ids) => api('/applicants/mass-reject', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Rejected ${r.rejected}, skipped ${r.skipped}`, isError: !!r.cardLockErrors }),
+  },
+  'set-pending': {
+    confirm: n => `Move ${n} selected applicant(s) back to pending?`,
+    run: (ids) => api('/applicants/mass-set-pending', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Updated ${r.updated}, skipped ${r.skipped}`, isError: !!r.cardLockErrors }),
+  },
+  delete: {
+    confirm: n => `Permanently delete ${n} selected applicant(s)? This removes each applicant, their cards, and notes completely and cannot be undone.`,
+    run: (ids) => api('/applicants/mass-delete-permanent', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}`, isError: !!r.cardLockErrors }),
+  },
+};
+qs('#btn-mass-apply').addEventListener('click', async () => {
+  const action = MASS_ACTIONS[qs('#mass-action').value];
+  const ids = Array.from(selected);
+  if (action.confirm && !confirm(action.confirm(ids.length))) return;
+  try {
+    const r = await action.run(ids);
+    if (!r) return;
+    const { msg, isError } = action.summarize(r);
+    toast(msg, !!isError);
+    selected.clear(); load();
+  } catch (err) { toast(err.message, true); }
+});
+
+async function openApplicant(id) {
+  try {
+    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution } = await api(`/applicants/${id}`);
+    const body = `
+      <div class="tabs" id="atabs"><button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button><button data-t="cards">Card (${cards.length})</button><button data-t="documents">Documents</button><button data-t="messages">Messages</button><button data-t="history">History</button></div>
+      <div id="atab-info">
+        <div class="grid-2">
+          <div><strong>Applicant ID</strong><br><code>${esc(a.external_id||'')}</code></div>
+          <div><strong>Status</strong><br>${badge(a.approval_status, a.approval_status)} ${a.is_paused ? badge('paused','paused') : ''}</div>
+        </div>
+        ${a.approval_status === 'soft_rejected' && a.previous_shul_name ? `<div class="divider"></div><p class="small-muted">Previously at: <strong>${esc(a.previous_shul_name)}</strong></p>` : ''}
+        ${mergeGroup && mergeGroup.length ? `<div class="divider"></div><div style="color:var(--text-muted);background:#f9efe0;padding:8px 12px;border-radius:6px">
+          <strong>Same person, enrolled through ${mergeGroup.length + 1} record${mergeGroup.length ? 's' : ''}${a.merge_group_id === a.id ? ' (this is the primary record — the only one with a real gift card)' : (a.merge_group_id ? " — the primary record's shul holds the actual gift card" : ' — not yet resolved, see the duplicate flag below')}:</strong>
+          ${mergeGroup.map(m => `${esc(m.first_name)} ${esc(m.last_name)} — ${esc(m.shul_name || (m.previous_shul_name ? `previously ${m.previous_shul_name}` : 'no shul'))} (${badge(m.approval_status, m.approval_status)})`).join(', ')}
+        </div>` : ''}
+        <div class="divider"></div>
+        <div class="grid-2">
+          <div><label>First Name</label><input id="e-first_name" value="${esc(a.first_name||'')}"></div>
+          <div><label>Last Name</label><input id="e-last_name" value="${esc(a.last_name||'')}"></div>
+        </div>
+        <label>Shul</label><select id="e-shul_id"><option value="">Loading…</option></select>
+        <div class="grid-2">
+          <div><label>Marital Status</label><select id="e-marital"><option ${a.marital_status==='single'?'selected':''}>single</option><option ${a.marital_status==='married'?'selected':''}>married</option><option ${a.marital_status==='widowed'?'selected':''}>widowed</option><option ${a.marital_status==='divorced'?'selected':''}>divorced</option></select></div>
+          <div><label>Children</label><input id="e-children" type="number" value="${a.num_children??0}"></div>
+        </div>
+        <div class="grid-2">
+          <div><label>Home Phone</label><input id="e-home_phone" value="${esc(a.home_phone||'')}"></div>
+          <div><label>Email</label><input id="e-email" value="${esc(a.email||'')}"></div>
+        </div>
+        <div class="grid-2">
+          <div><label>Husband Cell</label><input id="e-husband_cell" value="${esc(a.husband_cell||'')}"></div>
+          <div><label>Wife Cell</label><input id="e-wife_cell" value="${esc(a.wife_cell||'')}"></div>
+        </div>
+        <div class="grid-2">
+          <div><label>Preferred Contact</label><select id="e-pcm"><option value=""></option><option ${a.preferred_contact_method==='phone'?'selected':''}>phone</option><option ${a.preferred_contact_method==='text'?'selected':''}>text</option><option ${a.preferred_contact_method==='email'?'selected':''}>email</option></select></div>
+          <div><label>Number To Use</label><select id="e-pn"><option value=""></option><option ${a.preferred_number==='home'?'selected':''}>home</option><option ${a.preferred_number==='husband'?'selected':''}>husband</option><option ${a.preferred_number==='wife'?'selected':''}>wife</option></select></div>
+        </div>
+        <label>Address</label><input id="e-address" value="${esc(a.address||'')}">
+        <div class="grid-2"><div><label>City</label><input id="e-city" value="${esc(a.city||'')}"></div><div><label>State</label><input id="e-state" value="${esc(a.state||'')}"></div></div>
+        <label>Zip</label><input id="e-zip" value="${esc(a.zip||'')}" style="max-width:160px">
+        <div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="e-yomtov" ${a.home_for_yomtov?'checked':''}><label style="margin:0">Home for Yom Tov</label></div>
+        <label>Card Amount ($)</label><input id="e-card" type="number" step="0.01" value="${a.card_amount ?? ''}">
+        ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="e-provider-exempt" ${a.provider_exempt?'checked':''}><label style="margin:0">Never send to disccardpromos (one-time backfill import)</label></div>` : ''}
+        <label>Comments</label><textarea id="e-comments" rows="3">${esc(a.comments||'')}</textarea>
+        ${requiresShulContribution ? `<div class="divider"></div>
+        <label>Minimum Contribution Override ($, internal — hidden from shul; blank uses the shul's default)</label>
+        <input id="e-min_contribution_override" type="number" step="0.01" min="0" value="${a.min_contribution_override ?? ''}" placeholder="Use shul default">
+        <div class="grid-2" style="margin-top:10px">
+          <div><strong>Shul-Reported Contribution</strong><br>${a.shul_contribution_amount != null ? fmtMoney(a.shul_contribution_amount) : '<span class="small-muted">Not reported yet</span>'}</div>
+          <div><strong>Shul Confirmed</strong><br>${a.shul_contribution_confirmed ? 'Yes' : 'No'}</div>
+        </div>` : ''}
+        <label>Permanent Comments (internal — carries forward to future seasons)</label>
+        <textarea id="e-permanent_comments" rows="3">${esc(a.permanent_comments||'')}</textarea>
+        ${flags.length ? `<div class="divider"></div><div style="color:var(--danger)">
+          <strong>&#9888; Duplicate flag open.</strong>
+          ${flags.map(f => `<div style="margin-top:6px">Matches another applicant — reason: ${esc(f.reason)}.
+            <button class="btn btn-sm btn-outline" onclick="openMergeView('${f.id}','${id}')">View &amp; Resolve</button></div>`).join('')}
+        </div>` : ''}
+      </div>
+      <div id="atab-notes" style="display:none">
+        <div style="display:flex;gap:8px"><input id="new-anote" placeholder="Add an internal note…"><button class="btn btn-sm btn-primary" onclick="addApplicantNote('${id}')">Add</button></div>
+        <div style="margin-top:14px">${notes.map(n => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div>${esc(n.note)}</div><div class="small-muted">${esc(n.first_name||'')} ${esc(n.last_name||'')} · ${fmtDateTime(n.created_at)}</div></div>`).join('') || '<p class="small-muted">No notes yet.</p>'}</div>
+      </div>
+      <div id="atab-cards" style="display:none">
+        ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code></p>` : ''}
+        ${cards.length ? cards.map(c => `<div class="card" style="margin-bottom:10px"><div class="flex-between"><strong>${esc(c.card_number_masked||'Unassigned')}</strong>${badge(c.status,c.status)}</div><div class="small-muted">Amount: ${fmtMoney(c.amount)} · Activated: ${c.activated_at?fmtDateTime(c.activated_at):'not yet'}</div><a class="small-muted" href="/admin/cards?card=${c.id}">View transactions</a></div>`).join('') : `<p class="small-muted">No card assigned yet.</p>${a.approval_status==='approved' ? `<button class="btn btn-sm btn-primary" onclick="assignCard('${id}')">Assign Gift Card</button>` : '<p class="small-muted">Applicant must be approved first.</p>'}`}
+      </div>
+      <div id="atab-documents" style="display:none">
+        <div id="atab-documents-list"><p class="small-muted">Loading…</p></div>
+      </div>
+      <div id="atab-messages" style="display:none">
+        <div id="atab-messages-list"><p class="small-muted">Loading…</p></div>
+      </div>
+      <div id="atab-history" style="display:none">
+        <div id="atab-history-list"><p class="small-muted">Loading…</p></div>
+      </div>`;
+    const footer = `
+      <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Applicant', '/applicants/${id}/other-seasons', 'openApplicant')">View Other Seasons</button>
+      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('applicant','${id}','${esc(a.first_name+' '+a.last_name).replace(/'/g,"\\'")}')">+ Add Task</button>
+      ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteApplicant('${id}')">Delete Permanently</button>` : ''}
+      ${a.approval_status !== 'pending' ? `<button class="btn btn-outline btn-sm" onclick="setApplicantPending('${id}')">Set to Pending</button>` : ''}
+      ${!a.is_paused && a.shul_id && a.approval_status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="openSoftReject('${id}')">Soft Reject…</button>` : ''}
+      ${a.is_paused ? '' : (a.approval_status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="rejectApplicant('${id}')">Reject</button><button class="btn btn-primary btn-sm" onclick="approveApplicant('${id}')">Approve</button>` : '')}
+      <button class="btn btn-primary btn-sm" onclick="saveApplicant('${id}')">Save</button>`;
+    openModal(`${a.first_name} ${a.last_name}`, body, footer);
+    attachShulSelect('e-shul_id', a.shul_id || '', a.season_id || '');
+    loadGoogleMaps().then(() => { attachPlacesAutocomplete('e-address', { address: 'e-address', city: 'e-city', state: 'e-state', zip: 'e-zip' }); });
+    qsa('#atabs button').forEach(b => b.addEventListener('click', () => {
+      qsa('#atabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+      ['info','notes','cards','documents','messages','history'].forEach(t => qs('#atab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+    }));
+    loadDocumentsTab('applicant', id, 'atab-documents-list', a.email || '');
+    loadMessagesTab('applicant', id, 'atab-messages-list', a.husband_cell || a.wife_cell || a.home_phone || '', a.email || '', a);
+    loadHistoryTab('applicant', id, 'atab-history-list');
+  } catch (err) { toast(err.message, true); }
+}
+
+window.saveApplicant = async (id) => {
+  const body = {
+    first_name: qs('#e-first_name').value, last_name: qs('#e-last_name').value,
+    marital_status: qs('#e-marital').value, num_children: +qs('#e-children').value, home_phone: qs('#e-home_phone').value,
+    email: qs('#e-email').value, husband_cell: qs('#e-husband_cell').value, wife_cell: qs('#e-wife_cell').value,
+    preferred_contact_method: qs('#e-pcm').value, preferred_number: qs('#e-pn').value, address: qs('#e-address').value,
+    city: qs('#e-city').value, state: qs('#e-state').value, zip: qs('#e-zip').value, home_for_yomtov: qs('#e-yomtov').checked,
+    card_amount: qs('#e-card').value === '' ? null : +qs('#e-card').value, comments: qs('#e-comments').value,
+    permanent_comments: qs('#e-permanent_comments').value,
+  };
+  const providerExemptEl = qs('#e-provider-exempt');
+  if (providerExemptEl) body.provider_exempt = providerExemptEl.checked;
+  const minContribEl = qs('#e-min_contribution_override');
+  if (minContribEl) body.min_contribution_override = minContribEl.value === '' ? null : +minContribEl.value;
+  // Skip shul_id only if the dropdown hasn't finished loading yet — normally
+  // it's always pre-filled with the applicant's current shul, so this just
+  // sends whatever's selected (unchanged or newly picked).
+  const shulId = qs('#e-shul_id').value;
+  if (shulId) body.shul_id = shulId;
+  try { await api(`/applicants/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.approveApplicant = async (id) => {
+  try {
+    const r = await api(`/applicants/${id}/approve`, { method: 'POST' });
+    const issues = [r.emailError && `email failed: ${r.emailError}`, r.providerAccountError && `disccardpromos account failed: ${r.providerAccountError}`, r.providerFundsError && `card not loaded: ${r.providerFundsError}`].filter(Boolean);
+    toast(issues.length ? `Approved, but ${issues.join('; ')}` : 'Approved', issues.length > 0);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+window.rejectApplicant = async (id) => {
+  if (!confirm('Reject this applicant?')) return;
+  try {
+    const r = await api(`/applicants/${id}/reject`, { method: 'POST' });
+    toast(r.cardLockErrors?.length ? `Rejected, but card lock failed: ${r.cardLockErrors.join('; ')}` : 'Rejected', !!r.cardLockErrors?.length);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+window.setApplicantPending = async (id) => {
+  try {
+    const r = await api(`/applicants/${id}/set-pending`, { method: 'POST' });
+    toast(r.cardLockErrors?.length ? `Moved back to pending, but card lock failed: ${r.cardLockErrors.join('; ')}` : 'Moved back to pending', !!r.cardLockErrors?.length);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+// Lists every shul this applicant is (or, via a duplicate match, might be)
+// submitted under — GET /applicants/:id/shul-group already resolves the
+// whole cluster, open-flag or already-merged. Soft-rejecting any one of
+// them detaches just that record from its shul and marks it Soft Reject;
+// the others in the list are untouched.
+window.openSoftReject = async (id) => {
+  try {
+    const { members } = await api(`/applicants/${id}/shul-group`);
+    const body = `<p class="small-muted">Pick which shul's submission to remove. That record is detached from its shul and marked <strong>Soft Reject</strong> — it stays that way, not counted against any shul's slots, until an admin gives it a shul again (which moves it back to Pending automatically).</p>
+      ${members.map(m => `<div class="card" style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div><strong>${esc(m.first_name)} ${esc(m.last_name)}</strong>${m.id === id ? ' <span class="small-muted">(this record)</span>' : ''}<br>
+          <span class="small-muted">${esc(m.shul_name || (m.previous_shul_name ? `No shul (previously ${m.previous_shul_name})` : 'No shul'))} — ${badge(m.approval_status, m.approval_status)}</span></div>
+        ${m.shul_id ? `<button class="btn btn-sm btn-danger" onclick="softRejectApplicant('${m.id}','${id}')">Soft Reject</button>` : '<span class="small-muted">No shul to remove from</span>'}
+      </div>`).join('')}`;
+    // Closed first — this modal is always opened on top of the applicant
+    // profile modal, and openModal() never removes a prior one on its own
+    // (see the identical note on openMergeView above).
+    closeModal();
+    openModal('Soft Reject', body, `<button class="btn btn-outline btn-sm" onclick="closeModal();openApplicant('${id}')">Cancel</button>`);
+  } catch (err) { toast(err.message, true); }
+};
+window.softRejectApplicant = async (memberId, fromId) => {
+  if (!confirm('Remove this applicant from their shul and mark them Soft Reject?')) return;
+  try {
+    const r = await api(`/applicants/${memberId}/soft-reject`, { method: 'POST' });
+    toast(r.cardLockErrors?.length ? `Soft rejected, but card lock failed: ${r.cardLockErrors.join('; ')}` : 'Soft rejected', !!r.cardLockErrors?.length);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+window.deleteApplicant = async (id) => {
+  if (!confirm('Permanently delete this applicant? This removes their record, cards, notes, and documents completely and cannot be undone. Their disccardpromos customer (if any) will be locked, not deleted.')) return;
+  try {
+    const r = await api(`/applicants/${id}/permanent`, { method: 'DELETE' });
+    toast(r.cardLockErrors?.length ? `Deleted, but disccardpromos lock failed: ${r.cardLockErrors.join('; ')}` : 'Applicant deleted', !!r.cardLockErrors?.length);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+window.addApplicantNote = async (id) => { const note = qs('#new-anote').value.trim(); if (!note) return; try { await api(`/applicants/${id}/notes`, { method: 'POST', body: { note } }); closeModal(); openApplicant(id); } catch (err) { toast(err.message, true); } };
+window.assignCard = async (id) => {
+  const cardNumber = prompt('Enter the physical card number to activate for this applicant (disccardpromos activates a real card you already hold — it does not generate one):');
+  if (!cardNumber) return;
+  try { await api('/cards/assign', { method: 'POST', body: { applicant_id: id, card_number: cardNumber.trim() } }); toast('Card assigned'); closeModal(); openApplicant(id); } catch (err) { toast(err.message, true); }
+};
+
+function openApplicantForm() {
+  const body = `
+    <div class="grid-2"><div><label>First Name *</label><input id="n-first_name"></div><div><label>Last Name *</label><input id="n-last_name"></div></div>
+    <label>Shul *</label><select id="n-shul_id"><option value="">Loading…</option></select>
+    <div class="grid-2">
+      <div><label>Marital Status</label><select id="n-marital_status"><option value=""></option><option>single</option><option>married</option><option>widowed</option><option>divorced</option></select></div>
+      <div><label>Children</label><input id="n-num_children" type="number" value="0"></div>
+    </div>
+    <div class="grid-2"><div><label>Home Phone</label><input id="n-home_phone"></div><div><label>Email</label><input id="n-email"></div></div>
+    <div class="grid-2"><div><label>Husband Cell</label><input id="n-husband_cell"></div><div><label>Wife Cell</label><input id="n-wife_cell"></div></div>
+    <div class="grid-2">
+      <div><label>Preferred Contact</label><select id="n-pcm"><option value=""></option><option>phone</option><option>text</option><option>email</option></select></div>
+      <div><label>Number To Use</label><select id="n-pn"><option value=""></option><option value="home">home</option><option value="husband">husband</option><option value="wife">wife</option></select></div>
+    </div>
+    <label>Address</label><input id="n-address">
+    <div class="grid-2"><div><label>City</label><input id="n-city"></div><div><label>State</label><input id="n-state"></div></div>
+    <label>Zip</label><input id="n-zip">
+    <div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="n-yomtov"><label style="margin:0">Home for Yom Tov</label></div>
+    <label>Card Amount ($)</label><input id="n-card" type="number" step="0.01">
+    <label>Comments</label><textarea id="n-comments" rows="3"></textarea>
+    <div class="divider"></div>
+    <div class="checkbox-row"><input type="checkbox" id="n-bypass"><label style="margin:0">Bypass required fields for this submission</label></div>
+  `;
+  openModal('Add Applicant', body, `<button class="btn btn-primary btn-sm" onclick="createApplicant()">Create</button>`);
+  attachShulSelect('n-shul_id', '', state.season_id);
+  loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
+}
+window.createApplicant = async () => {
+  const body = {
+    first_name: qs('#n-first_name').value, last_name: qs('#n-last_name').value, shul_id: qs('#n-shul_id').value,
+    marital_status: qs('#n-marital_status').value, num_children: +qs('#n-num_children').value || 0,
+    home_phone: qs('#n-home_phone').value, email: qs('#n-email').value,
+    husband_cell: qs('#n-husband_cell').value, wife_cell: qs('#n-wife_cell').value,
+    preferred_contact_method: qs('#n-pcm').value, preferred_number: qs('#n-pn').value,
+    address: qs('#n-address').value, city: qs('#n-city').value, state: qs('#n-state').value, zip: qs('#n-zip').value,
+    home_for_yomtov: qs('#n-yomtov').checked, card_amount: qs('#n-card').value === '' ? null : +qs('#n-card').value,
+    comments: qs('#n-comments').value, bypass_required: qs('#n-bypass').checked,
+  };
+  if (!body.shul_id) return toast('Select a shul from the dropdown', true);
+  try { await api('/applicants', { method: 'POST', body }); toast('Applicant created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+function openImportModal() {
+  const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. The <code>shul_name</code> column must match an existing shul name exactly. To mass-edit existing applicants, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that applicant (only the cells you actually changed), instead of creating a new one.</p>
+    <input type="file" id="import-file" accept=".xlsx">
+    <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="import-bypass"><label style="margin:0">Bypass missing required fields (admin only — rows with blanks are still imported; first/last name still required)</label></div>
+    <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="import-provider-exempt"><label style="margin:0">One-time backfill for another season — never send these to disccardpromos (permanent, even if later approved/rejected)</label></div>
+    <div id="import-result" style="margin-top:14px"></div>`;
+  openModal('Mass Upload Applicants', body, `<button class="btn btn-primary btn-sm" id="btn-run-import" onclick="runImport()">Upload</button>`);
+}
+window.runImport = async () => {
+  const btn = qs('#btn-run-import');
+  if (btn.disabled) return;
+  const file = qs('#import-file').files[0];
+  if (!file) return toast('Choose a file first', true);
+  const fd = new FormData(); fd.append('file', file); fd.append('provider_exempt', qs('#import-provider-exempt').checked); fd.append('bypass_required', qs('#import-bypass').checked);
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    const r = await api('/applicants/import', { method: 'POST', isForm: true, body: fd });
+    qs('#import-result').innerHTML = `<p><strong>${r.success}</strong> created, <strong>${r.updated}</strong> updated, <strong>${r.duplicates}</strong> flagged as duplicates, <strong>${r.errors.length}</strong> errors.</p>` +
+      (r.errors.length ? `<ul>${r.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>` : '');
+    load();
+  } catch (err) {
+    if (err.data?.errors) {
+      qs('#import-result').innerHTML = `<p style="color:var(--danger)"><strong>${esc(err.message)}</strong></p><ul>${err.data.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>`;
+    } else toast(err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Upload';
+  }
+};
+
+// Keep in sync with MERGE_FIELDS in services/duplicates.js — real
+// identity/contact/demographic data an admin can pick a per-field winner
+// for when merging. shul/status/source aren't "merged"; each member keeps
+// its own.
+const APPLICANT_MERGE_FIELDS = [
+  ['first_name','First Name'], ['last_name','Last Name'], ['marital_status','Marital Status'],
+  ['home_phone','Home Phone'], ['husband_cell','Husband Cell'], ['wife_cell','Wife Cell'], ['email','Email'],
+  ['address','Address'], ['city','City'], ['state','State'], ['zip','Zip'],
+  ['preferred_contact_method','Preferred Contact'], ['preferred_number','Preferred Number'],
+  ['num_children','Children'], ['home_for_yomtov','Home for Yom Tov'], ['comments','Comments'], ['card_amount','Card Amount'],
+];
+
+let dupFlagsCache = [];
+let dupSearchTerm = '';
+async function showDuplicates() {
+  mergeViewReturnToApplicant = null;
+  try {
+    const { flags } = await api('/applicants/duplicates/open' + (state.season_id ? `?season_id=${state.season_id}` : ''));
+    dupFlagsCache = flags;
+    renderDuplicatesList();
+  } catch (err) { toast(err.message, true); }
+}
+function renderDuplicatesList() {
+  const body = `<input id="dup-search" placeholder="Search by name, shul, or reason…" value="${esc(dupSearchTerm)}" style="margin-bottom:12px">
+    <div id="dup-list">${renderDupListOnly()}</div>`;
+  openModal('Duplicate Applicant Flags', body);
+  qs('#dup-search').addEventListener('input', (e) => { dupSearchTerm = e.target.value; qs('#dup-list').innerHTML = renderDupListOnly(); });
+  qs('#dup-search').focus();
+  qs('#dup-search').selectionStart = qs('#dup-search').selectionEnd = dupSearchTerm.length;
+}
+function renderDupListOnly() {
+  const term = dupSearchTerm.trim().toLowerCase();
+  const flags = term
+    ? dupFlagsCache.filter(f => [f.entity?.first_name, f.entity?.last_name, f.entity?.shul_name, f.matched?.first_name, f.matched?.last_name, f.matched?.shul_name, f.reason]
+        .some(v => (v || '').toLowerCase().includes(term)))
+    : dupFlagsCache;
+  return flags.length ? flags.map(f => `<div class="card" style="margin-bottom:10px">
+      <strong>${esc(f.entity?.first_name)} ${esc(f.entity?.last_name)}</strong> (${esc(f.entity?.shul_name||'')}) may duplicate
+      <strong>${esc(f.matched?.first_name)} ${esc(f.matched?.last_name)}</strong> (${esc(f.matched?.shul_name||'')})<br>
+      <span class="small-muted">Reason: ${esc(f.reason)}</span>
+      <div style="margin-top:10px">
+        <button class="btn btn-sm btn-primary" onclick="openMergeView('${f.id}')">Compare &amp; Resolve</button>
+      </div>
+    </div>`).join('') : `<p class="small-muted">${dupFlagsCache.length ? 'No flags match your search.' : 'No open duplicate flags.'}</p>`;
+}
+
+// The merge group can be more than a pair — the same family can get
+// submitted by three, four, five different shuls in one season, so this
+// always fetches the FULL connected group for the flag, not just its two
+// original entities (see GET /applicants/duplicates/:flagId/group).
+let mergeGroupCache = null;
+// Set only when opened from an applicant's own profile (see openApplicant's
+// "View & Resolve" button) rather than the Duplicates list, so the compare
+// view's Back button can return to that profile directly instead of always
+// landing on the full list — the whole point of surfacing this from the
+// profile in the first place.
+let mergeViewReturnToApplicant = null;
+window.openMergeView = async (flagId, fromApplicantId) => {
+  mergeViewReturnToApplicant = fromApplicantId || null;
+  dismissedMemberIds = new Set();
+  try {
+    const group = await api(`/applicants/duplicates/${flagId}/group`);
+    mergeGroupCache = group;
+    // Closed only once the fetch succeeds — an errored fetch below leaves
+    // whatever modal was already open (profile or list) in place instead of
+    // vanishing into a blank screen. Explicit close before the next
+    // openModal() matters here specifically: unlike every other same-modal
+    // transition in this app, this one can be reached from a DIFFERENT
+    // modal (the applicant profile) and hands back to it later (Back to
+    // Applicant, below) — without this, that round trip stacks multiple
+    // #ec-modal backdrops (openModal never removes a prior one), and the
+    // leftover invisible ones intercept clicks on whatever's rendered on
+    // top.
+    closeModal();
+    renderMergeView();
+  } catch (err) { toast(err.message, true); }
+};
+// Which of this group's members are excluded from the CURRENT merge pass —
+// reset every time a new group is opened (see openMergeView), scoped only
+// to this session/view. Dismissing a member never touches its duplicate
+// flag or status on the backend at all; it just leaves that record out of
+// the merge this compare view submits, same as if it had never been shown.
+// A group can legitimately be 3, 4, 5+ records once flags chain together,
+// and not every pair in it is necessarily the same person just because
+// they're all transitively connected — this is what lets an admin merge
+// the ones that really are the same person while leaving a genuinely-
+// unrelated-looking member's own flag open to sort out separately later.
+let dismissedMemberIds = new Set();
+function renderMergeView() {
+  const { flag, members: allMembers, sharesPhone } = mergeGroupCache;
+  const members = allMembers.filter(m => !dismissedMemberIds.has(m.id));
+  // A soft-rejected member (no current shul) can't be picked as Primary —
+  // the backend rejects it (see mergeApplicants's shul_id guard) since
+  // there'd be no shul left to actually hold the resulting card. Default
+  // the pre-checked radio to the first eligible member instead of always
+  // index 0, so opening this view doesn't start on a choice that would
+  // just get rejected on submit.
+  const defaultPrimaryIdx = Math.max(0, members.findIndex(m => m.shul_id));
+  const cols = members.map((m, i) => `<th style="min-width:180px">
+      <div class="checkbox-row" style="margin-bottom:4px"><input type="radio" name="merge-primary" value="${esc(m.id)}" id="mp-${i}" ${i===defaultPrimaryIdx?'checked':''} ${m.shul_id?'':'disabled'}>
+        <label for="mp-${i}" style="margin:0"><strong>${esc(m.first_name)} ${esc(m.last_name)}</strong></label></div>
+      <span class="small-muted">${esc(m.shul_name || (m.previous_shul_name ? `previously ${m.previous_shul_name}` : 'no shul'))}</span><br>
+      ${badge(m.approval_status, m.approval_status)}
+      ${members.length > 2 ? `<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-outline" onclick="dismissMergeMember('${m.id}')" title="Leave this one out of this merge — still stays flagged as a duplicate for later">Dismiss</button></div>` : ''}
+    </th>`).join('');
+  const rows = APPLICANT_MERGE_FIELDS.map(([key, label]) => {
+    const cells = members.map((m, i) => {
+      const v = m[key];
+      const display = key === 'home_for_yomtov' ? (v ? 'Yes' : 'No') : (v ?? '');
+      return `<td><label class="checkbox-row" style="margin:0"><input type="radio" name="mf-${key}" value="${esc(String(v ?? ''))}" ${i===0?'checked':''}> <span>${esc(String(display))}</span></label></td>`;
+    }).join('');
+    return `<tr><td class="small-muted" style="white-space:nowrap">${esc(label)}</td>${cells}</tr>`;
+  }).join('');
+  const dismissedCount = allMembers.length - members.length;
+  const body = `
+    <p class="small-muted">Reason flagged: ${esc(flag.reason)}. ${allMembers.length > 2 ? `This is a group of ${allMembers.length} records.` : ''}
+    Pick which record is <strong>Primary</strong> (that's the one that keeps going forward as the real card-holder), then pick which value to keep for each field — you can mix and match from any record.</p>
+    ${dismissedCount ? `<p class="small-muted">${dismissedCount} record${dismissedCount>1?'s':''} left out of this merge — still flagged as a duplicate, unchanged. <button type="button" class="btn btn-sm btn-outline" onclick="dismissedMemberIds.clear();renderMergeView()">Show all again</button></p>` : ''}
+    ${sharesPhone ? '<p style="color:var(--danger)"><strong>These records share a phone number</strong> — they can only be resolved as a merge, not bypassed as coincidentally-similar different people.</p>' : ''}
+    <div style="overflow-x:auto"><table><thead><tr><th></th>${cols}</tr></thead><tbody>${rows}</tbody></table></div>
+  `;
+  const backBtn = mergeViewReturnToApplicant
+    ? `<button class="btn btn-outline btn-sm" onclick="closeModal();openApplicant('${mergeViewReturnToApplicant}')">Back to Applicant</button>`
+    : `<button class="btn btn-outline btn-sm" onclick="closeModal();showDuplicates()">Back to List</button>`;
+  const footer = `${backBtn}
+    ${sharesPhone ? '' : `<button class="btn btn-outline btn-sm" onclick="bypassDup('${flag.id}')">Bypass (not the same person)</button>`}
+    <button class="btn btn-primary btn-sm" onclick="submitMerge('${flag.id}')">Merge &amp; Resolve${dismissedCount ? ` (${members.length} of ${allMembers.length})` : ''}</button>`;
+  openModal('Compare & Merge Records', body, footer);
+}
+window.dismissMergeMember = (id) => {
+  dismissedMemberIds.add(id);
+  renderMergeView();
+};
+// Lands back wherever this compare view was opened from — the applicant's
+// own profile if that's how it was reached, otherwise the full Duplicates
+// list, same as before.
+function afterDuplicateResolved() {
+  closeModal();
+  if (mergeViewReturnToApplicant) openApplicant(mergeViewReturnToApplicant); else showDuplicates();
+  load();
+}
+window.bypassDup = async (id) => {
+  try { await api(`/applicants/duplicates/${id}/resolve`, { method: 'POST', body: { action: 'bypass' } }); afterDuplicateResolved(); }
+  catch (err) { toast(err.message, true); }
+};
+window.submitMerge = async (flagId) => {
+  const primaryId = qs('input[name="merge-primary"]:checked')?.value;
+  if (!primaryId) return toast('Pick a primary record', true);
+  const values = {};
+  for (const [key] of APPLICANT_MERGE_FIELDS) {
+    const el = qs(`input[name="mf-${key}"]:checked`);
+    if (el) values[key] = key === 'num_children' || key === 'card_amount' ? (el.value === '' ? null : +el.value)
+      : key === 'home_for_yomtov' ? (el.value === '1' || el.value === 'true' ? 1 : 0)
+      : el.value;
+  }
+  // Only the members still shown (not Dismissed) go into this merge — the
+  // backend leaves everyone else, and their flags, exactly as they are.
+  const memberIds = mergeGroupCache.members.filter(m => !dismissedMemberIds.has(m.id)).map(m => m.id);
+  try {
+    await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds } });
+    toast('Merged'); afterDuplicateResolved();
+  } catch (err) { toast(err.message, true); }
+};
+
+// Deliberately no load() in this initial-resolution .then() (only in the
+// onChange callback above, fired later by an actual reorder) — the season
+// filter below hasn't set state.season_id yet at this point, so calling
+// load() here raced against populateSeasonFilter and could win, flashing
+// every season's applicants for a moment before the season-filtered load()
+// replaced it.
+attachColumnCustomizer('btn-columns', 'columns_applicants', APPLICANT_COLUMNS, DEFAULT_APPLICANT_COLUMNS, (order) => { activeColumns = order; renderThead(); load(); })
+  .then(order => { activeColumns = order; renderThead(); });
+// Scoped to the resolved season, not called unscoped first — an unscoped
+// call would flash every shul from every past season into the list for a
+// moment before this one replaced it (same race shape #5 fixed for load()
+// above).
+populateSeasonFilter('f-season').then(activeId => { state.season_id = activeId; populateShulFilter('f-shul', activeId); load(); });
+
+// Deep link from the "Notify on Document Signed" admin email (?id=<applicantId>)
+// straight into that applicant's popup.
+const deepLinkApplicantId = new URLSearchParams(location.search).get('id');
+if (deepLinkApplicantId) openApplicant(deepLinkApplicantId);
+
+// A record can change status entirely outside this admin's session (e.g.
+// a document signed via a public link) — re-fetch the list whenever the
+// tab regains focus so it doesn't sit stale indefinitely.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+attachLiveRefresh('live-banner', async () => {
+  const params = new URLSearchParams({ search: state.search, status: state.status, marital_status: state.marital_status, shul_id: state.shul_id, season_id: state.season_id, pageSize: 1 });
+  const { total } = await api('/applicants?' + params);
+  return total;
+}, load);
+api('/seasons/active').then(({ season }) => {
+  if (!season || season.max_accepted_applicants == null) return;
+  qs('#cap-banner').innerHTML = `<div class="card" style="margin-bottom:16px;${season.is_full ? 'border-color:var(--danger)' : ''}">
+    <strong>${esc(season.name)} capacity:</strong> ${season.accepted_count} of ${season.max_accepted_applicants} accepted (${season.remaining} remaining)
+    ${season.is_full ? ' <strong style="color:var(--danger)">This season is full — new applications are locked.</strong>' : ''}
+  </div>`;
+}).catch(() => {});
+</script>
+</body>
+</html>

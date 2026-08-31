@@ -1,0 +1,235 @@
+/* Self-hosted (not a Google Fonts CDN call) so the typed e-signature
+   feature renders identically everywhere, the same reasoning as bundling
+   NotoSansHebrew for PDFs instead of relying on whatever's installed on the
+   signer's device. SIL Open Font License — see frontend/fonts/DancingScript-LICENSE.txt. */
+@font-face {
+  font-family: 'Signature Script';
+  src: url('/fonts/DancingScript-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --brand-bg: #241a15;
+  --brand-bg-2: #2e221b;
+  --brand-panel: #ffffff;
+  --brand-panel-2: #f7f2e8;
+  --brand-gold: #c9a76a;
+  --brand-gold-light: #e3cf9e;
+  --brand-gold-dark: #a9773f;
+  --brand-cream: #f3ede2;
+  --text-dark: #241a15;
+  --text-body: #3a2e24;
+  --text-muted: #8a7c63;
+  --text-on-dark: #f3ede2;
+  --border: #e5dcc8;
+  --success: #4c7a4f;
+  --danger: #a6432f;
+  --warn: #b3823a;
+  --info: #4a6a7a;
+  --radius: 10px;
+  --shadow: 0 4px 18px rgba(36, 26, 21, 0.10);
+  --sidebar-link: #d8c9ac;
+  --sidebar-active-1: rgba(201,167,106,.25);
+  --sidebar-active-2: rgba(169,119,63,.25);
+  --sidebar-muted: #b8a688;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: var(--brand-cream);
+  color: var(--text-body);
+  min-height: 100vh;
+}
+
+a { color: var(--brand-gold-dark); }
+
+h1, h2, h3, h4 { color: var(--text-dark); font-family: Georgia, 'Times New Roman', serif; margin: 0 0 .4em; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 20px; border-radius: 0; border: none; cursor: pointer;
+  font-size: 14px; font-weight: 600; text-decoration: none; transition: transform .08s, opacity .15s;
+}
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: var(--brand-gold); color: var(--text-dark); }
+.btn-primary:hover { opacity: .88; }
+.btn-dark { background: var(--brand-bg); color: var(--brand-gold-light); }
+.btn-outline { background: transparent; border: 1.5px solid var(--brand-gold-dark); color: var(--brand-gold-dark); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-sm { padding: 6px 12px; font-size: 12.5px; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+.card {
+  background: var(--brand-panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 24px;
+}
+
+input, select, textarea {
+  width: 100%; padding: 10px 12px; border-radius: 7px; border: 1.5px solid var(--border);
+  font-size: 14px; background: #fff; color: var(--text-dark); font-family: inherit;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brand-gold-dark); box-shadow: 0 0 0 3px rgba(201,167,106,.25); }
+label { display: block; font-size: 13px; font-weight: 600; color: var(--text-body); margin: 14px 0 5px; }
+label .req { color: var(--danger); }
+.field-hint { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+.rte-toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border: 1.5px solid var(--border); border-bottom: none; background: var(--brand-panel-2); }
+.rte-toolbar button { width: auto; padding: 6px 10px; font-size: 12.5px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--text-body); cursor: pointer; }
+.rte-toolbar button:hover { background: var(--brand-panel-2); border-color: var(--brand-gold-dark); }
+.rte-surface { min-height: 160px; max-height: 400px; overflow-y: auto; padding: 12px; border: 1.5px solid var(--border); border-radius: 0 0 7px 7px; background: #fff; font-size: 14px; color: var(--text-dark); }
+.rte-surface:focus { outline: none; border-color: var(--brand-gold-dark); box-shadow: 0 0 0 3px rgba(201,167,106,.25); }
+.rte-surface img { max-width: 100%; height: auto; }
+
+.badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; }
+.badge-pending { background: #f3e3c4; color: #7a5a1a; }
+.badge-approved, .badge-active, .badge-activated, .badge-signed { background: #dcecdb; color: #2f5c33; }
+.badge-rejected, .badge-paused, .badge-deactivated { background: #f3d9d2; color: #8c3a24; }
+.badge-soft_rejected { background: #e6dcf0; color: #5a3a8c; }
+.badge-submitted, .badge-sent, .badge-assigned { background: #dde6ec; color: #33566a; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th { text-align: left; padding: 10px 12px; background: var(--brand-panel-2); color: var(--text-muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; border-bottom: 2px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }
+th:hover { color: var(--brand-gold-dark); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:hover td { background: var(--brand-panel-2); }
+
+/* App shell */
+.app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+.app-header { display: flex; align-items: center; gap: 20px; padding: 0 24px; background: var(--brand-bg); color: var(--text-on-dark); border-bottom: 1px solid rgba(255,255,255,.08); }
+.app-header .brand { display: flex; align-items: center; gap: 10px; padding: 14px 0; flex-shrink: 0; }
+.app-header .brand img { height: 32px; width: auto; }
+.app-header .brand-name { font-family: Georgia, serif; font-size: 14px; line-height: 1.2; color: var(--brand-gold-light); white-space: nowrap; }
+.app-header .brand-name span { display: block; font-size: 11px; color: var(--sidebar-muted); }
+/* overflow visible (not hidden) is deliberate: layoutNavOverflow() in app.js
+   already hides overflowing links itself via inline display:none, so this
+   container never actually needs to clip anything — but the "More" dropdown
+   (.nav-more-dropdown, position:absolute, opens below the nav bar) is also a
+   descendant of this element, and overflow:hidden here would clip that
+   dropdown's box away, making it render but be entirely invisible/
+   unclickable the moment it opens. */
+.app-header nav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow: visible; }
+.app-header nav a { display: flex; align-items: center; padding: 10px 12px; border-radius: 8px; color: var(--sidebar-link); text-decoration: none; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+.app-header nav a:hover { background: rgba(255,255,255,.06); color: #fff; }
+.app-header nav a.active { background: var(--sidebar-active-1); color: var(--brand-gold-light); font-weight: 600; }
+/* JS-driven overflow menu (layoutNavOverflow in app.js): items that don't
+   fit the header's width get hidden and relisted here instead of the nav
+   scrolling horizontally. Hidden by default (display:none via inline style
+   set only when there's actually overflow); nav-more-btn itself is always
+   in the flow so its width can be measured before deciding what overflows. */
+/* Nav pending-count tally (#10) — replaces the old bare red dot with the
+   actual number, so a glance tells you how many, not just "something". */
+.nav-tally { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 10px; font-weight: 700; line-height: 1; vertical-align: middle; }
+.nav-more { position: relative; flex-shrink: 0; }
+.nav-more-btn { display: flex; align-items: center; gap: 4px; padding: 10px 12px; border-radius: 8px; background: none; border: none; color: var(--sidebar-link); font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; }
+.nav-more-btn:hover, .nav-more-btn.active { background: rgba(255,255,255,.06); color: #fff; }
+.nav-more-dropdown { display: none; position: absolute; top: 100%; left: 0; margin-top: 4px; background: var(--brand-bg); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; box-shadow: var(--shadow); min-width: 200px; z-index: 50; flex-direction: column; padding: 6px; }
+.nav-more-dropdown.open { display: flex; }
+.nav-more-dropdown a { padding: 10px 12px; border-radius: 8px; color: var(--sidebar-link); text-decoration: none; font-size: 13px; white-space: nowrap; }
+.nav-more-dropdown a:hover { background: rgba(255,255,255,.06); color: #fff; }
+.nav-more-dropdown a.active { background: var(--sidebar-active-1); color: var(--brand-gold-light); font-weight: 600; }
+.app-header .header-user { display: flex; align-items: center; gap: 12px; flex-shrink: 0; font-size: 12.5px; color: var(--sidebar-muted); }
+.app-header .header-user-email { white-space: nowrap; }
+.app-header .header-user button { background: none; border: none; color: var(--brand-gold-light); cursor: pointer; padding: 0; font-size: 12.5px; text-decoration: underline; white-space: nowrap; }
+.header-menu-btn { display: none; flex-shrink: 0; background: none; border: none; color: var(--sidebar-link); font-size: 20px; cursor: pointer; padding: 8px; margin-left: auto; }
+
+.content { padding: 26px 28px 60px; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-tile { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+.stat-tile .num { font-size: 28px; font-weight: 700; color: var(--text-dark); font-family: Georgia, serif; }
+.stat-tile .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 4px; }
+
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar input, .toolbar select { width: auto; min-width: 160px; }
+
+.toast { position: fixed; bottom: 24px; right: 24px; background: var(--brand-bg); color: #fff; padding: 12px 20px; border-radius: 8px; box-shadow: var(--shadow); z-index: 999; font-size: 13.5px; opacity: 0; transform: translateY(10px); transition: all .25s; }
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.error { background: var(--danger); }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(36,26,21,.55); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 998; }
+.modal { background: #fff; border-radius: var(--radius); width: 100%; max-width: 900px; box-shadow: var(--shadow); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--border); }
+.modal-header button { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-muted); }
+.modal-body { padding: 20px 24px; max-height: 70vh; overflow-y: auto; }
+.modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+.tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--border); margin-bottom: 18px; }
+.tabs button { background: none; border: none; padding: 10px 16px; font-size: 13.5px; font-weight: 600; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.tabs button.active { color: var(--brand-gold-dark); border-bottom-color: var(--brand-gold-dark); }
+
+.pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.checkbox-row { display: flex; align-items: center; gap: 8px; }
+.checkbox-row input { width: auto; }
+
+/* Shared header/footer nav injected by renderPublicFooter() (frontend/js/app.js)
+   onto every non-homepage public page — the homepage (index.html) renders its
+   own equivalent directly since it already has a full custom header/hero. */
+.public-nav-strip { display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap; padding: 14px 20px; background: var(--brand-bg); }
+.public-nav-strip a { color: #e3cf9e; font-size: 13px; font-weight: 600; text-decoration: none; }
+.public-nav-strip a:hover { color: var(--brand-gold-light); text-decoration: underline; }
+.public-footer-strip { text-align: center; padding: 30px 20px; }
+.public-footer-strip .foot-links { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-bottom: 16px; }
+.public-footer-strip .foot-links a { color: var(--text-muted); font-weight: 600; font-size: 12.5px; text-decoration: none; }
+.public-footer-strip .foot-links a:hover { color: var(--brand-gold-dark); }
+.powered-by { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; text-decoration: none; }
+.powered-by img { height: 15px; width: auto; }
+.powered-by:hover { color: var(--brand-gold-dark); }
+
+.public-wrap { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
+.public-header { text-align: center; margin-bottom: 28px; }
+.public-header .dot { width: 44px; height: 44px; border-radius: 50%; background: var(--brand-bg); display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; }
+.public-header .dot span { color: var(--brand-gold); font-size: 20px; }
+.section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--brand-gold-dark); font-weight: 700; margin: 26px 0 4px; padding-top: 18px; border-top: 1px solid var(--border); }
+.section-title:first-of-type { border-top: none; padding-top: 0; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+@media (max-width: 780px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .app-header { flex-wrap: wrap; padding: 10px 16px; }
+  /* Explicit order on every child (not just nav) — mixing an explicit order
+     on one flex item with the default (0) on its siblings sorts by order
+     value first, so a sibling that comes later in the DOM than nav but
+     shares the default order still renders before it, splitting the nav
+     dropdown visually. Numbering all four removes the ambiguity. */
+  .app-header .brand { order: 1; }
+  .header-menu-btn { order: 2; display: inline-flex !important; align-items: center; justify-content: center; }
+  .app-header .header-user { order: 3; }
+  /* flex-basis (set via `flex: 1` on the base rule) wins over `width` in a
+     row-direction flex container — flex: 1 1 100% is what actually forces
+     this onto its own full-width line instead of squeezing into whatever
+     space is left on the brand/hamburger row. */
+  .app-header nav { display: none; flex: 1 1 100%; flex-direction: column; align-items: stretch; order: 4; overflow-x: visible; }
+  .app-header nav.open { display: flex; }
+  .app-header nav a { padding: 12px 14px; white-space: normal; overflow-wrap: break-word; }
+  .app-header .header-user-email { display: none; }
+}
+
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+.small-muted { font-size: 12px; color: var(--text-muted); }
+.divider { height: 1px; background: var(--border); margin: 18px 0; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.paginator { display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 16px; font-size: 13px; }
+
+#sig-pad { border: 2px dashed var(--border); border-radius: 8px; touch-action: none; background: #fff; width: 100%; height: 160px; }
+
+/* Shared footer for public-facing pages (light background) — homepage has
+   its own dark-themed variant built inline since it sits on --brand-bg. */
+.site-footer { padding: 36px 20px 44px; text-align: center; border-top: 1px solid var(--border); margin-top: 50px; }
+.site-footer-inner { font-size: 12.5px; color: var(--text-muted); }
+.site-footer-inner a { color: var(--brand-gold-dark); text-decoration: none; font-weight: 700; }
+.site-footer-inner a:hover { text-decoration: underline; }
+.site-footer-mark { color: var(--brand-gold-dark); margin-left: 3px; }
+.site-footer-inner img { height: 18px; width: auto; vertical-align: middle; margin-left: 5px; position: relative; top: -1px; }
+
+/* Real logo image, used in place of the old CSS circle/diamond placeholder
+   wherever a brand mark is centered above a form (public headers, login-style
+   pages). Height-constrained so the shield's tall aspect ratio stays sane. */
+.brand-mark { display: block; margin: 0 auto 16px; height: 58px; width: auto; }
+
+/* Address autocomplete suggestions dropdown (js/app.js attachPlacesAutocomplete) */
+.places-dropdown { position: absolute; left: 0; right: 0; top: 100%; margin-top: 2px; background: #fff; border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); z-index: 40; max-height: 220px; overflow-y: auto; }
+.places-dropdown-item { padding: 9px 14px; font-size: 13.5px; cursor: pointer; color: var(--text-body); }
+.places-dropdown-item:hover { background: var(--brand-panel-2); }

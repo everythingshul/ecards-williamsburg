@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Users & Permissions · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+// Kept in sync with PERMISSION_RESOURCES (src/middleware/permissions.js) —
+// every resource that can be gated at all gets a row here.
+const RESOURCES = ['dashboard','shuls','applicants','cards','stores','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit'];
+const RESOURCE_LABELS = {
+  dashboard: 'Dashboard', shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
+  seasons: 'Seasons', forms: 'Form Builder', tasks: 'Tasks', emails: 'Email Center', sms: 'SMS Center',
+  updates: 'Updates', documents: 'E-Signatures', site_content: 'Site Content', contract_settings: 'Documents',
+  users: 'Users & Permissions', settings: 'Settings', audit: 'Recent Actions',
+};
+const HIDABLE_FIELDS = {
+  shuls: ['name_en','name_he','address','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email'],
+  applicants: ['first_name','last_name','home_phone','husband_cell','wife_cell','email','address','card_amount','comments'],
+};
+
+renderShell('/admin/users', `
+  <div class="flex-between"><h2>Users & Permissions</h2><button class="btn btn-primary btn-sm" id="btn-new">+ Invite User</button></div>
+  <p class="small-muted">Control which pages each internal user can see, whether they can edit/export, and which individual fields (e.g. applicant names) are hidden from them.</p>
+  <div class="toolbar">
+    <select id="mass-action">
+      <option value="deactivate">Deactivate</option>
+      <option value="activate">Activate</option>
+      <option value="delete">Delete Permanently</option>
+    </select>
+    <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
+  </div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th style="width:34px"><input type="checkbox" id="chk-all"></th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+let selected = new Set();
+
+async function load() {
+  try {
+    const { users } = await api('/users');
+    const canManage = (u) => u.role !== 'super_admin' || Auth.user()?.role === 'super_admin';
+    qs('#tbody').innerHTML = users.map(u => `<tr>
+      <td onclick="event.stopPropagation()">${canManage(u) ? `<input type="checkbox" class="row-chk" data-id="${u.id}">` : ''}</td>
+      <td>${esc(u.first_name)} ${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(roleLabel(u.role))}</td>
+      <td>${u.is_paused ? badge('paused','paused') : (u.is_active ? badge('active','active') : badge('inactive','rejected'))}</td>
+      <td>${canManage(u) ? `<button class="btn btn-sm btn-outline" onclick="openUser('${u.id}')">Manage</button>` : `<span class="small-muted">Super admin — managed by super admins only</span>`}</td>
+    </tr>`).join('');
+    qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
+  } catch (err) { toast(err.message, true); }
+}
+qs('#chk-all').addEventListener('change', (e) => { qsa('.row-chk').forEach(c => { c.checked = e.target.checked; c.dispatchEvent(new Event('change')); }); });
+function onCheck(e) {
+  const id = e.target.dataset.id;
+  if (e.target.checked) selected.add(id); else selected.delete(id);
+  qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
+  qs('#btn-mass-apply').disabled = selected.size === 0;
+}
+const MASS_ACTIONS = {
+  deactivate: {
+    confirm: n => `Deactivate ${n} selected user(s)? They will be blocked from signing in, but their accounts and history stay on file. Your own account is always skipped even if selected.`,
+    run: (ids) => api('/users/mass-deactivate', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deactivated ${r.updated}, skipped ${r.skipped}` }),
+  },
+  activate: {
+    confirm: n => `Activate ${n} selected user(s)?`,
+    run: (ids) => api('/users/mass-activate', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Activated ${r.updated}, skipped ${r.skipped}` }),
+  },
+  delete: {
+    confirm: n => `Permanently delete ${n} selected user(s)? This cannot be undone. Their notes/sent emails/tasks stay on file, but the accounts themselves are gone. Your own account and the org's last active super admin are always skipped even if selected.`,
+    run: (ids) => api('/users/mass-delete-permanent', { method: 'POST', body: { ids } }),
+    summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}` }),
+  },
+};
+qs('#btn-mass-apply').addEventListener('click', async () => {
+  const action = MASS_ACTIONS[qs('#mass-action').value];
+  const ids = Array.from(selected);
+  if (action.confirm && !confirm(action.confirm(ids.length))) return;
+  try {
+    const r = await action.run(ids);
+    if (!r) return;
+    const { msg, isError } = action.summarize(r);
+    toast(msg, !!isError);
+    selected.clear(); load();
+  } catch (err) { toast(err.message, true); }
+});
+
+function permRow(resource, p) {
+  const fields = HIDABLE_FIELDS[resource];
+  return `<div class="card" style="margin-bottom:10px" data-resource="${resource}">
+    <div class="flex-between"><strong>${esc(RESOURCE_LABELS[resource] || resource)}</strong>
+      <div class="pill-row">
+        <label class="checkbox-row"><input type="checkbox" class="p-view" ${p.can_view?'checked':''}>View</label>
+        <label class="checkbox-row"><input type="checkbox" class="p-edit" ${p.can_edit?'checked':''}>Edit</label>
+        <label class="checkbox-row"><input type="checkbox" class="p-export" ${p.can_export?'checked':''}>Export</label>
+      </div>
+    </div>
+    <label style="margin-top:10px">Scope</label>
+    <select class="p-scope"><option value="all" ${p.scope==='all'?'selected':''}>All records</option><option value="assigned" ${p.scope==='assigned'?'selected':''}>Only assigned records</option></select>
+    ${fields ? `<label>Hidden Fields (invisible to this user)</label><div class="pill-row">${fields.map(f => `<label class="checkbox-row"><input type="checkbox" class="p-hide" value="${f}" ${p.hidden_fields.includes(f)?'checked':''}>${f}</label>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+async function openUser(id) {
+  try {
+    const { user: u, permissions } = await api(`/users/${id}`);
+    const isSelf = id === Auth.user()?.id;
+    const permMap = Object.fromEntries(permissions.map(p => [p.resource, p]));
+    // Must mirror ROLE_DEFAULTS/RESOURCE_DEFAULT_OVERRIDES in
+    // middleware/permissions.js exactly — this is what the server actually
+    // falls back to for a resource with no explicit row, so the checkboxes
+    // have to show that TRUE current state, not a guess. Getting this wrong
+    // is dangerous, not just cosmetic: saveUser() below always writes a row
+    // for every resource from whatever's currently checked, on every save
+    // (even one that only touched the name field) — so if this showed
+    // unchecked Edit/Export for an org_admin (whose real default is full
+    // access to everything), simply opening their profile and hitting Save
+    // would silently downgrade them to view-only across the entire app.
+    const defaultPermFor = (r, role) => {
+      if (r === 'audit') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
+      if (role === 'super_admin' || role === 'org_admin') return { can_view: 1, can_edit: 1, can_export: 1, scope: 'all', hidden_fields: [] };
+      return { can_view: 1, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
+    };
+    const body = `
+      <div class="grid-2">
+        <div><label>First Name</label><input id="e-first_name" value="${esc(u.first_name||'')}"></div>
+        <div><label>Last Name</label><input id="e-last_name" value="${esc(u.last_name||'')}"></div>
+      </div>
+      <label>Phone <span class="small-muted">(used for SMS Center sends)</span></label><input id="e-phone" value="${esc(u.phone||'')}">
+      <label>Role</label>
+      <select id="e-role" ${isSelf ? 'disabled' : ''}><option value="staff" ${u.role==='staff'?'selected':''}>Admin (limited)</option><option value="org_admin" ${u.role==='org_admin'?'selected':''}>Org Admin (full)</option>${Auth.user()?.role === 'super_admin' ? `<option value="super_admin" ${u.role==='super_admin'?'selected':''}>Super Admin</option>` : ''}</select>
+      ${isSelf ? '<p class="small-muted">You cannot change your own role.</p>' : ''}
+      <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="e-active" ${u.is_active?'checked':''}><label style="margin:0">Active</label></div>
+      <div class="divider"></div>
+      <h4>Page & Field Permissions</h4>
+      ${isSelf
+        ? '<p class="small-muted">You cannot manage your own permissions — ask another admin to make changes here.</p>'
+        : RESOURCES.map(r => permRow(r, permMap[r] || defaultPermFor(r, u.role))).join('')}
+    `;
+    const canSetPassword = ['super_admin','org_admin'].includes(Auth.user()?.role) && ROLE_RANK[u.role] < ROLE_RANK[Auth.user()?.role];
+    // Only a still-pending account (invite sent, never signed in yet) has a
+    // setup link to resend or copy — an active user already has a password.
+    const pendingSetupBtns = !u.is_active ? `<button class="btn btn-outline btn-sm" onclick="resendInvite('${id}')">Resend Invite</button><button class="btn btn-outline btn-sm" onclick="copyInviteLink('${id}')">Copy Setup Link</button>` : '';
+    openModal(`${u.first_name} ${u.last_name}`, body, `<button class="btn btn-danger btn-sm" onclick="deleteUserPermanently('${id}')">Delete Permanently</button><button class="btn btn-outline btn-sm" onclick="deactivateUser('${id}')">Deactivate</button>${pendingSetupBtns}${canSetPassword ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${id}','${esc(u.first_name+' '+u.last_name).replace(/'/g,"\\'")}')">Set Password</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveUser('${id}')">Save</button>`);
+  } catch (err) { toast(err.message, true); }
+}
+
+window.saveUser = async (id) => {
+  const isSelf = id === Auth.user()?.id;
+  const body = { first_name: qs('#e-first_name').value, last_name: qs('#e-last_name').value, phone: qs('#e-phone').value, is_active: qs('#e-active').checked };
+  // Role and permissions aren't rendered as editable for your own row (see
+  // openUser) — the server rejects self-changes to either anyway, but this
+  // keeps the request itself from even trying.
+  if (!isSelf) {
+    body.role = qs('#e-role').value;
+    body.permissions = qsa('[data-resource]').map(el => ({
+      resource: el.dataset.resource,
+      can_view: el.querySelector('.p-view').checked,
+      can_edit: el.querySelector('.p-edit').checked,
+      can_export: el.querySelector('.p-export').checked,
+      scope: el.querySelector('.p-scope').value,
+      hidden_fields: Array.from(el.querySelectorAll('.p-hide:checked')).map(c => c.value),
+    }));
+  }
+  try { await api(`/users/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+window.deactivateUser = async (id) => { if (!confirm('Deactivate this user? They will be blocked from signing in, but their account and history stay on file.')) return; try { await api(`/users/${id}`, { method: 'DELETE' }); closeModal(); load(); } catch (err) { toast(err.message, true); } };
+window.resendInvite = async (id) => {
+  try { const r = await api(`/users/${id}/resend-invite`, { method: 'POST' }); toast(r.emailError ? `Could not send: ${r.emailError}` : 'Invite resent', !!r.emailError); }
+  catch (err) { toast(err.message, true); }
+};
+window.copyInviteLink = async (id) => {
+  try {
+    const { inviteUrl } = await api(`/users/${id}/invite-link`);
+    try { await navigator.clipboard.writeText(inviteUrl); toast('Setup link copied'); }
+    catch { toast(inviteUrl); }
+  } catch (err) { toast(err.message, true); }
+};
+window.deleteUserPermanently = async (id) => {
+  if (!confirm('Permanently delete this user? This cannot be undone. Their notes/sent emails/tasks stay on file, but the account itself is gone.')) return;
+  try { await api(`/users/${id}/permanent`, { method: 'DELETE' }); toast('User deleted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+qs('#btn-new').addEventListener('click', () => {
+  const body = `<label>Email *</label><input id="n-email" type="email"><label>First Name *</label><input id="n-first_name"><label>Last Name</label><input id="n-last_name">
+    <label>Phone <span class="small-muted">(used for SMS Center sends)</span></label><input id="n-phone">
+    <label>Role</label><select id="n-role"><option value="staff">Admin (limited)</option><option value="org_admin">Org Admin (full)</option></select>`;
+  openModal('Invite User', body, `<button class="btn btn-primary btn-sm" onclick="createUser()">Send Invite</button>`);
+});
+window.createUser = async () => {
+  const body = { email: qs('#n-email').value, first_name: qs('#n-first_name').value, last_name: qs('#n-last_name').value, phone: qs('#n-phone').value, role: qs('#n-role').value };
+  try { const r = await api('/users', { method: 'POST', body }); toast(r.emailError ? `User created, but invite email failed: ${r.emailError}` : 'Invite sent', !!r.emailError); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+
+load();
+</script>
+</body>
+</html>

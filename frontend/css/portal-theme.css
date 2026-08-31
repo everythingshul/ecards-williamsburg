@@ -1,0 +1,23 @@
+/* Portal color override — the internal logged-in app (admin, shul-portal,
+   store-portal) uses the navy/cyan from the everythingshul brand wordmark,
+   while the public marketing pages keep the espresso/gold from the org
+   shield logo. Loaded after theme.css so these variables take precedence;
+   everything else (status colors, spacing, shadows) is shared. */
+:root {
+  --brand-bg: #1e3766;
+  --brand-bg-2: #16294d;
+  --brand-gold: #25a9ea;
+  --brand-gold-light: #6cc9f2;
+  --brand-gold-dark: #1c6fa8;
+  --brand-cream: #eef3f9;
+  --brand-panel-2: #f2f6fb;
+  --text-dark: #1c2f4d;
+  --text-body: #33475b;
+  --text-muted: #75879c;
+  --text-on-dark: #eaf2fb;
+  --border: #dbe4ee;
+  --sidebar-link: #a9c4e6;
+  --sidebar-active-1: rgba(37,169,234,.28);
+  --sidebar-active-2: rgba(28,111,168,.28);
+  --sidebar-muted: #7fa0c7;
+}

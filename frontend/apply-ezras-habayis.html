@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ezras Habayis Application · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+</head>
+<body>
+<div class="public-wrap">
+  <div class="public-header">
+    <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+    <h1>Ezras Habayis Application</h1>
+    <p class="small-muted">Apply directly for assistance. There is no need to go through a shul for this application.</p>
+  </div>
+
+  <form id="apply-form" class="card">
+    <div id="dyn-fields"><p class="small-muted">Loading…</p></div>
+    <div style="margin-top:26px;text-align:right">
+      <button type="submit" class="btn btn-primary" id="submit-btn">Submit Application</button>
+    </div>
+  </form>
+
+  <div class="card" id="done-section" style="display:none;text-align:center">
+    <h3>&#10003; Application Submitted</h3>
+    <p class="small-muted" id="done-message"></p>
+  </div>
+</div>
+<script src="/js/app.js"></script>
+<script>trackPageview();</script>
+<script>renderPublicFooter();</script>
+<script>
+// Fixed question set for Applicant Application (utils/builtinSchemas.js) —
+// no longer editable through Form Builder. No shul_id field appears since
+// Ezras Habayis applicants auto-attach to the season's locked system shul
+// server-side.
+(async () => {
+  const schema = await loadBuiltinSchema('applicant_application');
+  if (!schema) { qs('#dyn-fields').innerHTML = '<p class="small-muted">This form isn\'t available right now — please try again shortly.</p>'; return; }
+  qs('#dyn-fields').innerHTML = schema.filter(f => f.key !== 'shul_id').map(f => fieldHtml(f)).join('');
+  loadGoogleMaps().then(() => {
+    attachPlacesAutocomplete('address', { address:'address', city:'city', state:'state', zip:'zip' });
+  });
+})();
+
+qs('#apply-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = qs('#submit-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  const data = Object.fromEntries(new FormData(e.target).entries());
+  qsa('input[type=checkbox]', e.target).forEach(c => data[c.name] = c.checked);
+  try {
+    await api('/applicants/apply-ezras-habayis', { method: 'POST', body: data });
+    qs('#apply-form').style.display = 'none';
+    qs('#done-section').style.display = 'block';
+    qs('#done-message').textContent = 'Application received. You will be contacted if any additional information is needed.';
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Submit Application';
+  }
+});
+</script>
+</body>
+</html>

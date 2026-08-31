@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/dashboard', `
+  <div class="flex-between">
+    <h2>Dashboard</h2>
+    <div class="pill-row">
+      <select id="dash-season"></select>
+      <select id="dash-days">
+        <option value="7">Last 7 days</option>
+        <option value="14">Last 14 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="60">Last 60 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </div>
+  </div>
+  <div class="stat-grid" id="stats"><div class="small-muted">Loading…</div></div>
+  <div id="capacity-banner"></div>
+  <div class="card" id="sms-notif-panel" style="display:none;margin-bottom:16px;border-color:var(--brand-gold-dark)">
+    <div class="flex-between"><h3 style="margin:0">New Messages</h3><a href="/admin/sms?tab=inbox" class="btn btn-sm btn-outline">Open Inbox</a></div>
+    <p class="small-muted" id="sms-notif-text" style="margin-top:4px"></p>
+  </div>
+  <div class="card" id="dup-panel" style="display:none;margin-bottom:16px">
+    <div class="flex-between"><h3 style="margin:0">Open Duplicate Flags</h3><a href="/admin/shuls?dup=1" class="btn btn-sm btn-outline">Review</a></div>
+    <p class="small-muted" id="dup-text"></p>
+  </div>
+  <div class="card" id="store-spend-panel" style="display:none;margin-bottom:16px">
+    <div class="flex-between"><h3 style="margin:0">Live Store Spend</h3><a href="/admin/stores" class="btn btn-sm btn-outline">View All Stores</a></div>
+    <p class="small-muted" style="margin-top:4px">Total spent across all participating stores: <strong id="total-store-spend"></strong></p>
+    <div id="top-stores" style="margin-top:10px"></div>
+  </div>
+  <div class="card" id="daily-panel" style="margin-bottom:16px">
+    <h3 style="margin:0 0 10px">Daily Breakdown</h3>
+    <div style="overflow-x:auto">
+      <table><thead><tr><th>Date</th><th>New Shuls</th><th>New Applicants</th><th>Approved</th><th>$ Loaded</th></tr></thead>
+      <tbody id="daily-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="flex-between"><h3 style="margin:0" id="my-tasks-heading">My Open Tasks</h3><a href="/admin/tasks" class="btn btn-sm btn-outline">View All Tasks</a></div>
+    <div id="my-tasks" style="margin-top:10px"></div>
+  </div>
+`);
+
+api('/sms/inbox/unread-count').then(({ count }) => {
+  if (!count) return;
+  qs('#sms-notif-panel').style.display = 'block';
+  qs('#sms-notif-text').textContent = `${count} new incoming message${count === 1 ? '' : 's'} since you last checked the Inbox.`;
+}).catch(() => {});
+
+// Seasons list is fetched once (each row already carries live capacity —
+// accepted_count/max_accepted_applicants/remaining/is_full, see
+// routes/seasons.js withCapacity) so switching the dropdown just re-renders
+// the capacity banner locally instead of a fresh call per selection.
+let seasonsCache = [];
+function renderCapacityBanner(seasonId) {
+  const season = seasonsCache.find(s => s.id === seasonId);
+  if (!season || season.max_accepted_applicants == null) { qs('#capacity-banner').innerHTML = ''; return; }
+  qs('#capacity-banner').innerHTML = `<div class="card" style="margin-bottom:16px;${season.is_full ? 'border-color:var(--danger)' : ''}">
+    <strong>${esc(season.name)} capacity:</strong> ${season.accepted_count} of ${season.max_accepted_applicants} accepted (${season.remaining} remaining)
+    ${season.is_full ? ' <strong style="color:var(--danger)">This season is full — new applications are locked.</strong>' : ''}
+  </div>`;
+}
+
+async function loadStats() {
+  const seasonId = qs('#dash-season').value;
+  qs('#stats').innerHTML = '<div class="small-muted">Loading…</div>';
+  try {
+    const params = seasonId ? `?season_id=${seasonId}` : '';
+    const { stats } = await api('/dashboard/stats' + params);
+    const tiles = [];
+    if (stats.shuls) tiles.push(
+      ['Total Shuls', stats.shuls.total], ['Pending Shuls', stats.shuls.pending],
+      ['Approved Shuls', stats.shuls.approved], ['Paused Shuls', stats.shuls.paused]);
+    if (stats.applicants) tiles.push(
+      ['Total Applicants', stats.applicants.total], ['Pending Applicants', stats.applicants.pending],
+      ['Approved Applicants', stats.applicants.approved]);
+    if (stats.cards) tiles.push(
+      ['Cards Issued', stats.cards.total], ['Cards Activated', stats.cards.activated],
+      ['Total Loaded', fmtMoney(stats.cards.totalLoaded)]);
+    qs('#stats').innerHTML = tiles.map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
+    qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
+    if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;
+    if (stats.topStores) {
+      qs('#store-spend-panel').style.display = 'block';
+      qs('#total-store-spend').textContent = fmtMoney(stats.totalStoreSpend);
+      qs('#top-stores').innerHTML = stats.topStores.length ? stats.topStores.map(s => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+          <span>${esc(s.name)}</span><strong>${fmtMoney(s.total_purchases)}</strong>
+        </div>`).join('') : '<p class="small-muted">No store transactions synced yet.</p>';
+    } else {
+      qs('#store-spend-panel').style.display = 'none';
+    }
+  } catch (err) { toast(err.message, true); }
+}
+
+async function loadDaily() {
+  const seasonId = qs('#dash-season').value;
+  const days = qs('#dash-days').value;
+  qs('#daily-tbody').innerHTML = '<tr><td colspan="5" class="empty-state">Loading…</td></tr>';
+  try {
+    const params = new URLSearchParams({ days });
+    if (seasonId) params.set('season_id', seasonId);
+    const { daily } = await api('/dashboard/daily?' + params);
+    const maxApplicants = Math.max(1, ...daily.map(d => d.newApplicants));
+    qs('#daily-tbody').innerHTML = daily.slice().reverse().map(d => `<tr>
+        <td>${fmtDate(d.date)}</td>
+        <td>${d.newShuls}</td>
+        <td style="min-width:160px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1;background:var(--border);border-radius:4px;height:8px;overflow:hidden"><div style="width:${(d.newApplicants / maxApplicants) * 100}%;background:var(--brand-gold-dark);height:100%"></div></div>
+            <span>${d.newApplicants}</span>
+          </div>
+        </td>
+        <td>${d.approved}</td>
+        <td>${d.loaded ? fmtMoney(d.loaded) : ''}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="empty-state">No activity in this window.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+
+(async () => {
+  try {
+    const { seasons } = await api('/seasons');
+    const { season: active } = await api('/seasons/active');
+    seasonsCache = seasons;
+    qs('#dash-season').innerHTML = `<option value="">All Seasons</option>` +
+      seasons.map(s => `<option value="${s.id}" ${active && s.id === active.id ? 'selected' : ''}>${esc(s.name)}${active && s.id === active.id ? ' (active)' : ''}</option>`).join('');
+    renderCapacityBanner(qs('#dash-season').value);
+  } catch { /* dropdown stays on "All Seasons" if this fails */ }
+  qs('#dash-season').addEventListener('change', () => { renderCapacityBanner(qs('#dash-season').value); loadStats(); loadDaily(); });
+  qs('#dash-days').addEventListener('change', loadDaily);
+  loadStats();
+  loadDaily();
+
+  try {
+    const { tasks } = await api('/tasks?assigned_to=me&status=open&pageSize=8');
+    const today = new Date().toISOString().slice(0, 10);
+    const overdueCount = tasks.filter(t => t.due_date && t.due_date < today).length;
+    qs('#my-tasks-heading').innerHTML = `My Open Tasks${tasks.length ? ` ${badge(String(tasks.length), overdueCount ? 'rejected' : 'active')}` : ''}`;
+    qs('#my-tasks').innerHTML = tasks.length ? tasks.map(t => {
+      const overdue = t.due_date && t.due_date < today;
+      const dueLabel = t.due_date ? `<span style="${overdue ? 'color:var(--danger);font-weight:600' : 'color:var(--text-muted)'}">${fmtDate(t.due_date)}${overdue ? ' (overdue)' : ''}</span>` : '';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:10px">
+        <span>${esc(t.title)}</span>${dueLabel}
+      </div>`;
+    }).join('') : '<p class="small-muted">No open tasks assigned to you.</p>';
+  } catch (err) { /* tasks widget is non-critical */ }
+})();
+</script>
+</body>
+</html>

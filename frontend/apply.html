@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shul Registration · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+</head>
+<body>
+<div class="public-wrap">
+  <div class="public-header">
+    <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+    <h1>Shul Registration</h1>
+    <p class="small-muted">Fill out your shul's information below. After submitting, you'll review and sign your season contract right here.</p>
+  </div>
+
+  <form id="apply-form" class="card">
+    <div id="dyn-fields"><p class="small-muted">Loading…</p></div>
+    <input type="hidden" id="shul_place_id" name="place_id"><input type="hidden" id="shul_lat" name="lat"><input type="hidden" id="shul_lng" name="lng">
+    <div style="margin-top:26px;text-align:right">
+      <button type="submit" class="btn btn-primary" id="submit-btn">Continue to Contract</button>
+    </div>
+  </form>
+
+  <div class="card" id="contract-section" style="display:none;margin-top:20px;max-width:900px;margin-left:auto;margin-right:auto">
+    <div class="flex-between" style="flex-wrap:wrap;gap:10px">
+      <h3 style="margin:0">Review & Sign Your Contract</h3>
+      <button type="button" class="btn btn-outline btn-sm" id="print-before-btn">Print / Download</button>
+    </div>
+    <p class="small-muted">Fill in each highlighted field directly on the document below, then sign at the bottom.</p>
+    <div id="pdf-pages"></div>
+    <div class="divider"></div>
+    <label>Signer Full Name <span class="req">*</span></label>
+    <input id="signer_name" dir="auto" placeholder="Type your full legal name" style="margin-bottom:16px">
+    <div id="consent-holder"></div>
+    <div style="margin-top:20px;text-align:right">
+      <button class="btn btn-primary" id="sign-btn">Sign & Submit Application</button>
+    </div>
+  </div>
+
+  <div class="card" id="done-section" style="display:none;text-align:center">
+    <h3>&#10003; Application Submitted</h3>
+    <p id="done-message" class="small-muted"></p>
+    <button type="button" class="btn btn-outline btn-sm" id="print-after-btn" style="display:none">Print / Download Signed Contract</button>
+  </div>
+</div>
+<script src="/js/app.js"></script>
+<script>trackPageview();</script>
+<script>renderPublicFooter();</script>
+<script>
+let shulId = null, signToken = null, currentSchema = [];
+let contractFields = [{ id: 'signature', type: 'signature', label: 'Signature', required: true }];
+let contractPdfUrl = '';
+let contractAtSignup = true;
+
+// Fixed question set for Shul Registration (utils/builtinSchemas.js) — no
+// longer editable through Form Builder.
+(async () => {
+  const schema = await loadBuiltinSchema('shul_application');
+  if (!schema) { qs('#dyn-fields').innerHTML = '<p class="small-muted">This form isn\'t available right now — please try again shortly.</p>'; return; }
+  currentSchema = schema;
+  qs('#dyn-fields').innerHTML = currentSchema.map(f => fieldHtml(f)).join('');
+  loadGoogleMaps().then(() => {
+    attachPlacesAutocomplete('address', { address:'address', city:'city', state:'state', zip:'zip', placeId:'shul_place_id', lat:'shul_lat', lng:'shul_lng' });
+    attachPlacesAutocomplete('ruv_address', { address:'ruv_address', city:'ruv_city', state:'ruv_state', zip:'ruv_zip' });
+    attachPlacesAutocomplete('gabai_address', { address:'gabai_address', city:'gabai_city', state:'gabai_state', zip:'gabai_zip' });
+  });
+})();
+
+// Whether a contract needs to be signed in this same sitting, or is instead
+// emailed separately later (Settings > Documents > Shul Contract) — decides
+// the submit button's label up front, before the org even knows anything
+// was submitted.
+api('/orgs/resolve').then(({ content }) => {
+  contractAtSignup = content?.shulContractAtSignup !== false;
+  if (!contractAtSignup) qs('#submit-btn').textContent = 'Submit';
+}).catch(() => {});
+
+qs('#apply-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = qs('#submit-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  const data = Object.fromEntries(new FormData(e.target).entries());
+  qsa('input[type=checkbox]', e.target).forEach(c => data[c.name] = c.checked);
+  try {
+    const { shul, duplicate, message } = await api('/shuls/apply', { method: 'POST', body: data });
+    shulId = shul.id;
+    if (duplicate || !contractAtSignup) {
+      qs('#apply-form').style.display = 'none';
+      qs('#done-section').style.display = 'block';
+      qs('#done-message').textContent = message;
+      return;
+    }
+    const { sign_token } = await api(`/shuls/${shulId}/generate-contract`, { method: 'POST' });
+    signToken = sign_token;
+    const { fields } = await api(`/shuls/contract/${signToken}`);
+    if (fields && fields.length) contractFields = fields;
+    qs('#apply-form').style.display = 'none';
+    qs('#contract-section').style.display = 'block';
+    qs('#consent-holder').innerHTML = esignConsentHtml('sign');
+    contractPdfUrl = `/api/shuls/contract/${signToken}/pdf-preview`;
+    qs('#print-before-btn').addEventListener('click', () => window.open(contractPdfUrl, '_blank'));
+    await renderPdfSigningPages(contractPdfUrl, contractFields, 'pdf-pages');
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = contractAtSignup ? 'Continue to Contract' : 'Submit';
+  }
+});
+
+qs('#sign-btn').addEventListener('click', async () => {
+  const signerName = qs('#signer_name').value.trim();
+  if (!signerName) return toast('Please type your full name', true);
+  if (!esignConsentChecked('sign')) return;
+  const values = await collectSignValues(contractFields);
+  if (!values) return;
+  const btn = qs('#sign-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  try {
+    await api(`/shuls/contract/${signToken}/sign`, { method: 'POST', body: { signer_name: signerName, values, consent: true } });
+    qs('#contract-section').style.display = 'none';
+    qs('#done-section').style.display = 'block';
+    qs('#done-message').textContent = 'Thank you! Your contract has been signed. An administrator will review your application and email you a link to set up your account once approved.';
+    const printBtn = qs('#print-after-btn');
+    printBtn.style.display = 'inline-flex';
+    printBtn.addEventListener('click', () => window.open(contractPdfUrl, '_blank'));
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Sign & Submit Application';
+  }
+});
+</script>
+</body>
+</html>

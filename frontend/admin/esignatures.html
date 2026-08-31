@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E-Signatures · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/esignatures', `
+  <div class="flex-between"><h2>E-Signatures</h2><button class="btn btn-primary btn-sm" id="btn-new">New E-Signature Request</button></div>
+  <p class="small-muted">Send a document out for signature to anyone — a vendor, a board member, anyone — with no applicant/store/shul record and no portal account needed. Separate from shul contracts and the per-applicant/store documents on their profiles.</p>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th>Title</th><th>Recipient</th><th>Status</th><th>Created</th><th>Sent</th><th>Signed</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+
+async function load() {
+  try {
+    const { documents } = await api('/documents/standalone');
+    qs('#tbody').innerHTML = documents.length ? documents.map(rowHtml).join('') : '<tr><td colspan="7" class="empty-state">No e-signature requests yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+function rowHtml(d) {
+  const canAct = d.status !== 'signed' && d.status !== 'void';
+  return `<tr>
+    <td><strong>${esc(d.title || 'Agreement')}</strong></td>
+    <td>${esc(d.recipient_name || '')}<br><span class="small-muted">${esc(d.recipient_email || '')}</span></td>
+    <td>${badge(d.status, d.status)}</td>
+    <td>${fmtDateTime(d.created_at)}</td>
+    <td>${d.sent_at ? fmtDateTime(d.sent_at) : ''}</td>
+    <td>${d.signed_at ? fmtDateTime(d.signed_at) + ' by ' + esc(d.signer_name || '') : ''}</td>
+    <td style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-sm btn-outline" onclick="viewDocumentPdf('${d.id}')">View PDF</button>
+      ${d.status !== 'signed' ? `<button class="btn btn-sm btn-outline" onclick="openStandaloneFieldEditor('${d.id}','${esc(d.title || 'Agreement').replace(/'/g,"\\'")}')">Edit Fields</button>` : ''}
+      ${canAct ? `<button class="btn btn-sm btn-primary" onclick="sendStandaloneDoc('${d.id}')">${d.status === 'sent' ? 'Resend' : 'Send'}</button>` : ''}
+      ${canAct ? `<button class="btn btn-sm btn-outline" onclick="voidStandaloneDoc('${d.id}')">Void</button>` : ''}
+      ${d.status === 'signed' ? `<button class="btn btn-sm btn-outline" onclick="retractStandaloneDoc('${d.id}')">Retract Signature</button>` : ''}
+    </td>
+  </tr>`;
+}
+
+window.sendStandaloneDoc = async (id) => {
+  try {
+    const r = await api(`/documents/${id}/send`, { method: 'POST', body: {} });
+    toast(r.emailError ? `Link created, but email failed: ${r.emailError}` : 'Signing link sent', !!r.emailError);
+    load();
+  } catch (err) { toast(err.message, true); }
+};
+window.voidStandaloneDoc = async (id) => {
+  if (!confirm('Void this e-signature request?')) return;
+  try { await api(`/documents/${id}/void`, { method: 'POST' }); toast('Voided'); load(); } catch (err) { toast(err.message, true); }
+};
+window.retractStandaloneDoc = async (id) => {
+  if (!confirm('Retract this signature? The document will go back to unsigned and can be signed again.')) return;
+  try { await api(`/documents/${id}/retract`, { method: 'POST' }); toast('Signature retracted'); load(); } catch (err) { toast(err.message, true); }
+};
+
+qs('#btn-new').addEventListener('click', () => {
+  const body = `
+    <label>Recipient Name <span class="req">*</span></label><input id="es-name" placeholder="Full name">
+    <label>Recipient Email <span class="req">*</span></label><input id="es-email" type="email" placeholder="email@example.com">
+    <label>Document Title</label><input id="es-title" placeholder="e.g. Vendor Agreement">
+    <div class="divider"></div>
+    <label>Upload PDF <span class="small-muted">(or leave blank and type the document text below)</span></label>
+    <input id="es-file" type="file" accept="application/pdf">
+    <label>Document Text <span class="small-muted">(used only if no PDF is uploaded)</span></label>
+    <textarea id="es-body" rows="6" placeholder="The full text of the agreement..."></textarea>
+  `;
+  openModal('New E-Signature Request', body, `<button class="btn btn-primary btn-sm" onclick="createStandaloneDoc()">Create</button>`);
+});
+
+window.createStandaloneDoc = async () => {
+  const recipient_name = qs('#es-name').value.trim();
+  const recipient_email = qs('#es-email').value.trim();
+  const title = qs('#es-title').value.trim();
+  const bodyText = qs('#es-body').value.trim();
+  const file = qs('#es-file').files[0];
+  if (!recipient_name || !recipient_email) return toast('Recipient name and email are required', true);
+  if (!file && !bodyText) return toast('Upload a PDF or enter the document text', true);
+
+  const fd = new FormData();
+  fd.append('recipient_name', recipient_name);
+  fd.append('recipient_email', recipient_email);
+  fd.append('title', title);
+  if (bodyText) fd.append('body_text', bodyText);
+  if (file) fd.append('file', file);
+
+  try {
+    await api('/documents/standalone', { method: 'POST', isForm: true, body: fd });
+    toast('E-signature request created');
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+
+// Draggable/resizable field editor for one specific standalone document —
+// same drag/resize mechanics as the shared per-kind signature-box editor
+// (openSignatureBoxEditor in app.js, used by Settings > Documents), just
+// scoped to /documents/:id/fields instead of an org-wide setting, since a
+// standalone document has no fixed template to share placement across.
+let esFieldState = null;
+const ES_TYPE_LABEL = { signature: 'Signature', initial: 'Initial', date: 'Date', text: 'Text' };
+window.openStandaloneFieldEditor = async (id, title) => {
+  let data;
+  try { data = await api(`/documents/${id}/fields`); } catch (err) { return toast(err.message, true); }
+  const pageSize = data.pageSize;
+  let fields = (data.fields && data.fields.length) ? data.fields.map(f => ({ ...f })) : [{ id: 'signature', type: 'signature', label: 'Signature', required: true, x: 0.09, y: 0.62, width: 0.42, height: 0.22 }];
+  let activeId = fields[0].id;
+  const mockW = 320;
+  const mockH = Math.round(mockW * pageSize.height / pageSize.width);
+
+  const bodyHtml = `
+    <p class="small-muted">Drag a field to position it, drag its corner to resize. Add multiple fields for extra signatures, initials, a date, or free text the signer fills in.</p>
+    <div id="esfield-page" style="position:relative;width:${mockW}px;height:${mockH}px;margin:16px auto;background:#fff;border:1px solid var(--border);box-shadow:var(--shadow);overflow:hidden">
+      <canvas id="esfield-canvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
+      <div id="esfield-loading" class="small-muted" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px">Loading page preview…</div>
+      <div id="esfield-boxes" style="position:absolute;inset:0"></div>
+    </div>
+    <div style="text-align:center;margin-bottom:12px">
+      <button type="button" class="btn btn-outline btn-sm" onclick="addStandaloneField('signature')">+ Signature</button>
+      <button type="button" class="btn btn-outline btn-sm" onclick="addStandaloneField('initial')">+ Initial</button>
+      <button type="button" class="btn btn-outline btn-sm" onclick="addStandaloneField('date')">+ Date</button>
+      <button type="button" class="btn btn-outline btn-sm" onclick="addStandaloneField('text')">+ Text</button>
+    </div>
+    <div id="esfield-fields"></div>
+    <p class="small-muted" style="text-align:center">Page size: ${Math.round(pageSize.width)} &times; ${Math.round(pageSize.height)} pt &mdash; showing the document's last page, where the signature area normally goes</p>
+  `;
+  openModal(title, bodyHtml, `<button class="btn btn-primary btn-sm" onclick="saveStandaloneFields('${id}')">Save Placement</button>`);
+  renderPdfPreviewBackground(`/documents/${id}/pdf`, mockW, mockH, 'esfield-canvas', 'esfield-loading');
+
+  function startDrag(e, f, mode) {
+    e.preventDefault(); e.stopPropagation();
+    activeId = f.id;
+    const startPx = { x: e.clientX, y: e.clientY };
+    const startBox = { x: f.x, y: f.y, width: f.width, height: f.height };
+    function onMove(ev) {
+      const dx = (ev.clientX - startPx.x) / mockW, dy = (ev.clientY - startPx.y) / mockH;
+      if (mode === 'move') {
+        f.x = Math.min(1 - f.width, Math.max(0, startBox.x + dx));
+        f.y = Math.min(1 - f.height, Math.max(0, startBox.y + dy));
+      } else {
+        f.width = Math.min(1 - f.x, Math.max(0.1, startBox.width + dx));
+        f.height = Math.min(1 - f.y, Math.max(0.05, startBox.height + dy));
+      }
+      renderBoxes();
+    }
+    function onUp() { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  function renderBoxes() {
+    const page = qs('#esfield-boxes');
+    if (!page) return;
+    page.innerHTML = '';
+    fields.forEach(f => {
+      const box = document.createElement('div');
+      const active = f.id === activeId;
+      box.style.cssText = `position:absolute;left:${f.x * mockW}px;top:${f.y * mockH}px;width:${f.width * mockW}px;height:${f.height * mockH}px;background:rgba(201,167,106,.35);border:2px solid ${active ? 'var(--brand-gold-dark)' : '#999'};cursor:move;box-sizing:border-box;font-size:10px;color:#241a15;display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden`;
+      box.textContent = f.label || ES_TYPE_LABEL[f.type];
+      box.addEventListener('pointerdown', (e) => startDrag(e, f, 'move'));
+      const handle = document.createElement('div');
+      handle.style.cssText = 'position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;background:var(--brand-gold-dark);cursor:nwse-resize';
+      handle.addEventListener('pointerdown', (e) => startDrag(e, f, 'resize'));
+      box.appendChild(handle);
+      page.appendChild(box);
+    });
+  }
+
+  function renderFieldsList() {
+    const el = qs('#esfield-fields');
+    if (!el) return;
+    el.innerHTML = fields.map(f => `
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;padding:6px;border:1px solid ${f.id === activeId ? 'var(--brand-gold-dark)' : 'var(--border)'};border-radius:4px">
+        <select data-fid="${f.id}" class="esfield-type" style="width:100px">
+          ${Object.keys(ES_TYPE_LABEL).map(t => `<option value="${t}" ${f.type === t ? 'selected' : ''}>${ES_TYPE_LABEL[t]}</option>`).join('')}
+        </select>
+        <input data-fid="${f.id}" class="esfield-label" placeholder="Label" value="${esc(f.label || '')}" style="flex:1">
+        <label class="small-muted" style="display:flex;align-items:center;gap:3px;white-space:nowrap"><input type="checkbox" data-fid="${f.id}" class="esfield-required" ${f.required !== false ? 'checked' : ''}> Required</label>
+        <button type="button" class="btn btn-outline btn-sm" onclick="selectStandaloneField('${f.id}')">Select</button>
+        ${fields.length > 1 ? `<button type="button" class="btn btn-outline btn-sm" onclick="removeStandaloneField('${f.id}')">&times;</button>` : ''}
+      </div>
+    `).join('');
+    qsa('.esfield-type').forEach(sel => sel.onchange = () => { const f = fields.find(x => x.id === sel.dataset.fid); f.type = sel.value; renderBoxes(); });
+    qsa('.esfield-label').forEach(inp => inp.oninput = () => { const f = fields.find(x => x.id === inp.dataset.fid); f.label = inp.value; renderBoxes(); });
+    qsa('.esfield-required').forEach(cb => cb.onchange = () => { const f = fields.find(x => x.id === cb.dataset.fid); f.required = cb.checked; });
+  }
+
+  window.addStandaloneField = (type) => {
+    const id2 = 'f' + Math.random().toString(36).slice(2, 9);
+    fields.push({ id: id2, type, label: ES_TYPE_LABEL[type], required: true, x: 0.1, y: 0.1, width: type === 'signature' ? 0.4 : 0.25, height: type === 'signature' ? 0.18 : 0.08 });
+    activeId = id2;
+    renderBoxes(); renderFieldsList();
+  };
+  window.removeStandaloneField = (fid) => {
+    fields = fields.filter(f => f.id !== fid);
+    if (activeId === fid) activeId = fields[0]?.id;
+    renderBoxes(); renderFieldsList();
+  };
+  window.selectStandaloneField = (fid) => { activeId = fid; renderBoxes(); renderFieldsList(); };
+
+  renderBoxes();
+  renderFieldsList();
+  esFieldState = { id, get: () => fields };
+};
+window.saveStandaloneFields = async (id) => {
+  const fields = esFieldState?.id === id ? esFieldState.get() : null;
+  if (!fields || !fields.length) return;
+  try {
+    await api(`/documents/${id}/fields`, { method: 'PUT', body: { fields } });
+    toast('Field placement saved');
+    closeModal();
+  } catch (err) { toast(err.message, true); }
+};
+
+load();
+</script>
+</body>
+</html>

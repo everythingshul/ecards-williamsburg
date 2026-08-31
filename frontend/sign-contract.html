@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign Contract · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+</head>
+<body>
+<div class="public-wrap" style="max-width:900px">
+  <div class="public-header">
+    <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+    <h1 id="title">Sign Your Contract</h1>
+  </div>
+  <div class="card" id="loading">Loading…</div>
+
+  <div class="card" id="contract-section" style="display:none">
+    <div class="flex-between" style="flex-wrap:wrap;gap:10px">
+      <h3 id="shul-name" style="margin:0"></h3>
+      <button type="button" class="btn btn-outline btn-sm" id="print-before-btn">Print / Download</button>
+    </div>
+    <p class="small-muted">Fill in each highlighted field directly on the document below, then sign at the bottom.</p>
+    <div id="pdf-pages"></div>
+    <div class="divider"></div>
+    <label>Signer Full Name <span class="req">*</span></label>
+    <input id="signer_name" dir="auto" placeholder="Type your full legal name">
+    <label>Title / Role <span class="small-muted">(e.g. Gabai, Board Member)</span></label>
+    <input id="signer_title" dir="auto" style="margin-bottom:16px">
+    <div id="consent-holder"></div>
+    <div style="margin-top:20px;text-align:right">
+      <button class="btn btn-primary" id="sign-btn">Sign Contract</button>
+    </div>
+  </div>
+
+  <div class="card" id="done-section" style="display:none;text-align:center">
+    <h3>&#10003; Signed</h3>
+    <p class="small-muted">Thank you. Your contract has been signed. An administrator will follow up shortly.</p>
+    <button type="button" class="btn btn-outline btn-sm" id="print-after-btn">Print / Download Signed Contract</button>
+  </div>
+</div>
+<script src="/js/app.js"></script>
+<script>renderPublicFooter();</script>
+<script>
+const token = new URLSearchParams(location.search).get('token');
+let fields = [{ id: 'signature', type: 'signature', label: 'Signature', required: true }];
+let pdfPreviewUrl = '';
+
+(async () => {
+  if (!token) { qs('#loading').textContent = 'Missing signing link.'; return; }
+  try {
+    const { contract, shul, alreadySigned, fields: contractFields } = await api(`/shuls/contract/${token}`);
+    qs('#loading').style.display = 'none';
+    pdfPreviewUrl = `/api/shuls/contract/${token}/pdf-preview`;
+    if (alreadySigned) {
+      qs('#done-section').style.display = 'block';
+      qs('#done-section').querySelector('p').textContent = 'This contract has already been signed.';
+      qs('#print-after-btn').addEventListener('click', () => window.open(pdfPreviewUrl, '_blank'));
+      return;
+    }
+    if (contractFields && contractFields.length) fields = contractFields;
+    qs('#contract-section').style.display = 'block';
+    qs('#shul-name').textContent = shul.name_en;
+    qs('#consent-holder').innerHTML = esignConsentHtml('sign');
+    qs('#print-before-btn').addEventListener('click', () => window.open(pdfPreviewUrl, '_blank'));
+    await renderPdfSigningPages(pdfPreviewUrl, fields, 'pdf-pages');
+  } catch (err) {
+    qs('#loading').textContent = err.message;
+  }
+})();
+
+qs('#sign-btn')?.addEventListener('click', async () => {
+  const signerName = qs('#signer_name').value.trim();
+  if (!signerName) return toast('Please type your full name', true);
+  if (!esignConsentChecked('sign')) return;
+  const values = await collectSignValues(fields);
+  if (!values) return;
+  const btn = qs('#sign-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  try {
+    await api(`/shuls/contract/${token}/sign`, { method: 'POST', body: { signer_name: signerName, signer_title: qs('#signer_title').value, values, consent: true } });
+    qs('#contract-section').style.display = 'none';
+    qs('#done-section').style.display = 'block';
+    qs('#print-after-btn').addEventListener('click', () => window.open(pdfPreviewUrl, '_blank'));
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Sign Contract';
+  }
+});
+</script>
+</body>
+</html>

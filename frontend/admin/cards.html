@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cards & Transactions · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/cards', `
+  <div class="flex-between"><h2>Cards & Transactions</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-sync-all">Sync All Now</button><button class="btn btn-outline btn-sm" id="btn-export-cards">Export Cards CSV</button><button class="btn btn-outline btn-sm" id="btn-export-txns">Export Transactions CSV</button></div></div>
+  <p class="small-muted">Cards auto-sync with disccardpromos every 15 minutes in the background. Use Sync All Now for an immediate refresh.</p>
+  <div id="mock-banner"></div>
+  <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button></div>
+  <div id="panel-cards">
+    <div class="toolbar"><input id="f-search" placeholder="Search applicant name or card number…"><select id="f-status"><option value="">All statuses</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="activated">Activated</option><option value="deactivated">Deactivated</option></select></div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Applicant</th><th>Shul</th><th>Card #</th><th>Status</th><th>Amount</th><th>Activated</th><th></th></tr></thead>
+      <tbody id="tbody-cards"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+    <div class="paginator" id="pager-cards"></div>
+  </div>
+  <div id="panel-txns" style="display:none">
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Date</th><th>Applicant</th><th>Card #</th><th>Type</th><th>Amount</th><th>Store</th></tr></thead>
+      <tbody id="tbody-txns"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+    <div class="paginator" id="pager-txns"></div>
+  </div>
+  <div id="panel-byshul" style="display:none">
+    <p class="small-muted">Money loaded onto each shul's applicants' cards, and how much of it has been spent in stores so far.</p>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Shul</th><th>Allocated</th><th>Spent</th><th>Remaining</th><th></th></tr></thead>
+      <tbody id="tbody-byshul"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+`);
+
+let state = { search:'', status:'', page:1, pageSize:25 };
+let txnPage = 1;
+
+const cardsTabs = ['cards', 'txns', 'byshul'];
+function showCardsTab(name) {
+  cardsTabs.forEach(t => { qs('#tab-'+t+'-btn').classList.toggle('active', t === name); qs('#panel-'+t).style.display = t === name ? 'block' : 'none'; });
+  if (name === 'txns') loadTxns();
+  if (name === 'byshul') loadByShul();
+}
+qs('#tab-cards-btn').addEventListener('click', () => showCardsTab('cards'));
+qs('#tab-txns-btn').addEventListener('click', () => showCardsTab('txns'));
+qs('#tab-byshul-btn').addEventListener('click', () => showCardsTab('byshul'));
+qs('#btn-export-cards').addEventListener('click', () => downloadAuthed('/cards/export?' + new URLSearchParams({ search: state.search, status: state.status }), 'cards.xlsx'));
+qs('#btn-sync-all').addEventListener('click', async () => {
+  const btn = qs('#btn-sync-all'); btn.disabled = true; btn.textContent = 'Syncing…';
+  try { const r = await api('/cards/sync-all', { method: 'POST' }); toast(`Checked ${r.cardsChecked} card(s), synced ${r.transactionsSynced} new transaction(s)${r.cardsDiscovered ? `, found ${r.cardsDiscovered} card(s) activated directly on disccardpromos` : ''}${r.cardsRemoved ? `, deactivated ${r.cardsRemoved} card(s) removed on disccardpromos` : ''}`); loadCards(); }
+  catch (err) { toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = 'Sync All Now'; }
+});
+qs('#btn-export-txns').addEventListener('click', () => downloadAuthed('/cards/transactions/export', 'transactions.xlsx'));
+
+async function loadCards() {
+  const params = new URLSearchParams(Object.fromEntries(Object.entries(state).filter(([,v]) => v !== '')));
+  try {
+    const { cards, total, mockMode } = await api('/cards?' + params);
+    if (mockMode) qs('#mock-banner').innerHTML = `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><strong>Mock mode:</strong> disccardpromos.com API keys are not configured yet, so card numbers/transactions are simulated placeholders. Set <code>DISCCARDPROMOS_API_BASE</code> and <code>DISCCARDPROMOS_API_KEY</code> to go live.</div>`;
+    qs('#tbody-cards').innerHTML = cards.length ? cards.map(c => `<tr>
+        <td>${esc(c.first_name)} ${esc(c.last_name)}</td><td>${esc(c.shul_name||'')}</td><td>${esc(c.card_number_masked||'')}</td>
+        <td>${badge(c.status,c.status)}</td><td>${fmtMoney(c.amount)}</td><td>${c.activated_at?fmtDateTime(c.activated_at):''}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="openCard('${c.id}')">Manage</button></td>
+      </tr>`).join('') : "<tr><td colspan=\"7\" class=\"empty-state\">No cards yet. Assign cards from an approved applicant's profile.</td></tr>";
+    const pages = Math.max(1, Math.ceil(total / state.pageSize));
+    qs('#pager-cards').innerHTML = `<button class="btn btn-sm btn-outline" ${state.page<=1?'disabled':''} onclick="changePage(-1)">Prev</button> Page ${state.page} of ${pages} <button class="btn btn-sm btn-outline" ${state.page>=pages?'disabled':''} onclick="changePage(1)">Next</button>`;
+  } catch (err) { toast(err.message, true); }
+}
+function changePage(d) { state.page += d; loadCards(); }
+qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page=1; loadCards(); }, 350));
+qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page=1; loadCards(); });
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+async function loadTxns() {
+  try {
+    const { transactions, total } = await api('/cards/transactions/all?page=' + txnPage);
+    qs('#tbody-txns').innerHTML = transactions.length ? transactions.map(t => `<tr>
+        <td>${fmtDateTime(t.occurred_at)}</td><td>${esc(t.first_name||'')} ${esc(t.last_name||'')}</td><td>${esc(t.card_number_masked||'')}</td>
+        <td>${badge(t.type,t.type)}</td><td>${fmtMoney(t.amount)}</td><td>${esc(t.store_name||'')}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No transactions yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+
+async function loadByShul() {
+  try {
+    const { shuls } = await api('/cards/by-shul');
+    qs('#tbody-byshul').innerHTML = shuls.length ? shuls.map(s => {
+      const pct = s.allocated > 0 ? Math.min(100, Math.round((s.spent / s.allocated) * 100)) : 0;
+      return `<tr>
+        <td>${esc(s.shul_name)}</td><td>${fmtMoney(s.allocated)}</td><td>${fmtMoney(s.spent)}</td><td>${fmtMoney(s.remaining)}</td>
+        <td style="min-width:120px"><div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden"><div style="width:${pct}%;background:var(--brand-gold-dark);height:100%"></div></div><span class="small-muted">${pct}%</span></td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="5" class="empty-state">No cards loaded yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+
+async function openCard(id) {
+  try {
+    const { card, transactions } = await api(`/cards/${id}`);
+    const body = `
+      <div class="grid-2">
+        <div><strong>Applicant</strong><br>${esc(card.first_name)} ${esc(card.last_name)}</div>
+        <div><strong>Status</strong><br>${badge(card.status,card.status)}</div>
+      </div>
+      <div class="divider"></div>
+      <div class="grid-2">
+        <div><strong>Card Number</strong><br>${esc(card.card_number_masked||'')}</div>
+        <div><strong>Amount</strong><br>${fmtMoney(card.amount)}</div>
+      </div>
+      ${card.status === 'assigned' ? `<div class="divider"></div><label>Activation Phone <span class="small-muted">(defaults to the applicant's phone on file — change it if they want to activate with a different number)</span></label><input id="act-phone" placeholder="(555) 555-5555" value="${esc(card.husband_cell || card.wife_cell || card.home_phone || '')}">` : ''}
+      <div class="divider"></div>
+      <h4>Transaction History</h4>
+      ${transactions.length ? `<table><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Store</th></tr></thead><tbody>${transactions.map(t=>`<tr><td>${fmtDateTime(t.occurred_at)}</td><td>${badge(t.type,t.type)}</td><td>${fmtMoney(t.amount)}</td><td>${esc(t.store_name||'')}</td></tr>`).join('')}</tbody></table>` : '<p class="small-muted">No transactions synced yet.</p>'}
+    `;
+    const footer = `
+      <button class="btn btn-outline btn-sm" onclick="syncCard('${id}')">Sync Now</button>
+      ${card.status === 'assigned' ? `<button class="btn btn-primary btn-sm" onclick="activateCard('${id}')">Activate</button>` : ''}
+      ${card.status !== 'deactivated' ? `<button class="btn btn-danger btn-sm" onclick="deactivateCard('${id}')">Deactivate</button>` : ''}
+    `;
+    openModal('Card Details', body, footer);
+  } catch (err) { toast(err.message, true); }
+}
+window.syncCard = async (id) => { try { const r = await api(`/cards/${id}/sync`, { method: 'POST' }); toast(`Synced ${r.synced} transaction(s)`); closeModal(); openCard(id); } catch (err) { toast(err.message, true); } };
+window.activateCard = async (id) => {
+  const phone = qs('#act-phone').value.trim();
+  if (!phone) return toast('Enter the phone number to activate with', true);
+  try { await api(`/cards/${id}/activate`, { method: 'POST', body: { phone } }); toast('Card activated'); closeModal(); loadCards(); } catch (err) { toast(err.message, true); }
+};
+window.deactivateCard = async (id) => { if (!confirm('Deactivate this card?')) return; try { await api(`/cards/${id}/deactivate`, { method: 'POST' }); closeModal(); loadCards(); } catch (err) { toast(err.message, true); } };
+
+loadCards();
+const preselect = new URLSearchParams(location.search).get('card');
+if (preselect) openCard(preselect);
+</script>
+</body>
+</html>

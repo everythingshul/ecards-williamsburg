@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Updates · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+renderShell('/admin/updates', `
+  <div class="flex-between"><h2>Updates</h2><button class="btn btn-primary btn-sm" id="btn-compose">Send Update</button></div>
+  <p class="small-muted">Broadcast a message to specific shuls/stores or whole groups. Recipients get an email and see it in their portal.</p>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table><thead><tr><th>Title</th><th>Recipients</th><th>Read</th><th>Sent</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+`);
+
+async function load() {
+  try {
+    const { updates } = await api('/updates');
+    qs('#tbody').innerHTML = updates.length ? updates.map(rowHtml).join('') : '<tr><td colspan="5" class="empty-state">No updates sent yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+function rowHtml(u) {
+  return `<tr>
+    <td><strong>${esc(u.title)}</strong>${u.attachments.length ? ` <span class="small-muted">(${u.attachments.length} attachment${u.attachments.length>1?'s':''})</span>` : ''}</td>
+    <td>${u.recipient_count}</td>
+    <td>${u.read_count} / ${u.recipient_count}</td>
+    <td>${fmtDateTime(u.created_at)}</td>
+    <td><button class="btn btn-sm btn-outline" onclick="viewUpdate('${u.id}')">View</button></td>
+  </tr>`;
+}
+
+window.viewUpdate = async (id) => {
+  try {
+    const { update: u, recipients } = await api(`/updates/${id}`);
+    const body = `
+      ${renderUpdateBody(u)}
+      <div class="divider"></div>
+      <h4>Recipients</h4>
+      <table><thead><tr><th>Type</th><th>Email Status</th><th>Read</th></tr></thead><tbody>
+        ${recipients.map(r => `<tr><td style="text-transform:capitalize">${esc(r.entity_type)}</td><td>${badge(r.email_status, r.email_status==='sent'?'active':'rejected')}</td><td>${r.read_at ? fmtDateTime(r.read_at) : 'Not yet'}</td></tr>`).join('')}
+      </tbody></table>
+    `;
+    openModal(u.title, body);
+  } catch (err) { toast(err.message, true); }
+};
+
+let shulsCache = [], storesCache = [], seasonsCache = [];
+// Which shuls/stores are actually picked — tracked separately from the
+// checkboxes themselves (not just read off the DOM at send time) because
+// the search boxes below only render the rows currently matching the
+// filter; a shul checked, then filtered out of view by a search, must stay
+// selected rather than silently dropping off.
+let selectedShulIds = new Set(), selectedStoreIds = new Set();
+// Shuls are scoped to whichever season is picked (default: active) — a shul
+// is a fresh row every season, so an unscoped list mixes in every shul from
+// every past season too, and "All Shuls" would otherwise blast a current
+// announcement at shuls from seasons long closed (see routes/updates.js's
+// resolveRecipients). Stores aren't scoped: a store is one persistent
+// record reused every season, not a fresh per-season row.
+async function loadShulsForSeason(seasonId) {
+  const { shuls } = await api('/shuls/all-list' + (seasonId ? `?season_id=${seasonId}` : ''));
+  shulsCache = shuls;
+  selectedShulIds = new Set();
+  qs('#up-all-shuls').checked = false;
+  renderShulsList();
+}
+// Same search-to-filter pattern as the Email Center's recipient picker —
+// live-filters the already-loaded list client-side (no round trip needed,
+// this list is already small enough to hold in full) instead of scrolling
+// through every shul/store to find the one to check.
+function renderShulsList() {
+  const q = (qs('#up-shuls-search')?.value || '').trim().toLowerCase();
+  const filtered = q ? shulsCache.filter(s => s.name_en.toLowerCase().includes(q)) : shulsCache;
+  qs('#up-shuls-list').innerHTML = filtered.map(s => `<label class="checkbox-row"><input type="checkbox" class="up-shul" value="${s.id}" ${selectedShulIds.has(s.id)?'checked':''}>${esc(s.name_en)}</label>`).join('')
+    || `<span class="small-muted">${shulsCache.length ? 'No shuls match your search.' : 'No shuls in this season.'}</span>`;
+  qsa('.up-shul').forEach(c => c.addEventListener('change', () => {
+    if (c.checked) selectedShulIds.add(c.value); else selectedShulIds.delete(c.value);
+    qs('#up-all-shuls').checked = selectedShulIds.size === shulsCache.length && shulsCache.length > 0;
+  }));
+}
+function renderStoresList() {
+  const q = (qs('#up-stores-search')?.value || '').trim().toLowerCase();
+  const filtered = q ? storesCache.filter(s => s.name.toLowerCase().includes(q)) : storesCache;
+  qs('#up-stores-list').innerHTML = filtered.map(s => `<label class="checkbox-row"><input type="checkbox" class="up-store" value="${s.id}" ${selectedStoreIds.has(s.id)?'checked':''}>${esc(s.name)}</label>`).join('')
+    || `<span class="small-muted">${storesCache.length ? 'No stores match your search.' : 'No stores yet.'}</span>`;
+  qsa('.up-store').forEach(c => c.addEventListener('change', () => {
+    if (c.checked) selectedStoreIds.add(c.value); else selectedStoreIds.delete(c.value);
+    qs('#up-all-stores').checked = selectedStoreIds.size === storesCache.length && storesCache.length > 0;
+  }));
+}
+qs('#btn-compose').addEventListener('click', async () => {
+  let activeSeasonId = '';
+  selectedShulIds = new Set(); selectedStoreIds = new Set();
+  try {
+    const [{ seasons }, { season: active }, { stores }] = await Promise.all([api('/seasons'), api('/seasons/active'), api('/stores')]);
+    seasonsCache = seasons; storesCache = stores; activeSeasonId = active?.id || '';
+  } catch { /* recipient lists just won't populate */ }
+  const body = `
+    <label>Title <span class="req">*</span></label><input id="up-title">
+    <label>Message <span class="req">*</span></label><textarea id="up-body" rows="6"></textarea>
+    <label>Attachments <span class="small-muted">(images or PDFs, optional)</span></label><input id="up-files" type="file" multiple accept="image/*,application/pdf">
+    <div class="divider"></div>
+    <label>Shuls Season <span class="small-muted">(which season's shuls to choose from / "All Shuls" means)</span></label>
+    <select id="up-season">${seasonsCache.map(s => `<option value="${s.id}" ${s.id === activeSeasonId ? 'selected' : ''}>${esc(s.name)}${s.id === activeSeasonId ? ' (active)' : ''}</option>`).join('')}</select>
+    <label class="checkbox-row"><input type="checkbox" id="up-all-shuls"><strong>All Shuls</strong> (in the season above)</label>
+    <input id="up-shuls-search" placeholder="Search shuls…" style="margin:6px 0">
+    <div id="up-shuls-list" style="max-height:140px;overflow-y:auto;margin:8px 0"><span class="small-muted">Loading…</span></div>
+    <label class="checkbox-row"><input type="checkbox" id="up-all-stores"><strong>All Stores</strong></label>
+    <input id="up-stores-search" placeholder="Search stores…" style="margin:6px 0">
+    <div id="up-stores-list" style="max-height:140px;overflow-y:auto;margin:8px 0"></div>
+  `;
+  openModal('Send Update', body, `<button class="btn btn-primary btn-sm" onclick="sendUpdate()">Send</button>`);
+  loadShulsForSeason(activeSeasonId);
+  renderStoresList();
+  qs('#up-season').addEventListener('change', (e) => loadShulsForSeason(e.target.value));
+  qs('#up-shuls-search').addEventListener('input', debounce(renderShulsList, 200));
+  qs('#up-stores-search').addEventListener('input', debounce(renderStoresList, 200));
+  qs('#up-all-shuls').addEventListener('change', (e) => {
+    selectedShulIds = e.target.checked ? new Set(shulsCache.map(s => s.id)) : new Set();
+    renderShulsList();
+  });
+  qs('#up-all-stores').addEventListener('change', (e) => {
+    selectedStoreIds = e.target.checked ? new Set(storesCache.map(s => s.id)) : new Set();
+    renderStoresList();
+  });
+});
+
+window.sendUpdate = async () => {
+  const title = qs('#up-title').value.trim();
+  const bodyText = qs('#up-body').value.trim();
+  if (!title || !bodyText) return toast('Title and message are required', true);
+  const allShuls = qs('#up-all-shuls').checked;
+  const allStores = qs('#up-all-stores').checked;
+  const groups = [];
+  if (allShuls) groups.push('all_shuls');
+  if (allStores) groups.push('all_stores');
+  const recipients = [];
+  if (!allShuls) selectedShulIds.forEach(id => recipients.push({ entity_type: 'shul', entity_id: id }));
+  if (!allStores) selectedStoreIds.forEach(id => recipients.push({ entity_type: 'store', entity_id: id }));
+  if (!recipients.length && !groups.length) return toast('Select at least one recipient', true);
+
+  const fd = new FormData();
+  fd.append('title', title);
+  fd.append('body', bodyText);
+  fd.append('recipients', JSON.stringify({ recipients, groups, season_id: qs('#up-season')?.value || '' }));
+  const files = qs('#up-files').files;
+  for (const f of files) fd.append('files', f);
+
+  try {
+    const r = await api('/updates', { method: 'POST', isForm: true, body: fd });
+    toast(`Sent to ${r.sentCount} of ${r.recipientCount} recipient(s)${r.failedCount ? `, ${r.failedCount} failed` : ''}`, !!r.failedCount && r.sentCount === 0);
+    closeModal(); load();
+  } catch (err) { toast(err.message, true); }
+};
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Setup · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+<style>.step-dots{display:flex;gap:8px;justify-content:center;margin-bottom:24px}.step-dots span{width:10px;height:10px;border-radius:50%;background:var(--border)}.step-dots span.active{background:var(--brand-gold-dark)}.step-dots span.done{background:var(--success)}</style>
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('store');
+document.body.innerHTML = `
+  <div class="public-wrap">
+    <div class="public-header"><img class="brand-mark" src="/img/org-logo.png" alt="Organization logo"><h1>Complete Your Store Setup</h1></div>
+    <div class="step-dots" id="dots"><span></span><span></span><span></span></div>
+    <div class="card" id="wrap">Loading…</div>
+  </div>`;
+
+let store = null, step = 1;
+const u = Auth.user();
+
+(async () => {
+  try {
+    const { store: s } = await api(`/stores/${u.store_id}`);
+    store = s;
+    step = Math.min(3, (s.onboarding_step || 0) + 1);
+    if (s.onboarding_step >= 3) { location.href = '/store-portal/dashboard'; return; }
+    render();
+  } catch (err) { qs('#wrap').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+})();
+
+function updateDots() {
+  qsa('#dots span').forEach((d, i) => { d.className = i + 1 < step ? 'done' : (i + 1 === step ? 'active' : ''); });
+}
+
+function render() {
+  updateDots();
+  if (step === 1) qs('#wrap').innerHTML = step1Html();
+  else if (step === 2) qs('#wrap').innerHTML = step2Html();
+  else qs('#wrap').innerHTML = step3Html();
+  attachHandlers();
+}
+
+function step1Html() {
+  return `
+    <h3>1. Confirm Your Store Info</h3>
+    <label>Store Name</label><input id="f-name" value="${esc(store.name)}">
+    <label>Address</label><input id="f-address" value="${esc(store.address||'')}">
+    <div class="grid-2"><div><label>City</label><input id="f-city" value="${esc(store.city||'')}"></div><div><label>State</label><input id="f-state" value="${esc(store.state||'')}"></div></div>
+    <label>Store Phone</label><input id="f-phone" value="${esc(store.phone||'')}">
+    <div class="divider"></div>
+    <div class="grid-2"><div><label>Manager Name</label><input id="f-manager_name" value="${esc(store.manager_name||'')}"></div><div><label>Manager Phone</label><input id="f-manager_phone" value="${esc(store.manager_phone||'')}"></div></div>
+    <label>Manager Email</label><input id="f-manager_email" value="${esc(store.manager_email||'')}">
+    <div style="margin-top:20px;text-align:right"><button class="btn btn-primary" id="next-btn">Continue</button></div>`;
+}
+// Step 2 is itself two parts: owner info, then reviewing & signing the
+// actual participation agreement — a real generated document (same
+// full-page-overlay signing UI as shul contracts), not just a plain
+// "I agree" checkbox with no document behind it.
+let step2Signing = false;
+let agreementFields = [{ id: 'signature', type: 'signature', label: 'Signature', required: true }];
+let agreementToken = null;
+
+function step2Html() {
+  if (step2Signing) {
+    return `
+      <h3>2. Review & Sign Your Participation Agreement</h3>
+      <p class="small-muted">Fill in each highlighted field directly on the document below, then sign at the bottom.</p>
+      <div id="pdf-pages"></div>
+      <div class="divider"></div>
+      <label>Signer Full Name <span class="req">*</span></label>
+      <input id="signer_name" dir="auto" placeholder="Type your full legal name" style="margin-bottom:16px">
+      ${esignConsentHtml('sign')}
+      <div style="margin-top:20px;text-align:right"><button class="btn btn-primary" id="sign-btn">Sign & Continue</button></div>`;
+  }
+  return `
+    <h3>2. Owner & Billing Contact</h3>
+    <div class="grid-2"><div><label>Owner Name</label><input id="f-owner_name" value="${esc(store.owner_name||'')}"></div><div><label>Owner Phone</label><input id="f-owner_phone" value="${esc(store.owner_phone||'')}"></div></div>
+    <label>Owner Email</label><input id="f-owner_email" value="${esc(store.owner_email||'')}">
+    <p class="small-muted">This is who billing correspondence (amounts owed, payment schedule) will be sent to.</p>
+    <div style="margin-top:20px;text-align:right"><button class="btn btn-primary" id="next-btn">Continue to Agreement</button></div>`;
+}
+function step3Html() {
+  return `<h3>3. All Set</h3><p class="small-muted">Your setup information has been submitted. An administrator will finish activating your store and reach out with next steps.</p>
+    <div style="margin-top:20px;text-align:right"><button class="btn btn-primary" id="finish-btn">Go to Dashboard</button></div>`;
+}
+
+function attachHandlers() {
+  if (step === 1) qs('#next-btn').addEventListener('click', async () => {
+    const info = { name: qs('#f-name').value, address: qs('#f-address').value, city: qs('#f-city').value, state: qs('#f-state').value,
+      phone: qs('#f-phone').value, manager_name: qs('#f-manager_name').value, manager_phone: qs('#f-manager_phone').value, manager_email: qs('#f-manager_email').value };
+    try { const { store: s } = await api(`/stores/${u.store_id}/onboarding`, { method: 'PUT', body: { step: 1, info } }); store = s; step = 2; render(); } catch (err) { toast(err.message, true); }
+  });
+  if (step === 2 && !step2Signing) qs('#next-btn').addEventListener('click', async () => {
+    const info = { owner_name: qs('#f-owner_name').value, owner_phone: qs('#f-owner_phone').value, owner_email: qs('#f-owner_email').value };
+    try {
+      const { store: s } = await api(`/stores/${u.store_id}/onboarding`, { method: 'PUT', body: { step: 2, info } });
+      store = s;
+      const { sign_token, alreadySigned } = await api('/documents/store-agreement', { method: 'POST' });
+      if (alreadySigned) {
+        // Already signed — most likely at application time, before this
+        // store even had a portal login. Don't make them sign again.
+        const { store: s2 } = await api(`/stores/${u.store_id}/onboarding`, { method: 'PUT', body: { step: 2, agree_terms: true } });
+        store = s2; step = 3; render();
+        return;
+      }
+      agreementToken = sign_token;
+      const { fields } = await api(`/documents/sign/${sign_token}`);
+      if (fields && fields.length) agreementFields = fields;
+      step2Signing = true;
+      render();
+      await renderPdfSigningPages(`/api/documents/sign/${sign_token}/pdf-preview`, agreementFields, 'pdf-pages');
+    } catch (err) { toast(err.message, true); }
+  });
+  if (step === 2 && step2Signing) qs('#sign-btn').addEventListener('click', async () => {
+    const signerName = qs('#signer_name').value.trim();
+    if (!signerName) return toast('Please type your full name', true);
+    if (!esignConsentChecked('sign')) return;
+    const values = await collectSignValues(agreementFields);
+    if (!values) return;
+    const btn = qs('#sign-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+    try {
+      await api(`/documents/sign/${agreementToken}/sign`, { method: 'POST', body: { signer_name: signerName, values, consent: true } });
+      const { store: s } = await api(`/stores/${u.store_id}/onboarding`, { method: 'PUT', body: { step: 2, agree_terms: true } });
+      store = s; step2Signing = false; step = 3; render();
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false; btn.textContent = 'Sign & Continue';
+    }
+  });
+  if (step === 3) qs('#finish-btn').addEventListener('click', async () => {
+    try { await api(`/stores/${u.store_id}/onboarding`, { method: 'PUT', body: { step: 3 } }); location.href = '/store-portal/dashboard'; } catch (err) { toast(err.message, true); }
+  });
+}
+</script>
+</body>
+</html>

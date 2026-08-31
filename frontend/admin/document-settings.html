@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documents · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+if (!Auth.can('contract_settings')) { location.href = '/admin/dashboard'; }
+// Read-only (can_view but not can_edit): the whole page is wrapped in a
+// disabled <fieldset>, same pattern as site-content.html.
+const canEditDocs = Auth.can('contract_settings', 'can_edit');
+renderShell('/admin/document-settings', `
+  <h2>Documents</h2>
+  <fieldset id="docs-fieldset" ${canEditDocs ? '' : 'disabled'} style="border:0;padding:0;margin:0">
+    <p class="small-muted">Each of these can either use your own uploaded PDF as-is, or a simple generated document built from the text below. Whichever is used, the signer's signature is stamped onto the bottom of the last page automatically when they sign.</p>
+    <div class="card">
+      <h3>Shul Contract</h3>
+      <div class="checkbox-row"><input type="checkbox" id="shul-contract-at-signup"><label style="margin:0">Require signing during signup</label></div>
+      <p class="small-muted">When on (default), a shul signs the contract right after filling out their application, in the same sitting. When off, the contract is emailed to them separately instead — same statuses either way (contract sent / signed).</p>
+      <button class="btn btn-sm btn-primary" style="margin-bottom:16px" onclick="saveContractAtSignup('shul')">Save</button>
+      <p class="small-muted" id="pdf-status">Checking…</p>
+      <input type="file" id="contract-pdf-file" accept="application/pdf">
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm btn-primary" onclick="uploadContractPdf()">Upload PDF</button>
+        <button class="btn btn-sm btn-outline" id="btn-remove-pdf" style="display:none" onclick="removeContractPdf()">Remove & Use Generated Template</button>
+        <button class="btn btn-sm btn-outline" onclick="overrideSentContracts()">Override Sent, Unsigned Contracts</button>
+      </div>
+      <p class="small-muted" style="margin-top:6px">Uploading a new PDF or changing the text below only affects contracts sent from now on. Use "Override Sent, Unsigned Contracts" to update every contract that's already been sent but not yet signed — their existing links keep working, no new email is sent. Signed contracts are never touched.</p>
+      <label style="margin-top:16px">Template Text <span class="small-muted">(used only if no PDF is uploaded above)</span></label>
+      <textarea id="contract-text" rows="8"></textarea>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="saveContractText()">Save Text</button>
+        <button class="btn btn-sm btn-outline" onclick="openSignatureBoxEditor('shul','Shul Contract Signature Placement')">Edit Signature Placement</button>
+        <button class="btn btn-sm btn-outline" id="btn-fields-shul" style="display:none" onclick="openContractFieldEditor('shul','Shul Contract Field Placement')">Edit Contract Field Placement</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Applicant Agreement</h3>
+      <p class="small-muted" id="doc-pdf-status-applicant">Checking…</p>
+      <input type="file" id="doc-pdf-file-applicant" accept="application/pdf">
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="uploadDocPdf('applicant')">Upload PDF</button>
+        <button class="btn btn-sm btn-outline" id="btn-remove-doc-pdf-applicant" style="display:none" onclick="removeDocPdf('applicant')">Remove & Use Generated Template</button>
+      </div>
+      <label style="margin-top:16px">Template Text <span class="small-muted">(used only if no PDF is uploaded above)</span></label>
+      <textarea id="doc-text-applicant" rows="8"></textarea>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="saveDocText('applicant')">Save Text</button>
+        <button class="btn btn-sm btn-outline" onclick="openSignatureBoxEditor('applicant','Applicant Agreement Signature Placement')">Edit Signature Placement</button>
+        <button class="btn btn-sm btn-outline" id="btn-fields-applicant" style="display:none" onclick="openContractFieldEditor('applicant','Applicant Agreement Field Placement')">Edit Contract Field Placement</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Store Agreement</h3>
+      <div class="checkbox-row"><input type="checkbox" id="store-contract-at-signup"><label style="margin:0">Require signing during signup</label></div>
+      <p class="small-muted">When on (default), a store signs the agreement right after applying, in the same sitting. When off, it's emailed to them separately instead — same statuses either way.</p>
+      <button class="btn btn-sm btn-primary" style="margin-bottom:16px" onclick="saveContractAtSignup('store')">Save</button>
+      <p class="small-muted" id="doc-pdf-status-store">Checking…</p>
+      <input type="file" id="doc-pdf-file-store" accept="application/pdf">
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="uploadDocPdf('store')">Upload PDF</button>
+        <button class="btn btn-sm btn-outline" id="btn-remove-doc-pdf-store" style="display:none" onclick="removeDocPdf('store')">Remove & Use Generated Template</button>
+      </div>
+      <label style="margin-top:16px">Template Text <span class="small-muted">(used only if no PDF is uploaded above)</span></label>
+      <textarea id="doc-text-store" rows="8"></textarea>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="saveDocText('store')">Save Text</button>
+        <button class="btn btn-sm btn-outline" onclick="openSignatureBoxEditor('store','Store Agreement Signature Placement')">Edit Signature Placement</button>
+        <button class="btn btn-sm btn-outline" id="btn-fields-store" style="display:none" onclick="openContractFieldEditor('store','Store Agreement Field Placement')">Edit Contract Field Placement</button>
+      </div>
+    </div>
+  </fieldset>
+`);
+
+async function loadContractAtSignup() {
+  const { settings } = await api('/contract-settings');
+  qs('#shul-contract-at-signup').checked = settings.shul_contract_at_signup !== '0';
+  qs('#store-contract-at-signup').checked = settings.store_contract_at_signup !== '0';
+}
+window.saveContractAtSignup = async (entityType) => {
+  const checked = qs(`#${entityType}-contract-at-signup`).checked;
+  try { await api('/contract-settings', { method: 'PUT', body: { [`${entityType}_contract_at_signup`]: checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+
+async function loadContractText() {
+  const { settings } = await api('/contract-settings');
+  qs('#contract-text').value = settings.contract_template_text || '';
+}
+window.saveContractText = async () => { try { await api('/contract-settings', { method: 'PUT', body: { contract_template_text: qs('#contract-text').value } }); toast('Saved'); } catch (err) { toast(err.message, true); } };
+
+async function loadContractPdfStatus() {
+  const { hasCustomTemplate } = await api('/contract-settings/contract-pdf');
+  qs('#pdf-status').innerHTML = hasCustomTemplate
+    ? '<strong style="color:var(--success)">A custom contract PDF is currently in use.</strong>'
+    : 'No custom PDF uploaded. Using the generated text template below.';
+  qs('#btn-remove-pdf').style.display = hasCustomTemplate ? 'inline-flex' : 'none';
+  qs('#btn-fields-shul').style.display = hasCustomTemplate ? 'inline-flex' : 'none';
+}
+window.uploadContractPdf = async () => {
+  const file = qs('#contract-pdf-file').files[0];
+  if (!file) return toast('Choose a PDF file first', true);
+  const fd = new FormData(); fd.append('file', file);
+  try { await api('/contract-settings/contract-pdf', { method: 'POST', isForm: true, body: fd }); toast('Contract PDF uploaded'); loadContractPdfStatus(); } catch (err) { toast(err.message, true); }
+};
+window.removeContractPdf = async () => {
+  if (!confirm('Remove the custom PDF and go back to the generated text template?')) return;
+  try { await api('/contract-settings/contract-pdf', { method: 'DELETE' }); toast('Removed'); loadContractPdfStatus(); } catch (err) { toast(err.message, true); }
+};
+window.overrideSentContracts = async () => {
+  if (!confirm('Update every sent-but-unsigned contract to the current template? Existing signing links keep working — no new email is sent. Signed contracts are never touched.')) return;
+  try {
+    const { updated } = await api('/shuls/contracts/regenerate-unsigned', { method: 'POST' });
+    toast(updated ? `Updated ${updated} unsigned contract${updated === 1 ? '' : 's'}` : 'No sent-but-unsigned contracts to update');
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadDocPdfStatus(entityType) {
+  const { hasCustomTemplate } = await api(`/contract-settings/document-pdf/${entityType}`);
+  qs(`#doc-pdf-status-${entityType}`).innerHTML = hasCustomTemplate
+    ? '<strong style="color:var(--success)">A custom PDF is currently in use.</strong>'
+    : 'No custom PDF uploaded. Using the generated text template below.';
+  qs(`#btn-remove-doc-pdf-${entityType}`).style.display = hasCustomTemplate ? 'inline-flex' : 'none';
+  qs(`#btn-fields-${entityType}`).style.display = hasCustomTemplate ? 'inline-flex' : 'none';
+}
+window.uploadDocPdf = async (entityType) => {
+  const file = qs(`#doc-pdf-file-${entityType}`).files[0];
+  if (!file) return toast('Choose a PDF file first', true);
+  const fd = new FormData(); fd.append('file', file);
+  try { await api(`/contract-settings/document-pdf/${entityType}`, { method: 'POST', isForm: true, body: fd }); toast('PDF uploaded'); loadDocPdfStatus(entityType); } catch (err) { toast(err.message, true); }
+};
+window.removeDocPdf = async (entityType) => {
+  if (!confirm('Remove the custom PDF and go back to the generated text template?')) return;
+  try { await api(`/contract-settings/document-pdf/${entityType}`, { method: 'DELETE' }); toast('Removed'); loadDocPdfStatus(entityType); } catch (err) { toast(err.message, true); }
+};
+async function loadDocText(entityType) {
+  const { settings } = await api('/contract-settings');
+  qs(`#doc-text-${entityType}`).value = settings[`document_template_text_${entityType}`] || '';
+}
+window.saveDocText = async (entityType) => {
+  try { await api('/contract-settings', { method: 'PUT', body: { [`document_template_text_${entityType}`]: qs(`#doc-text-${entityType}`).value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+
+loadContractText(); loadContractPdfStatus(); loadContractAtSignup();
+loadDocPdfStatus('applicant'); loadDocPdfStatus('store'); loadDocText('applicant'); loadDocText('store');
+</script>
+</body>
+</html>

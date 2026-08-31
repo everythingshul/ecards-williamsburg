@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulk Upload · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('shul');
+renderShell('/shul-portal/upload', `
+  <h2>Bulk Upload Applicants</h2>
+  <div id="shul-info-banner"></div>
+  <div class="card">
+    <p class="small-muted">Download a blank template, or export your current list (Applicants page &gt; Export) to update existing applicants. Fill it in (Excel .xlsx only — CSV isn't accepted, since it doesn't reliably support Hebrew text), then upload. You don't need to include a shul column: applicants are automatically assigned to your shul.</p>
+    <p class="small-muted" style="color:var(--danger)"><strong>Do not edit the ID column.</strong> A row with an existing ID updates that applicant's info. A blank ID creates a new applicant. If an ID doesn't match one of your existing applicants, the whole upload will be rejected.</p>
+    <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/applicants/import/template','applicant_import_template.xlsx')">Download Blank Template</button>
+    <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/applicants/my-export','my-applicants.xlsx')">Export My Applicants</button>
+    <div class="divider"></div>
+    <input type="file" id="import-file" accept=".xlsx">
+    <div style="margin-top:14px"><button class="btn btn-primary btn-sm" id="btn-run-import" onclick="runImport()">Upload</button></div>
+    <div id="import-result" style="margin-top:16px"></div>
+  </div>
+`);
+// Same shul-info-complete gate as the dashboard's "+ Add Applicant" (#147)
+// — a bulk upload is still submitting applicants, blocked server-side
+// either way, but shown up front here too rather than only after a failed
+// upload attempt.
+api(`/shuls/${Auth.user().shul_id}`).then(({ missingInfo }) => {
+  if (!missingInfo || !missingInfo.length) return;
+  qs('#shul-info-banner').innerHTML = `<div class="card" style="margin-bottom:16px;border-color:var(--danger)">
+    <strong>Your shul's information is incomplete.</strong> ${missingInfo.map(esc).join('; ')}.
+    You can't submit applicants until this is filled in.
+    <a href="/shul-portal/shul-info">Complete it now</a>.
+  </div>`;
+  const btn = qs('#btn-run-import');
+  btn.disabled = true; btn.title = 'Complete your shul information first';
+}).catch(() => {});
+window.runImport = async () => {
+  const btn = qs('#btn-run-import');
+  if (btn.disabled) return;
+  const file = qs('#import-file').files[0];
+  if (!file) return toast('Choose a file first', true);
+  const fd = new FormData(); fd.append('file', file);
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    const r = await api('/applicants/import', { method: 'POST', isForm: true, body: fd });
+    qs('#import-result').innerHTML = `<p><strong>${r.success}</strong> new, <strong>${r.updated}</strong> updated, <strong>${r.duplicates}</strong> flagged as duplicates, <strong>${r.errors.length}</strong> errors.</p>` +
+      (r.success ? `<p>New applicants aren't submitted yet — go to <a href="/shul-portal/dashboard">My Applicants</a> to review and select who to submit.</p>` : '') +
+      (r.errors.length ? `<ul>${r.errors.slice(0,20).map(e=>`<li>Row ${e.row}: ${esc(e.error)}</li>`).join('')}</ul>` : '');
+  } catch (err) { toast(err.message, true); } finally {
+    btn.disabled = false; btn.textContent = 'Upload';
+  }
+};
+</script>
+</body>
+</html>

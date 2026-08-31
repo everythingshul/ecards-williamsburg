@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seasons · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+// 'seasons' is its own resource, separate from 'settings' (see
+// middleware/permissions.js) — a user might have one without the other, so
+// this page is gated on its own permission rather than piggybacking on
+// Settings. Split out of settings.html (where it used to live as a tab)
+// specifically so blocking one never accidentally leaves the other reachable.
+if (!Auth.can('seasons')) { location.href = '/admin/dashboard'; }
+renderShell('/admin/seasons', `
+  <div class="flex-between"><h2>Seasons</h2><button class="btn btn-sm btn-primary" onclick="openNewSeason()">+ New Season</button></div>
+  <div id="seasons-list" style="margin-top:14px">Loading…</div>
+`);
+
+async function loadSeasons() {
+  const { seasons } = await api('/seasons');
+  qs('#seasons-list').innerHTML = seasons.map(s => `<div class="card" style="margin-bottom:10px">
+      <div class="flex-between"><input value="${esc(s.name)}" style="font-weight:600;max-width:320px" onchange="updateSeason('${s.id}',{name:this.value})">${s.is_active ? badge('active','active') : badge('inactive','rejected')}</div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Start Date</label><input type="date" value="${s.start_date||''}" onchange="updateSeason('${s.id}',{start_date:this.value})"></div>
+        <div><label style="margin-top:0">End Date</label><input type="date" value="${s.end_date||''}" onchange="updateSeason('${s.id}',{end_date:this.value})"></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Default Card Amount</label><input type="number" step="0.01" value="${s.default_card_amount ?? 0}" onchange="updateSeason('${s.id}',{default_card_amount:+this.value})"></div>
+        <div><label style="margin-top:0">Season Status</label>${s.is_active ? `<button class="btn btn-sm btn-outline" disabled>This is the active season</button>` : `<button class="btn btn-sm btn-outline" onclick="updateSeason('${s.id}',{is_active:true})">Set as Active Season</button>`}</div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Max Accepted Applicants <span class="small-muted">(blank = unlimited)</span></label><input type="number" min="0" value="${s.max_accepted_applicants ?? ''}" placeholder="Unlimited" onchange="updateSeason('${s.id}',{max_accepted_applicants: this.value === '' ? null : +this.value})"></div>
+        <div><label style="margin-top:0">Accepted So Far</label><div style="padding:9px 0">${s.accepted_count}${s.max_accepted_applicants != null ? ` of ${s.max_accepted_applicants} (${s.remaining} remaining)${s.is_full ? ' ' + badge('full','rejected') : ''}` : ' (no cap set)'}</div></div>
+      </div>
+      <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-contrib-${s.id}" ${s.require_shul_contribution?'checked':''} onchange="updateSeason('${s.id}',{require_shul_contribution:this.checked})">
+        <label for="s-contrib-${s.id}" style="margin:0">Require shuls to report &amp; confirm a minimum contribution before an applicant can be approved</label></div>
+      <p class="small-muted">When on, a shul must enter how much they personally gave a family and check a confirmation box before that applicant can be approved. The minimum amount required (set per shul, overridable per applicant) is never shown to the shul.</p>
+      <div class="divider"></div>
+      <button class="btn btn-sm btn-outline" onclick="openSeasonNotes('${s.id}','${esc(s.name).replace(/'/g,"\\'")}')">Notes</button>
+      <button class="btn btn-sm btn-outline" onclick="openSeasonGiftCardApi('${s.id}','${esc(s.name).replace(/'/g,"\\'")}', ${JSON.stringify(s.disccardpromos_api_base||'')}, ${!!s.has_disccardpromos_api_key})">Gift Card API${s.disccardpromos_api_base && s.has_disccardpromos_api_key ? ' ' + badge('configured','active') : ''}</button>
+    </div>`).join('') || '<p class="small-muted">No seasons yet.</p>';
+}
+window.updateSeason = async (id, body) => { try { await api(`/seasons/${id}`, { method: 'PUT', body }); toast('Saved'); loadSeasons(); } catch (err) { toast(err.message, true); } };
+window.openSeasonNotes = async (id, name) => {
+  try {
+    const { notes } = await api(`/seasons/${id}/notes`);
+    const body = `
+      <div style="display:flex;gap:8px"><input id="new-season-note" placeholder="Add a note about this season…"><button class="btn btn-sm btn-primary" onclick="addSeasonNote('${id}','${name.replace(/'/g,"\\'")}')">Add</button></div>
+      <div style="margin-top:14px">${notes.map(n => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div>${esc(n.note)}</div><div class="small-muted">${esc(n.first_name||'')} ${esc(n.last_name||'')} · ${fmtDateTime(n.created_at)}</div></div>`).join('') || '<p class="small-muted">No notes yet.</p>'}</div>
+    `;
+    openModal(`${name}: Notes`, body);
+  } catch (err) { toast(err.message, true); }
+};
+window.addSeasonNote = async (id, name) => {
+  const note = qs('#new-season-note').value.trim();
+  if (!note) return;
+  try { await api(`/seasons/${id}/notes`, { method: 'POST', body: { note } }); openSeasonNotes(id, name); } catch (err) { toast(err.message, true); }
+};
+// Per-season disccardpromos credentials (see services/giftcard.js) — for
+// now, each season can hold its own API base/key, falling back to the
+// org-wide DISCCARDPROMOS_API_BASE/KEY env vars when left blank. The key
+// itself is never sent back from the server once saved (same treatment as
+// a password) — the field just shows a placeholder indicating one is set,
+// and is left untouched unless a new value is typed.
+window.openSeasonGiftCardApi = (id, name, apiBase, hasKey) => {
+  const body = `
+    <p class="small-muted">Leave both blank to use the org-wide default (Settings &gt; Gift Card Loading). Both must be set for this season's override to take effect.</p>
+    <label>API Base URL</label><input id="sg-base" value="${esc(apiBase)}" placeholder="https://api.disccardpromos.com">
+    <label>API Key</label><input id="sg-key" type="password" placeholder="${hasKey ? 'Already set — leave blank to keep it' : 'Not set — inherits the org-wide key'}">
+  `;
+  openModal(`${name}: Gift Card API`, body, `<button class="btn btn-primary btn-sm" onclick="saveSeasonGiftCardApi('${id}')">Save</button>`);
+};
+window.saveSeasonGiftCardApi = async (id) => {
+  const body = { disccardpromos_api_base: qs('#sg-base').value };
+  const key = qs('#sg-key').value;
+  if (key) body.disccardpromos_api_key = key;
+  try { await api(`/seasons/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); loadSeasons(); } catch (err) { toast(err.message, true); }
+};
+window.openNewSeason = () => {
+  const body = `<label>Season Name *</label><input id="s-name" placeholder="e.g. 5787 / 2026-27"><label>Default Card Amount</label><input id="s-amount" type="number" step="0.01" value="0">
+    <label>Max Accepted Applicants <span class="small-muted">(blank = unlimited)</span></label><input id="s-cap" type="number" min="0" placeholder="Unlimited">`;
+  openModal('New Season', body, `<button class="btn btn-primary btn-sm" onclick="createSeason()">Create</button>`);
+};
+window.createSeason = async () => {
+  const cap = qs('#s-cap').value;
+  try { await api('/seasons', { method: 'POST', body: { name: qs('#s-name').value, default_card_amount: +qs('#s-amount').value, max_accepted_applicants: cap === '' ? null : +cap } }); closeModal(); loadSeasons(); } catch (err) { toast(err.message, true); }
+};
+
+loadSeasons();
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shul Information · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('shul');
+renderShell('/shul-portal/shul-info', `
+  <h2>Shul Information</h2>
+  <div class="card">
+    <p class="small-muted">This is your shul's own contact and address information — separate from the applicants you submit. Keep it up to date; if anything required is missing (for example after being carried into a new season), you won't be able to submit or re-enroll applicants until it's complete.</p>
+    <div id="missing-banner"></div>
+    <form id="shul-form"><p class="small-muted">Loading…</p></form>
+    <div style="margin-top:14px"><button class="btn btn-primary btn-sm" id="btn-save" onclick="saveShulInfo()">Save</button></div>
+  </div>
+`);
+
+let currentShul = null;
+async function load() {
+  const shulId = Auth.user().shul_id;
+  const [{ shul, missingInfo }, schemaResult] = await Promise.all([
+    api(`/shuls/${shulId}`),
+    loadBuiltinSchema('shul_application'),
+  ]);
+  currentShul = shul;
+  const schema = schemaResult || [];
+  qs('#missing-banner').innerHTML = missingInfo && missingInfo.length
+    ? `<div class="card" style="margin-bottom:16px;border-color:var(--danger)"><strong>Missing:</strong> ${missingInfo.map(esc).join('; ')}. Please fill these in before submitting or re-enrolling any applicants.</div>`
+    : '';
+  qs('#shul-form').innerHTML = schema.map(f => fieldHtml(f)).join('');
+  for (const f of schema) {
+    const el = qs('#' + f.key);
+    if (!el || shul[f.key] === undefined || shul[f.key] === null) continue;
+    if (f.type === 'checkbox') el.checked = !!shul[f.key];
+    else el.value = shul[f.key];
+  }
+}
+window.saveShulInfo = async () => {
+  const btn = qs('#btn-save');
+  if (btn.disabled) return;
+  const fd = new FormData(qs('#shul-form'));
+  const body = {};
+  for (const [k, v] of fd.entries()) body[k] = v;
+  qsa('input[type=checkbox]', qs('#shul-form')).forEach(c => body[c.name] = c.checked);
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const { missingInfo } = await api(`/shuls/${currentShul.id}`, { method: 'PUT', body });
+    toast('Saved');
+    load();
+  } catch (err) { toast(err.message, true); } finally {
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+};
+load();
+</script>
+</body>
+</html>
