@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: ecards-everythingshul
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node src/index.js
+    disk:
+      name: ecards-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /data
+      - key: APP_URL
+        value: https://ecards.everythingshul.com
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: EMAIL_DEFAULT_SENDER
+        value: noreply@everythingshul.com
+      - key: EMAIL_DEFAULT_SENDER_NAME
+        value: everythingshul
+      - key: SUPPORT_EMAIL
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: DISCCARDPROMOS_API_BASE
+        sync: false
+      - key: DISCCARDPROMOS_API_KEY
+        sync: false
+      - key: SMS_API_BASE
+        sync: false
+      - key: SMS_API_KEY
+        sync: false
