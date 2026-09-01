@@ -49,7 +49,7 @@ function wrap(bodyHtml, brand) {
     <tr><td align="center">
       <table width="580" cellpadding="0" cellspacing="0" style="max-width:580px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 2px 18px rgba(36,26,21,.10);">
         <tr><td style="background:${brand.color};padding:30px 36px;text-align:center;">
-          <img src="${assetUrl('/img/org-logo.png')}" alt="${brand.name}" height="40" style="height:40px;width:auto;max-width:280px;">
+          <img src="${assetUrl('/img/org-logo.png')}" alt="${brand.name}" height="72" style="height:72px;width:auto;max-width:280px;">
         </td></tr>
         <tr><td style="height:3px;background:${brand.accent};line-height:0;font-size:0;">&nbsp;</td></tr>
         <tr><td style="padding:40px 40px 32px;color:#2a231d;font-size:15.5px;line-height:1.7;">${bodyHtml}</td></tr>
