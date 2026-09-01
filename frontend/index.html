@@ -10,6 +10,14 @@
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <style>
   body { background: var(--brand-bg); color: var(--text-on-dark); }
+  /* Hides the page's hardcoded fallback content (org name, default
+     buttons, default about text, default colors) until the real
+     Settings/Site Content values are in — otherwise every load flashes
+     the defaults first, then swaps to the real ones a beat later.
+     revealPage() below removes this once org data is applied (or on
+     fetch failure/timeout, so a network hiccup never leaves the page
+     permanently blank). visibility (not display) so layout doesn't jump. */
+  body.pre-init { visibility: hidden; }
 
   .site-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 32px; max-width: 1180px; margin: 0 auto; }
   .site-header .brand { display: flex; align-items: center; gap: 12px; }
@@ -62,7 +70,7 @@
   .popup-box p { color: var(--text-body); font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 20px; }
 </style>
 </head>
-<body>
+<body class="pre-init">
 
   <header class="site-header">
     <div class="brand">
@@ -177,8 +185,14 @@
     ];
     const DEFAULT_ABOUT_TEXT = "We exist to make it simple, dignified, and reliable for shuls to help their families before Yom Tov. Every shul that signs on gets a clear process, every applicant gets a fair and timely answer, and every card is tracked from issuance to the register, so generosity never gets lost in paperwork.";
 
+    // Safety net: reveal after 3s no matter what, so a slow/failed
+    // /orgs/resolve call never leaves the page permanently blank.
+    let revealed = false;
+    function revealPage() { if (revealed) return; revealed = true; document.body.classList.remove('pre-init'); }
+    setTimeout(revealPage, 3000);
+
     api('/orgs/resolve').then(({ org, popup, content }) => {
-      if (!org) return;
+      if (!org) { revealPage(); return; }
       applyOrgTheme(org);
       if (org.name) { document.getElementById('org-name-nav').textContent = org.name; document.getElementById('page-title').textContent = org.name; }
       document.getElementById('org-name').textContent = content?.heroHeading || org.name || "Kupes Hair Williamsburg";
@@ -226,7 +240,8 @@
         document.getElementById('popup-close').addEventListener('click', () => el.remove());
         el.addEventListener('click', (e) => { if (e.target === el) el.remove(); });
       }
-    }).catch(() => {});
+      revealPage();
+    }).catch(() => { revealPage(); });
   </script>
 </body>
 </html>
