@@ -67,3 +67,16 @@ export const BUILTIN_SCHEMAS = {
   store_application: STORE_APPLICATION_SCHEMA,
   applicant_application: APPLICANT_APPLICATION_SCHEMA,
 };
+
+// Settings > Required Fields lets the admin mark specific built-in fields as
+// not required, without removing them from the form — disabledKeys is that
+// per-form-type list of field keys to force to required:false. Deliberately
+// one-directional (only ever relaxes a field, never makes an optional one
+// required) since a field's type/validation (email format, phone format,
+// requiredUnless) was authored assuming the field it's attached to behaves
+// as designed; only required-ness is meant to be admin-configurable here.
+export function applyRequiredOverrides(schema, disabledKeys) {
+  if (!disabledKeys || !disabledKeys.length) return schema;
+  const disabled = new Set(disabledKeys);
+  return schema.map(f => (disabled.has(f.key) ? { ...f, required: false } : f));
+}

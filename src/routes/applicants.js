@@ -13,8 +13,7 @@ import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { generateApplicantExternalId } from '../utils/externalId.js';
 import { getOrCreateEzrasHabayisShul } from '../utils/ezrasHabayis.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { validateBySchema, validateRowsBySchema, shulInfoErrors } from '../utils/formValidation.js';
-import { APPLICANT_APPLICATION_SCHEMA } from '../utils/builtinSchemas.js';
+import { validateBySchema, validateRowsBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteApplicant, captureApplicantSnapshot } from '../utils/entityDelete.js';
 import { lockApplicantCards } from '../services/cardSync.js';
@@ -114,7 +113,7 @@ router.post('/apply-ezras-habayis', (req, res) => {
   if (b.wife_cell !== undefined) b.wife_cell = normalizePhone(b.wife_cell);
   // Fixed question set (see utils/builtinSchemas.js) — no longer driven by
   // an editable Form Builder row.
-  const errors = validateBySchema(APPLICANT_APPLICATION_SCHEMA, b, { isAdmin: false });
+  const errors = validateBySchema(getEffectiveSchema('applicant_application'), b, { isAdmin: false });
   if (errors.length) return res.status(400).json({ error: errors[0] });
   if (!b.first_name || !b.last_name) return res.status(400).json({ error: 'First and last name are required' });
 
@@ -431,7 +430,7 @@ router.post('/', requirePermission('applicants', 'can_edit'), (req, res) => {
   const isAdminSubmitter = req.user.role !== 'shul';
   const bypassRequired = isAdminSubmitter && !!b.bypass_required;
   if (!bypassRequired) {
-    const errors = validateBySchema(APPLICANT_APPLICATION_SCHEMA, b, { isAdmin: isAdminSubmitter });
+    const errors = validateBySchema(getEffectiveSchema('applicant_application'), b, { isAdmin: isAdminSubmitter });
     if (errors.length) return res.status(400).json({ error: errors[0] });
   }
 
@@ -582,7 +581,7 @@ router.post('/:id/complete-reenrollment', requirePermission('applicants', 'can_e
   if (b.husband_cell !== undefined) b.husband_cell = normalizePhone(b.husband_cell);
   if (b.wife_cell !== undefined) b.wife_cell = normalizePhone(b.wife_cell);
   const merged = { ...applicant, ...Object.fromEntries(Object.entries(b).filter(([, v]) => v !== undefined)) };
-  const errors = validateBySchema(APPLICANT_APPLICATION_SCHEMA, merged, { isAdmin: false });
+  const errors = validateBySchema(getEffectiveSchema('applicant_application'), merged, { isAdmin: false });
   if (errors.length) return res.status(400).json({ error: errors[0] });
   if (!merged.first_name || !merged.last_name) return res.status(400).json({ error: 'First and last name are required' });
 
@@ -639,7 +638,7 @@ router.post('/mass-complete-reenrollment', requirePermission('applicants', 'can_
       const used = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status NOT IN ('rejected','incomplete','draft')`).get(shulId).c;
       if (used >= shul.slots_allocated) { skippedSlotsFull++; continue; }
     }
-    const errors = validateBySchema(APPLICANT_APPLICATION_SCHEMA, applicant, { isAdmin: false });
+    const errors = validateBySchema(getEffectiveSchema('applicant_application'), applicant, { isAdmin: false });
     if (errors.length) { skippedIncomplete++; continue; }
     const initialStatus = isZipAllowed(req.user.org_id, applicant.zip) ? 'pending' : 'rejected';
     db.prepare(`UPDATE applicants SET approval_status=?, updated_at=datetime('now') WHERE id=?`).run(initialStatus, applicant.id);
@@ -685,7 +684,7 @@ router.post('/mass-submit-drafts', requirePermission('applicants', 'can_edit'), 
     // shul from creating one with just a name and leaving the rest blank;
     // this is where it actually becomes a real submission, same as any
     // other, so it has to pass the same schema every other submission does.
-    const errors = validateBySchema(APPLICANT_APPLICATION_SCHEMA, applicant, { isAdmin: false });
+    const errors = validateBySchema(getEffectiveSchema('applicant_application'), applicant, { isAdmin: false });
     if (errors.length) { skippedIncomplete++; continue; }
     const initialStatus = isZipAllowed(req.user.org_id, applicant.zip) ? 'pending' : 'rejected';
     db.prepare(`UPDATE applicants SET approval_status=?, updated_at=datetime('now') WHERE id=?`).run(initialStatus, applicant.id);
@@ -1235,7 +1234,7 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
   // that's already valid, not submitting a fresh application.
   const isAdminSubmitter = req.user.role !== 'shul';
   const bypassRequired = isAdminSubmitter && (req.body.bypass_required === 'true' || req.body.bypass_required === true);
-  const schemaErrors = bypassRequired ? [] : validateRowsBySchema(APPLICANT_APPLICATION_SCHEMA, rows, { isAdmin: isAdminSubmitter, skipKeys: ['shul_id'] })
+  const schemaErrors = bypassRequired ? [] : validateRowsBySchema(getEffectiveSchema('applicant_application'), rows, { isAdmin: isAdminSubmitter, skipKeys: ['shul_id'] })
     .filter(e => !rowExisting[e.row - 2]);
   const shulNameErrors = forcedShul ? [] : rows.map((r, i) => (!rowExisting[i] && !r.shul_name) ? { row: i + 2, error: 'Missing required field: shul_name' } : null).filter(Boolean);
   const idNotFoundErrors = rows.map((r, i) => (r.id && String(r.id).trim() && !rowExisting[i]) ? { row: i + 2, error: `No existing applicant found with id "${r.id}"` } : null).filter(Boolean);

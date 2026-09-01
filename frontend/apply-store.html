@@ -65,7 +65,8 @@ let contractAtSignup = true;
 // Whether an agreement needs to be signed in this same sitting, or is
 // instead emailed separately later (Settings > Documents > Store Agreement)
 // — decides the submit button's label up front.
-api('/orgs/resolve').then(({ content }) => {
+api('/orgs/resolve').then(({ org, content }) => {
+  applyOrgTheme(org);
   contractAtSignup = content?.storeContractAtSignup !== false;
   if (!contractAtSignup) qs('#submit-btn').textContent = 'Submit';
 }).catch(() => {});

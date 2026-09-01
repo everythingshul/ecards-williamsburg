@@ -166,6 +166,64 @@ function badge(text, cls) { return `<span class="badge badge-${esc(cls || text)}
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return Array.from(document.querySelectorAll(sel)); }
 
+// Settings > Organization's Primary/Accent Color pickers used to only reach
+// outbound emails (services/mail.js's brandFor()) — the public site itself
+// (theme.css) never read them, so changing them there visibly did nothing.
+// Called on every public page (theme.css only — the logged-in portal keeps
+// its own fixed navy/cyan palette from portal-theme.css on purpose, see
+// CLAUDE.md's "two-palette theming") after fetching org from
+// /orgs/resolve. Derives light/dark shades from the two picked colors the
+// same way theme.css's own defaults relate (--brand-gold-light/-dark
+// against --brand-gold, --brand-bg-2 against --brand-bg) so the whole page
+// reads as one consistent palette instead of just the two literal swatches
+// changing while every border/hover color stays the old default.
+function hexToHsl(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const r = parseInt(m[1].slice(0, 2), 16) / 255, g = parseInt(m[1].slice(2, 4), 16) / 255, b = parseInt(m[1].slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return [h * 360, s * 100, l * 100];
+}
+function hslToHex(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1 / 6) return p + (q - p) * 6 * t; if (t < 1 / 2) return q; if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1 / 3);
+  }
+  const toHex = x => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+function shadeHex(hex, deltaLightness) {
+  const hsl = hexToHsl(hex);
+  if (!hsl) return hex;
+  return hslToHex(hsl[0], hsl[1], Math.max(0, Math.min(100, hsl[2] + deltaLightness)));
+}
+function applyOrgTheme(org) {
+  if (!org) return;
+  const root = document.documentElement.style;
+  if (org.primary_color) {
+    root.setProperty('--brand-bg', org.primary_color);
+    root.setProperty('--brand-bg-2', shadeHex(org.primary_color, 4));
+  }
+  if (org.accent_color) {
+    root.setProperty('--brand-gold', org.accent_color);
+    root.setProperty('--brand-gold-light', shadeHex(org.accent_color, 15));
+    root.setProperty('--brand-gold-dark', shadeHex(org.accent_color, -13));
+  }
+}
+
 const NAV_ITEMS = [
   { href: '/admin/dashboard', label: 'Dashboard', icon: '&#9670;', resource: 'dashboard' },
   { href: '/admin/analytics', label: 'Analytics', icon: '&#9670;', resource: 'dashboard' },

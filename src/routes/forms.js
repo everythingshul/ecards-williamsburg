@@ -10,7 +10,7 @@ import { normalizePhone } from '../utils/phone.js';
 import { generateApplicantExternalId } from '../utils/externalId.js';
 import { isZipAllowed } from './applicants.js';
 import { formWindowError } from '../utils/formSchedule.js';
-import { validateBySchema, recordFormResponse, splitKnown, APPLICANT_FIELDS, SHUL_FIELDS, STORE_FIELDS } from '../utils/formValidation.js';
+import { validateBySchema, recordFormResponse, splitKnown, getEffectiveSchema, APPLICANT_FIELDS, SHUL_FIELDS, STORE_FIELDS } from '../utils/formValidation.js';
 import { BUILTIN_SCHEMAS } from '../utils/builtinSchemas.js';
 import { sendXlsx } from '../services/xlsx.js';
 
@@ -48,9 +48,8 @@ router.get('/public/:slug', (req, res) => {
 // — these are just hardcoded arrays now, so there's no schedule/active
 // state to report and no 404 case.
 router.get('/builtin/:type', (req, res) => {
-  const schema = BUILTIN_SCHEMAS[req.params.type];
-  if (!schema) return res.status(404).json({ error: 'Unknown built-in form type' });
-  res.json({ schema });
+  if (!BUILTIN_SCHEMAS[req.params.type]) return res.status(404).json({ error: 'Unknown built-in form type' });
+  res.json({ schema: getEffectiveSchema(req.params.type) });
 });
 
 // Public: generic submission handler for custom forms built in the form

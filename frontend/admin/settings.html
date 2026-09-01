@@ -103,6 +103,12 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="savePopup()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Required Fields</h3>
+      <p class="small-muted">Uncheck a field to make it optional on that application form — the field still shows, it just won't block submission when left blank. To require a field that's normally optional here, edit it directly in the Form Builder instead.</p>
+      <div id="required-fields-lists"></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveRequiredFields()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Full System Export</h3>
       <p class="small-muted">Download everything: every shul, applicant, card, transaction, store, billing record, task, and note, as one Excel workbook with a separate sheet per table.</p>
       <button class="btn btn-sm btn-primary" onclick="downloadFullExport()">Download Full System Export (.xlsx)</button>
@@ -260,6 +266,33 @@ async function loadPopup() {
 window.savePopup = async () => {
   try { await api('/settings', { method: 'PUT', body: { homepage_popup_enabled: qs('#popup-enabled').checked ? '1' : '0', homepage_popup_message: qs('#popup-message').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
+const REQUIRED_FIELDS_FORM_TYPES = [
+  ['shul_application', 'Shul Application'],
+  ['store_application', 'Store Application'],
+  ['applicant_application', 'Applicant Application'],
+];
+async function loadRequiredFields() {
+  const [{ schemas }, { settings }] = await Promise.all([api('/settings/builtin-schemas'), api('/settings')]);
+  let overrides = {};
+  try { overrides = JSON.parse(settings.required_field_overrides) || {}; } catch { overrides = {}; }
+  qs('#required-fields-lists').innerHTML = REQUIRED_FIELDS_FORM_TYPES.map(([type, label]) => {
+    const requiredFields = (schemas[type] || []).filter(f => f.required);
+    const disabled = new Set(overrides[type] || []);
+    if (!requiredFields.length) return '';
+    return `<h4 style="margin-bottom:4px">${esc(label)}</h4>
+      <div class="required-fields-group" data-type="${type}" style="margin:0 0 14px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+        ${requiredFields.map(f => `<label class="checkbox-row"><input type="checkbox" class="required-field-check" value="${esc(f.key)}" ${disabled.has(f.key) ? '' : 'checked'}> ${esc(f.label || f.key)}</label>`).join('')}
+      </div>`;
+  }).join('');
+}
+window.saveRequiredFields = async () => {
+  const overrides = {};
+  qsa('.required-fields-group').forEach(group => {
+    const unchecked = Array.from(group.querySelectorAll('.required-field-check')).filter(c => !c.checked).map(c => c.value);
+    if (unchecked.length) overrides[group.dataset.type] = unchecked;
+  });
+  try { await api('/settings', { method: 'PUT', body: { required_field_overrides: JSON.stringify(overrides) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
 async function loadShulCardAmountVisible() {
   const { settings } = await api('/settings');
   // Defaults to visible (matches pre-toggle behavior) unless explicitly turned off.
@@ -268,7 +301,7 @@ async function loadShulCardAmountVisible() {
 window.saveShulCardAmountVisible = async () => {
   try { await api('/settings', { method: 'PUT', body: { shul_card_amount_visible: qs('#shul-card-amount-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
-window.downloadFullExport = () => downloadAuthed('/system-export', 'kipas-hair-bp-full-export.xlsx');
+window.downloadFullExport = () => downloadAuthed('/system-export', 'ecards-full-export.xlsx');
 
 window.saveOrg = async () => {
   const body = {
@@ -331,7 +364,7 @@ window.runBackupNow = async () => {
   try { await api('/settings/backups/run', { method: 'POST' }); toast('Backup created'); loadBackups(); } catch (err) { toast(err.message, true); }
 };
 window.downloadBackupNow = () => downloadAuthed('/settings/backups/download-now', `ecards-backup-${Date.now()}.sqlite`);
-window.downloadFullExport = () => downloadAuthed('/migration/export', `kipas-hair-bp-full-data-${Date.now()}.tar.gz`);
+window.downloadFullExport = () => downloadAuthed('/migration/export', `ecards-full-data-${Date.now()}.tar.gz`);
 window.uploadFullImport = async (input) => {
   const file = input.files[0];
   if (!file) return;
@@ -345,7 +378,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadRequiredFields();
 </script>
 </body>
 </html>

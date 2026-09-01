@@ -12,8 +12,7 @@ import { sendXlsx } from '../services/xlsx.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { normalizeEmail } from '../utils/email.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { validateBySchema, shulInfoErrors } from '../utils/formValidation.js';
-import { SHUL_APPLICATION_SCHEMA } from '../utils/builtinSchemas.js';
+import { validateBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteShul, captureShulSnapshot } from '../utils/entityDelete.js';
 import { generateApplicantExternalId } from '../utils/externalId.js';
@@ -92,7 +91,7 @@ router.post('/apply', async (req, res) => {
   const b = req.body || {};
   // Fixed question set (see utils/builtinSchemas.js) — no longer driven by
   // an editable Form Builder row.
-  const errors = validateBySchema(SHUL_APPLICATION_SCHEMA, b, { isAdmin: false });
+  const errors = validateBySchema(getEffectiveSchema('shul_application'), b, { isAdmin: false });
   if (errors.length) return res.status(400).json({ error: errors[0] });
   if (b.ruv_phone !== undefined) b.ruv_phone = normalizePhone(b.ruv_phone);
   if (b.gabai_cell !== undefined) b.gabai_cell = normalizePhone(b.gabai_cell);
@@ -1139,7 +1138,7 @@ router.post('/import', requirePermission('shuls', 'can_edit'), upload.single('fi
   // shul record is meaningless without at least those.
   const bypassRequired = req.body.bypass_required === 'true' || req.body.bypass_required === true;
   const requiredErrors = bypassRequired ? [] : rows
-    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(SHUL_APPLICATION_SCHEMA, r, { isAdmin: true }) }))
+    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveSchema('shul_application'), r, { isAdmin: true }) }))
     .filter(x => x && x.errors.length)
     .map(x => ({ row: x.row, error: x.errors.join('; ') }));
   // A row that named an id but it didn't match anything is a mistake worth

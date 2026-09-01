@@ -1,6 +1,23 @@
-import { db, uuid } from '../db.js';
-import { SHUL_APPLICATION_SCHEMA } from './builtinSchemas.js';
+import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
+import { BUILTIN_SCHEMAS, applyRequiredOverrides } from './builtinSchemas.js';
 import { isValidPhone } from './phone.js';
+
+// Settings > Required Fields (Admin > Settings) stores, per built-in form
+// type, which fields have been marked not-required — a single JSON blob
+// under settings key 'required_field_overrides':
+// { shul_application: ['ruv_phone', ...], store_application: [...], applicant_application: [...] }
+// This is the one place that reads it, so every caller — the public apply
+// pages (via routes/forms.js GET /builtin/:type), every validateBySchema()
+// call against a built-in schema, and bulk-import validation — sees the
+// same effective required-ness.
+export function getEffectiveSchema(type) {
+  const schema = BUILTIN_SCHEMAS[type];
+  if (!schema) return null;
+  const row = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'required_field_overrides'`).get(DEFAULT_ORG_ID);
+  let overrides = {};
+  try { overrides = JSON.parse(row?.value || '{}') || {}; } catch { overrides = {}; }
+  return applyRequiredOverrides(schema, overrides[type]);
+}
 
 // 'header'/'image' are presentational blocks in a form's schema, not real
 // inputs — never required, never validated.
@@ -61,7 +78,7 @@ export function validateBySchema(schema, values, { isAdmin = false } = {}) {
 // applicant until their own shul record is complete (#147: a shul carried
 // forward into a new season with missing info must fill it in first).
 export function shulInfoErrors(shul) {
-  return validateBySchema(SHUL_APPLICATION_SCHEMA, shul, { isAdmin: false });
+  return validateBySchema(getEffectiveSchema('shul_application'), shul, { isAdmin: false });
 }
 
 // Same check across every row of a bulk-upload sheet — one combined error

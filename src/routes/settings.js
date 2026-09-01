@@ -5,6 +5,7 @@ import { requirePermission } from '../middleware/permissions.js';
 import { isMockMode, getCustomerByExternalId } from '../services/giftcard.js';
 import { SYSTEM_EMAIL_TEMPLATES } from '../services/mail.js';
 import { runBackup, listBackups, backupPath } from '../services/backup.js';
+import { BUILTIN_SCHEMAS } from '../utils/builtinSchemas.js';
 
 const router = Router();
 // Every route in this file is only ever called from the admin Settings page
@@ -27,6 +28,17 @@ router.put('/', requirePermission('settings', 'can_edit'), (req, res) => {
     ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value`);
   for (const [key, value] of Object.entries(req.body || {})) upsert.run(req.user.org_id, key, String(value ?? ''));
   res.json({ ok: true });
+});
+
+// Settings > Required Fields: the built-in shul/store/applicant application
+// forms' own default schemas, unmodified by any override — distinct from
+// the public GET /api/forms/builtin/:type (utils/formValidation.js's
+// getEffectiveSchema), which applies the 'required_field_overrides' setting
+// this page edits (saved through the generic PUT above). The admin UI uses
+// this to know which fields are normally required, so it can offer to
+// relax them without ever needing to know about fields that already aren't.
+router.get('/builtin-schemas', (req, res) => {
+  res.json({ schemas: BUILTIN_SCHEMAS });
 });
 
 // Surfaces whether disccardpromos is actually live or silently running in

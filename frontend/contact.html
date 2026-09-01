@@ -33,6 +33,7 @@
 </div>
 </div>
 <script src="/js/app.js"></script>
+<script>api('/orgs/resolve').then(({ org }) => applyOrgTheme(org)).catch(() => {});</script>
 <script>trackPageview();</script>
 <script>
 qs('#contact-form').addEventListener('submit', async (e) => {

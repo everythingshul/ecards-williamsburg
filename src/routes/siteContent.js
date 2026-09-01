@@ -22,6 +22,7 @@ const SITE_CONTENT_KEYS = [
   'homepage_about_heading', 'homepage_about_text',
   'faq_items',
   'homepage_image_url', 'homepage_image_alt', 'homepage_image_button_enabled', 'homepage_image_button_text',
+  'ezras_habayis_button_enabled',
 ];
 
 router.use(auth, requirePermission('site_content'));

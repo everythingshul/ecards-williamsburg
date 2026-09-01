@@ -73,8 +73,8 @@
   </header>
 
   <div class="hero">
-    <span class="eyebrow" id="hero-eyebrow">Kupes Hair Williamsburg</span>
-    <h1 id="org-name">Kupes Hair Williamsburg</h1>
+    <span class="eyebrow" id="hero-eyebrow" dir="auto">Kupes Hair Williamsburg</span>
+    <h1 id="org-name" dir="auto">Kupes Hair Williamsburg</h1>
     <div class="cta-row" id="cta-buttons">
       <a href="/apply" class="btn btn-primary">Register Your Shul</a>
       <a href="/apply-store" class="btn btn-outline">Apply as a Participating Store</a>
@@ -87,7 +87,7 @@
     <div class="band-inner">
       <div class="section-head">
         <span class="eyebrow-sm">Schedule</span>
-        <h2 id="schedule-heading">When applications are open</h2>
+        <h2 id="schedule-heading" dir="auto">When applications are open</h2>
       </div>
       <div class="schedule-grid" id="schedule-grid">
         <div class="schedule-card"><p class="small-muted">Loading…</p></div>
@@ -98,8 +98,8 @@
   <section class="band">
     <div class="band-inner about-wrap">
       <div class="quote-mark">&ldquo;</div>
-      <h2 id="about-heading">About</h2>
-      <p id="about-body">We exist to make it simple, dignified, and reliable for shuls to help their families before Yom Tov. Every shul that signs on gets a clear process, every applicant gets a fair and timely answer, and every card is tracked from issuance to the register, so generosity never gets lost in paperwork.</p>
+      <h2 id="about-heading" dir="auto">About</h2>
+      <p id="about-body" dir="auto">We exist to make it simple, dignified, and reliable for shuls to help their families before Yom Tov. Every shul that signs on gets a clear process, every applicant gets a fair and timely answer, and every card is tracked from issuance to the register, so generosity never gets lost in paperwork.</p>
       <div class="about-contact" id="about-contact"></div>
     </div>
   </section>
@@ -148,13 +148,13 @@
         .then(results => {
           const cards = results.filter(Boolean).map((it) => {
             if (it.type === 'custom') {
-              return `<div class="schedule-card"><h3>${esc(it.label)}</h3>${it.window ? `<div class="window">${esc(it.window)}</div>` : ''}${it.description ? `<p class="small-muted" style="margin-top:8px">${esc(it.description)}</p>` : ''}</div>`;
+              return `<div class="schedule-card"><h3 dir="auto">${esc(it.label)}</h3>${it.window ? `<div class="window">${esc(it.window)}</div>` : ''}${it.description ? `<p class="small-muted" dir="auto" style="margin-top:8px">${esc(it.description)}</p>` : ''}</div>`;
             }
             const status = windowStatus(it.form);
             const window = it.form.opens_at || it.form.closes_at
               ? `${it.form.opens_at ? 'Opens ' + fmtDate(it.form.opens_at) : ''}${it.form.opens_at && it.form.closes_at ? ' · ' : ''}${it.form.closes_at ? 'Closes ' + fmtDate(it.form.closes_at) : ''}`
               : 'No set window — always open';
-            return `<div class="schedule-card"><h3>${esc(it.label)}</h3>${badge(status.label, status.cls)}<div class="window">${esc(window)}</div></div>`;
+            return `<div class="schedule-card"><h3 dir="auto">${esc(it.label)}</h3>${badge(status.label, status.cls)}<div class="window">${esc(window)}</div></div>`;
           });
           qs('#schedule-grid').innerHTML = cards.length ? cards.join('') : '<div class="schedule-card"><p class="small-muted">No schedule information available.</p></div>';
         });
@@ -179,6 +179,7 @@
 
     api('/orgs/resolve').then(({ org, popup, content }) => {
       if (!org) return;
+      applyOrgTheme(org);
       if (org.name) { document.getElementById('org-name-nav').textContent = org.name; document.getElementById('page-title').textContent = org.name; }
       document.getElementById('org-name').textContent = content?.heroHeading || org.name || "Kupes Hair Williamsburg";
       qs('#hero-eyebrow').textContent = content?.heroEyebrow || org.name || "Kupes Hair Williamsburg";
@@ -191,12 +192,18 @@
       qs('#about-contact').innerHTML = contactBits.length ? contactBits.join(' &nbsp;·&nbsp; ') : '';
       qs('#about-body').textContent = content?.aboutText || DEFAULT_ABOUT_TEXT;
 
-      const headerBtns = content?.headerButtons?.length ? content.headerButtons : DEFAULT_HEADER_BUTTONS;
-      qs('#header-buttons').innerHTML = headerBtns.map(b => `<a href="${esc(b.url)}" class="btn btn-outline btn-sm" style="color:#e3cf9e;border-color:#e3cf9e;">${esc(b.label)}</a>`).join('');
-      const footerBtns = content?.footerButtons?.length ? content.footerButtons : DEFAULT_FOOTER_BUTTONS;
-      qs('#footer-buttons').innerHTML = footerBtns.map(b => `<a href="${esc(b.url)}">${esc(b.label)}</a>`).join('');
-      const ctaBtns = content?.ctaButtons?.length ? content.ctaButtons : DEFAULT_CTA_BUTTONS;
-      qs('#cta-buttons').innerHTML = ctaBtns.map((b, i) => `<a href="${esc(b.url)}" class="btn ${i === 0 ? 'btn-primary' : 'btn-outline'}">${esc(b.label)}</a>`).join('');
+      // Ezras Habayis Application is one of the default button set on all
+      // three rows (and can also show up in an admin-customized list, since
+      // it's the same URL either way) — Settings > Site Content's toggle
+      // hides it from the homepage regardless of which list it came from,
+      // without the admin having to hand-edit their custom button lists.
+      const dropEzrasHabayis = (list) => content?.ezrasHabayisEnabled === false ? list.filter(b => b.url !== '/apply-ezras-habayis') : list;
+      const headerBtns = dropEzrasHabayis(content?.headerButtons?.length ? content.headerButtons : DEFAULT_HEADER_BUTTONS);
+      qs('#header-buttons').innerHTML = headerBtns.map(b => `<a href="${esc(b.url)}" dir="auto" class="btn btn-outline btn-sm" style="color:#e3cf9e;border-color:#e3cf9e;">${esc(b.label)}</a>`).join('');
+      const footerBtns = dropEzrasHabayis(content?.footerButtons?.length ? content.footerButtons : DEFAULT_FOOTER_BUTTONS);
+      qs('#footer-buttons').innerHTML = footerBtns.map(b => `<a href="${esc(b.url)}" dir="auto">${esc(b.label)}</a>`).join('');
+      const ctaBtns = dropEzrasHabayis(content?.ctaButtons?.length ? content.ctaButtons : DEFAULT_CTA_BUTTONS);
+      qs('#cta-buttons').innerHTML = ctaBtns.map((b, i) => `<a href="${esc(b.url)}" dir="auto" class="btn ${i === 0 ? 'btn-primary' : 'btn-outline'}">${esc(b.label)}</a>`).join('');
 
       if (content?.image?.url) {
         qs('#homepage-image-section').style.display = '';
@@ -206,6 +213,7 @@
         if (content.image.buttonEnabled) {
           btn.style.display = 'inline-flex';
           btn.href = content.image.url;
+          btn.dir = 'auto';
           btn.textContent = content.image.buttonText || 'View';
         }
       }
@@ -213,7 +221,7 @@
       if (popup?.enabled && popup.message) {
         const el = document.createElement('div');
         el.className = 'popup-backdrop';
-        el.innerHTML = `<div class="popup-box"><p>${esc(popup.message)}</p><button class="btn btn-primary btn-sm" id="popup-close">Close</button></div>`;
+        el.innerHTML = `<div class="popup-box"><p dir="auto">${esc(popup.message)}</p><button class="btn btn-primary btn-sm" id="popup-close">Close</button></div>`;
         document.getElementById('popup-container').appendChild(el);
         document.getElementById('popup-close').addEventListener('click', () => el.remove());
         el.addEventListener('click', (e) => { if (e.target === el) el.remove(); });

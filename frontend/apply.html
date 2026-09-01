@@ -73,7 +73,8 @@ let contractAtSignup = true;
 // emailed separately later (Settings > Documents > Shul Contract) — decides
 // the submit button's label up front, before the org even knows anything
 // was submitted.
-api('/orgs/resolve').then(({ content }) => {
+api('/orgs/resolve').then(({ org, content }) => {
+  applyOrgTheme(org);
   contractAtSignup = content?.shulContractAtSignup !== false;
   if (!contractAtSignup) qs('#submit-btn').textContent = 'Submit';
 }).catch(() => {});

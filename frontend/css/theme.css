@@ -10,6 +10,20 @@
   font-display: swap;
 }
 
+/* Self-hosted (same reasoning as Signature Script above), Hebrew-range
+   subset only (~7KB) — the Latin range isn't included, so Georgia still
+   renders English headings; the browser only reaches for this font on
+   Hebrew glyphs via unicode-range. SIL Open Font License — see
+   frontend/fonts/FrankRuhlLibre-LICENSE.txt. */
+@font-face {
+  font-family: 'Heading Hebrew';
+  src: url('/fonts/FrankRuhlLibre-Bold-Hebrew.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0307-0308, U+0590-05FF, U+200C-2010, U+20AA, U+25CC, U+FB1D-FB4F;
+}
+
 :root {
   --brand-bg: #241a15;
   --brand-bg-2: #2e221b;
@@ -47,7 +61,7 @@ body {
 
 a { color: var(--brand-gold-dark); }
 
-h1, h2, h3, h4 { color: var(--text-dark); font-family: Georgia, 'Times New Roman', serif; margin: 0 0 .4em; }
+h1, h2, h3, h4 { color: var(--text-dark); font-family: 'Heading Hebrew', Georgia, 'Times New Roman', serif; margin: 0 0 .4em; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;

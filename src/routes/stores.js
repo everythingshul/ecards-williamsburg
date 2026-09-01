@@ -9,8 +9,7 @@ import { sendMailChecked, renderSystemTemplate, notifyNewSignup, renderSignupDet
 import { sendXlsx } from '../services/xlsx.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { normalizeEmail } from '../utils/email.js';
-import { validateBySchema } from '../utils/formValidation.js';
-import { STORE_APPLICATION_SCHEMA } from '../utils/builtinSchemas.js';
+import { validateBySchema, getEffectiveSchema } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteStore, captureStoreSnapshot } from '../utils/entityDelete.js';
 import { generateGenericDocumentPdf } from '../services/pdf.js';
@@ -31,7 +30,7 @@ const BILLS_DIR = join(DATA_DIR, 'store-bills');
 router.post('/apply', async (req, res) => {
   const orgId = req.body.org_id || DEFAULT_ORG_ID;
   const b = req.body || {};
-  const errors = validateBySchema(STORE_APPLICATION_SCHEMA, b, { isAdmin: false });
+  const errors = validateBySchema(getEffectiveSchema('store_application'), b, { isAdmin: false });
   if (errors.length) return res.status(400).json({ error: errors[0] });
   if (!b.name || !b.owner_email) return res.status(400).json({ error: 'Store name and owner email are required' });
   const id = uuid();
@@ -651,7 +650,7 @@ router.post('/import', requirePermission('stores', 'can_edit'), upload.single('f
   // below regardless, since a store record is meaningless without them.
   const bypassRequired = req.body.bypass_required === 'true' || req.body.bypass_required === true;
   const requiredErrors = bypassRequired ? [] : rows
-    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(STORE_APPLICATION_SCHEMA, r, { isAdmin: true }) }))
+    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveSchema('store_application'), r, { isAdmin: true }) }))
     .filter(x => x && x.errors.length)
     .map(x => ({ row: x.row, error: x.errors.join('; ') }));
   const idNotFoundErrors = rows

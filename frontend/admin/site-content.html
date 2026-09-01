@@ -75,6 +75,12 @@ renderShell('/admin/site-content', `
       <button class="btn btn-sm btn-primary" style="margin-top:10px;margin-left:8px" onclick="saveContentButtons('footer')">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Ezras Habayis Application</h3>
+      <p class="small-muted">Controls the "Ezras Habayis Application" button on the homepage header, hero, and footer — in the default set or a customized list either way. The application page itself stays reachable by direct link; this only hides the homepage entry point.</p>
+      <div class="checkbox-row"><input type="checkbox" id="ezras-habayis-enabled"><label style="margin:0">Show Ezras Habayis Application button on homepage</label></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveEzrasHabayisEnabled()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>About Section</h3>
       <label>Heading <span class="small-muted">(leave blank for the default)</span></label>
       <input id="content-about-heading" placeholder="e.g. About">
@@ -150,6 +156,9 @@ window.removeContentButton = (kind, i) => {
 window.saveContentButtons = async (kind) => {
   const draft = buttonDrafts[kind].filter(b => b.label && b.url);
   try { await api('/site-content', { method: 'PUT', body: { [CONTENT_BUTTON_SETTING_KEY[kind]]: JSON.stringify(draft) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+window.saveEzrasHabayisEnabled = async () => {
+  try { await api('/site-content', { method: 'PUT', body: { ezras_habayis_button_enabled: qs('#ezras-habayis-enabled').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
 window.saveHeroSection = async () => {
   const draft = buttonDrafts.hero.filter(b => b.label && b.url);
@@ -296,6 +305,7 @@ async function load() {
   qs('#homepage-image-alt').value = settings.homepage_image_alt || '';
   qs('#homepage-image-button-enabled').checked = settings.homepage_image_button_enabled === '1';
   qs('#homepage-image-button-text').value = settings.homepage_image_button_text || 'View';
+  qs('#ezras-habayis-enabled').checked = settings.ezras_habayis_button_enabled !== '0';
   renderHomepageImagePreview(settings.homepage_image_url || '');
   renderContentButtons('header');
   renderContentButtons('footer');

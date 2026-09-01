@@ -41,6 +41,7 @@
   <script>trackPageview();</script>
   <script>
     api('/orgs/resolve').then(({ org, content }) => {
+      applyOrgTheme(org);
       if (org?.name) { document.getElementById('org-name-nav').textContent = org.name; document.title = `FAQ · ${org.name}`; }
       const items = content?.faqItems || [];
       qs('#faq-list').innerHTML = items.length
