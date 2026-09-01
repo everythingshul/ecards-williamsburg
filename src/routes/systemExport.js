@@ -38,7 +38,7 @@ router.get('/', (req, res) => {
 
   const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="kipas-hair-bp-full-export-${Date.now()}.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="ecards-full-export-${Date.now()}.xlsx"`);
   res.send(buf);
 });
 

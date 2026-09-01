@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ecards-everythingshul
+    name: ecards-kupeshair
     runtime: node
     plan: starter
     buildCommand: npm install
@@ -17,7 +17,7 @@ services:
       - key: DATA_DIR
         value: /data
       - key: APP_URL
-        value: https://ecards.everythingshul.com
+        value: https://ecards.kupeshair.org
       - key: JWT_SECRET
         generateValue: true
       - key: SEED_ADMIN_EMAIL
@@ -27,9 +27,11 @@ services:
       - key: BREVO_API_KEY
         sync: false
       - key: EMAIL_DEFAULT_SENDER
-        value: noreply@everythingshul.com
+        value: noreply@kupeshair.org
       - key: EMAIL_DEFAULT_SENDER_NAME
-        value: everythingshul
+        value: Kupes Hair Williamsburg
+      - key: ORG_NAME
+        value: Kupes Hair Williamsburg
       - key: SUPPORT_EMAIL
         sync: false
       - key: GOOGLE_MAPS_API_KEY

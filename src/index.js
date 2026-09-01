@@ -109,7 +109,7 @@ initMail();
 app.get('/api/config', (req, res) => {
   res.json({
     googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
-    appName: process.env.ORG_NAME || "Shmachas Rechag - Kupat Ha'ir",
+    appName: process.env.ORG_NAME || "Kupes Hair Williamsburg",
   });
 });
 

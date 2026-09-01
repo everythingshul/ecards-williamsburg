@@ -19,7 +19,7 @@ import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 const CONFIG = {
   apiKey: process.env.BREVO_API_KEY || '',
   senderEmail: process.env.EMAIL_DEFAULT_SENDER || 'noreply@example.com',
-  senderName: process.env.EMAIL_DEFAULT_SENDER_NAME || "Kipas Hair BP Platform",
+  senderName: process.env.EMAIL_DEFAULT_SENDER_NAME || "Kupes Hair Williamsburg",
 };
 
 export function initMail() {

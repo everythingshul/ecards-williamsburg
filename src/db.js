@@ -769,7 +769,7 @@ if (orgCount === 0) {
   defaultOrgId = randomUUID();
   db.prepare(`INSERT INTO organizations (id, name, subdomain, primary_color, accent_color, support_email)
     VALUES (?, ?, ?, ?, ?, ?)`).run(
-    defaultOrgId, 'Shmachas Rechag - Kupat Ha\'ir', 'ecards', '#241a15', '#c9a76a', process.env.SUPPORT_EMAIL || ''
+    defaultOrgId, 'Kupes Hair Williamsburg', 'ecards', '#241a15', '#c9a76a', process.env.SUPPORT_EMAIL || ''
   );
   const seasonId = randomUUID();
   db.prepare(`INSERT INTO seasons (id, org_id, name, is_active, default_card_amount) VALUES (?,?,?,1,0)`)

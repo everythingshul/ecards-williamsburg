@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Site Content · Kipas Hair BP Platform</title>
+<title>Site Content · Kupes Hair Williamsburg</title>
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
@@ -26,9 +26,9 @@ renderShell('/admin/site-content', `
       <h3>Hero Section</h3>
       <p class="small-muted">The large banner at the top of the homepage.</p>
       <label>Eyebrow Text <span class="small-muted">(small text above the headline; leave blank to use the organization name)</span></label>
-      <input id="content-hero-eyebrow" placeholder="e.g. Kipas Hair BP Platform">
+      <input id="content-hero-eyebrow" placeholder="e.g. Kupes Hair Williamsburg">
       <label>Headline <span class="small-muted">(leave blank to use the organization name)</span></label>
-      <input id="content-hero-heading" placeholder="e.g. Kipas Hair BP Platform">
+      <input id="content-hero-heading" placeholder="e.g. Kupes Hair Williamsburg">
       <label style="margin-top:14px">Buttons <span class="small-muted">(leave empty to use the default set)</span></label>
       <div id="hero-buttons-list"></div>
       <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="addContentButton('hero')">+ Add Button</button>
@@ -281,7 +281,7 @@ async function load() {
   const [{ settings }, { forms }, { organization }] = await Promise.all([api('/site-content'), api('/forms'), api('/orgs/me').catch(() => ({ organization: null }))]);
   const parseList = (v) => { try { const p = JSON.parse(v || '[]'); return Array.isArray(p) ? p : []; } catch { return []; } };
   const listOrDefault = (v, fallback) => { const p = parseList(v); return p.length ? p : fallback.map(b => ({ ...b })); };
-  const orgName = organization?.name || 'Kipas Hair BP Platform';
+  const orgName = organization?.name || "Kupes Hair Williamsburg";
   buttonDrafts.header = listOrDefault(settings.header_nav_buttons, DEFAULT_HEADER_BUTTONS);
   buttonDrafts.footer = listOrDefault(settings.footer_nav_buttons, DEFAULT_FOOTER_BUTTONS);
   buttonDrafts.hero = listOrDefault(settings.cta_buttons, DEFAULT_CTA_BUTTONS);

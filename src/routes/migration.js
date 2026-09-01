@@ -51,7 +51,7 @@ const upload = multer({
 router.get('/export', (req, res) => {
   try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) { console.error('[migration] wal checkpoint failed:', e.message); }
   res.setHeader('Content-Type', 'application/gzip');
-  res.setHeader('Content-Disposition', `attachment; filename="kipas-hair-bp-full-data-${Date.now()}.tar.gz"`);
+  res.setHeader('Content-Disposition', `attachment; filename="ecards-full-data-${Date.now()}.tar.gz"`);
   const entries = readdirSync(DATA_DIR).filter((name) => name !== 'tmp');
   const tar = spawn('tar', ['czf', '-', '-C', DATA_DIR, ...entries]);
   tar.stdout.pipe(res);

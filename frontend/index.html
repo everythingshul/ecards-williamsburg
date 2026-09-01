@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title id="page-title">Kipas Hair BP Platform</title>
+<title id="page-title">Kupes Hair Williamsburg</title>
 <meta name="description" content="Season-based assistance management for shuls, applicants, and participating stores.">
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
@@ -67,14 +67,14 @@
   <header class="site-header">
     <div class="brand">
       <img src="/img/org-logo.png" alt="Organization logo" style="height:42px;width:auto">
-      <div class="brand-text"><strong id="org-name-nav">Kipas Hair BP</strong><span>Platform</span></div>
+      <div class="brand-text"><strong id="org-name-nav">Kupes Hair Williamsburg</strong><span>Platform</span></div>
     </div>
     <nav id="header-buttons" style="display:flex;align-items:center;gap:14px"></nav>
   </header>
 
   <div class="hero">
-    <span class="eyebrow" id="hero-eyebrow">Kipas Hair BP Platform</span>
-    <h1 id="org-name">Kipas Hair BP Platform</h1>
+    <span class="eyebrow" id="hero-eyebrow">Kupes Hair Williamsburg</span>
+    <h1 id="org-name">Kupes Hair Williamsburg</h1>
     <div class="cta-row" id="cta-buttons">
       <a href="/apply" class="btn btn-primary">Register Your Shul</a>
       <a href="/apply-store" class="btn btn-outline">Apply as a Participating Store</a>
@@ -180,8 +180,8 @@
     api('/orgs/resolve').then(({ org, popup, content }) => {
       if (!org) return;
       if (org.name) { document.getElementById('org-name-nav').textContent = org.name; document.getElementById('page-title').textContent = org.name; }
-      document.getElementById('org-name').textContent = content?.heroHeading || org.name || 'Kipas Hair BP Platform';
-      qs('#hero-eyebrow').textContent = content?.heroEyebrow || org.name || 'Kipas Hair BP Platform';
+      document.getElementById('org-name').textContent = content?.heroHeading || org.name || "Kupes Hair Williamsburg";
+      qs('#hero-eyebrow').textContent = content?.heroEyebrow || org.name || "Kupes Hair Williamsburg";
       qs('#schedule-heading').textContent = content?.scheduleHeading || 'When applications are open';
       renderSchedule(content?.scheduleItems?.length ? content.scheduleItems : DEFAULT_SCHEDULE_ITEMS);
       qs('#about-heading').textContent = content?.aboutHeading || 'About';

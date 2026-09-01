@@ -218,7 +218,7 @@ function renderShell(activeHref, contentHtml) {
   document.body.innerHTML = `
     <div class="app-shell">
       <header class="app-header" id="app-header">
-        <div class="brand"><img src="/img/org-logo.png" alt="Organization logo"><div class="brand-name">Kipas Hair BP<span>Platform</span></div></div>
+        <div class="brand"><img src="/img/org-logo.png" alt="Organization logo"><div class="brand-name">Kupes Hair Williamsburg<span>Platform</span></div></div>
         <button class="header-menu-btn" id="header-menu-btn" aria-label="Toggle menu">&#9776;</button>
         <nav id="header-nav">${navHtml}<div class="nav-more" id="nav-more"><button class="nav-more-btn" id="nav-more-btn" type="button">More &#9662;</button><div class="nav-more-dropdown" id="nav-more-dropdown"></div></div></nav>
         <div class="header-user">
