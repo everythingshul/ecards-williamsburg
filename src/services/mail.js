@@ -52,7 +52,7 @@ function wrap(bodyHtml, brand) {
           <img src="${assetUrl('/img/org-logo.png')}" alt="${brand.name}" height="72" style="height:72px;width:auto;max-width:280px;">
         </td></tr>
         <tr><td style="height:3px;background:${brand.accent};line-height:0;font-size:0;">&nbsp;</td></tr>
-        <tr><td style="padding:40px 40px 32px;color:#2a231d;font-size:15.5px;line-height:1.7;">${bodyHtml}</td></tr>
+        <tr><td dir="auto" style="padding:40px 40px 32px;color:#2a231d;font-size:15.5px;line-height:1.7;">${bodyHtml}</td></tr>
         <tr><td style="padding:0 40px;"><div style="border-top:1px solid #ece3d3;"></div></td></tr>
         <tr><td style="padding:22px 40px 28px;text-align:center;">
           <a href="https://everythingshul.com" style="text-decoration:none;color:#8a7c63;font-size:12px;">Powered By

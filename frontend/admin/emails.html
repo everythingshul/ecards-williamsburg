@@ -68,7 +68,7 @@ function rowHtml(e) {
   return `<tr>
     <td>${esc(e.to_email)}</td>
     <td>${accountCellHtml(e.account)}</td>
-    <td>${esc(e.subject || '')}</td>
+    <td dir="auto">${esc(e.subject || '')}</td>
     <td>${badge(statusLabel, statusCls)}</td>
     <td>${e.sent_by_name ? esc(e.sent_by_name) : '<span class="small-muted">System</span>'}</td>
     <td>${fmtDateTime(e.created_at)}</td>
@@ -86,13 +86,13 @@ window.viewEmail = async (id) => {
     const body = `
       <p><strong>To:</strong> ${esc(e.to_email)}</p>
       <p><strong>Account:</strong> ${accountCellHtml(e.account)}</p>
-      <p><strong>Subject:</strong> ${esc(e.subject || '')}</p>
+      <p dir="auto"><strong>Subject:</strong> ${esc(e.subject || '')}</p>
       <p><strong>Status:</strong> ${badge(e.status === 'dry_run' ? 'dry run' : e.status, e.status === 'sent' ? 'active' : (e.status === 'failed' ? 'rejected' : 'pending'))}</p>
       ${e.error_message ? `<p style="color:var(--danger)"><strong>Error:</strong> ${esc(e.error_message)}</p>` : ''}
       <p><strong>Sent By:</strong> ${e.sent_by_name ? esc(e.sent_by_name) : 'System'}</p>
       <p><strong>Sent:</strong> ${fmtDateTime(e.created_at)}</p>
       <div class="divider"></div>
-      <iframe style="width:100%;height:360px;border:1px solid var(--border);border-radius:8px;background:#fff" srcdoc="${esc(e.body_html || '')}"></iframe>
+      <iframe style="width:100%;height:360px;border:1px solid var(--border);border-radius:8px;background:#fff" srcdoc="${esc(`<body dir="auto" style="margin:0;font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif">${e.body_html || ''}</body>`)}"></iframe>
     `;
     openModal('Email', body);
   } catch (err) { toast(err.message, true); }
@@ -105,7 +105,7 @@ async function loadTemplates() {
     templatesCache = templates;
     qs('#templates-list').innerHTML = templates.length ? templates.map(t => `<div class="card" style="margin-bottom:10px">
         <div class="flex-between"><strong>${esc(t.name)}</strong>${t.category ? `<span class="small-muted">${esc(t.category)}</span>` : ''}</div>
-        <p class="small-muted">${esc(t.subject)}</p>
+        <p class="small-muted" dir="auto">${esc(t.subject)}</p>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button class="btn btn-sm btn-outline" onclick="editTemplate('${t.id}')">Edit</button>
           <button class="btn btn-sm btn-danger" onclick="deleteTemplate('${t.id}')">Delete</button>
@@ -127,7 +127,7 @@ function templateFormBody(t = {}) {
   return `
     <label>Name <span class="req">*</span></label><input id="tp-name" value="${esc(t.name||'')}">
     <label>Category <span class="small-muted">(optional)</span></label><input id="tp-category" value="${esc(t.category||'')}">
-    <label>Subject <span class="req">*</span></label><input id="tp-subject" value="${esc(t.subject||'')}">
+    <label>Subject <span class="req">*</span></label><input id="tp-subject" dir="auto" value="${esc(t.subject||'')}">
     <label>Body <span class="req">*</span> <span class="small-muted">(use {{variable}} placeholders as needed)</span></label>
     <div id="tp-body-rte"></div>
     ${availableVarsHint()}
@@ -170,7 +170,7 @@ qs('#btn-compose').addEventListener('click', async () => {
     <div style="position:relative;margin-top:8px">
       <input id="cp-to-search" placeholder="Search shuls, stores, applicants, or staff to add…">
     </div>
-    <label>Subject <span class="req">*</span></label><input id="cp-subject">
+    <label>Subject <span class="req">*</span></label><input id="cp-subject" dir="auto">
     <label>Body <span class="req">*</span></label><div id="cp-body-rte"></div>
   `;
   openModal('Compose Email', body, `<button class="btn btn-primary btn-sm" onclick="sendComposedEmail()">Send</button>`);

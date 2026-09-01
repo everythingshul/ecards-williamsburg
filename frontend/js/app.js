@@ -399,8 +399,8 @@ function openModal(title, bodyHtml, footerHtml = '', { wide = false } = {}) {
   el.className = 'modal-backdrop';
   el.id = 'ec-modal';
   el.innerHTML = `<div class="modal"${wide ? ' style="max-width:1400px"' : ''}>
-    <div class="modal-header" style="cursor:move"><h3 style="margin:0">${esc(title)}</h3><button onclick="closeModal()">&times;</button></div>
-    <div class="modal-body"${wide ? ' style="max-height:82vh"' : ''}>${bodyHtml}</div>
+    <div class="modal-header" style="cursor:move"><h3 style="margin:0" dir="auto">${esc(title)}</h3><button onclick="closeModal()">&times;</button></div>
+    <div class="modal-body" dir="auto"${wide ? ' style="max-height:82vh"' : ''}>${bodyHtml}</div>
     ${footerHtml ? `<div class="modal-footer">${footerHtml}</div>` : ''}
   </div>`;
   el.addEventListener('click', (e) => { if (e.target === el) closeModal(); });
@@ -460,7 +460,7 @@ function createRichTextEditor(containerId, initialHtml = '') {
       <button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button>
       <input type="file" accept="image/*" class="rte-file-input" style="display:none">
     </div>
-    <div id="${editorId}" class="rte-surface" contenteditable="true">${initialHtml || ''}</div>
+    <div id="${editorId}" class="rte-surface" contenteditable="true" dir="auto">${initialHtml || ''}</div>
   `;
   const surface = document.getElementById(editorId);
   container.querySelectorAll('.rte-toolbar button[data-cmd]').forEach(btn => {
@@ -498,7 +498,7 @@ function renderUpdateBody(u) {
   const images = (u.attachments || []).filter(a => a.mime_type.startsWith('image/'));
   const files = (u.attachments || []).filter(a => !a.mime_type.startsWith('image/'));
   return `
-    <p style="white-space:pre-wrap">${esc(u.body)}</p>
+    <p style="white-space:pre-wrap" dir="auto">${esc(u.body)}</p>
     ${images.map(a => `<p><img src="/uploads/updates/${esc(a.path)}" alt="${esc(a.filename)}" style="max-width:100%;height:auto;"></p>`).join('')}
     ${files.length ? `<p><strong>Attachments:</strong></p><ul>${files.map(a => `<li><a href="/uploads/updates/${esc(a.path)}" target="_blank">${esc(a.filename)}</a></li>`).join('')}</ul>` : ''}
   `;
@@ -513,7 +513,7 @@ async function loadUpdatesInbox(containerId) {
   try {
     const { updates } = await api('/updates/inbox/mine');
     el.innerHTML = updates.length ? updates.map(u => `<div class="card" style="margin-bottom:10px;cursor:pointer" onclick="openInboxUpdate('${u.recipient_id}')">
-        <div class="flex-between"><strong>${esc(u.title)}</strong>${u.read_at ? '' : badge('new','active')}</div>
+        <div class="flex-between" dir="auto"><strong>${esc(u.title)}</strong>${u.read_at ? '' : badge('new','active')}</div>
         <p class="small-muted">${fmtDateTime(u.created_at)}</p>
       </div>`).join('') : '<p class="small-muted">No updates yet.</p>';
     window._inboxUpdates = updates;

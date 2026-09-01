@@ -333,7 +333,7 @@ window.openEditEmailTemplate = (key) => {
   const t = emailTemplatesCache.find(x => x.key === key);
   if (!t) return;
   const body = `
-    <label>Subject</label><input id="et-subject" value="${esc(t.subject)}">
+    <label>Subject</label><input id="et-subject" dir="auto" value="${esc(t.subject)}">
     <label>Body</label><div id="et-body-rte"></div>
     <label style="margin-top:14px">Reply-To <span class="small-muted">(leave blank to use ${t.defaultReplyTo ? 'the org default, ' + esc(t.defaultReplyTo) : 'the sending address'})</span></label>
     <input id="et-replyto" value="${esc(t.replyTo || '')}" placeholder="e.g. approvals@yourorg.org">
