@@ -27,9 +27,9 @@ services:
       - key: BREVO_API_KEY
         sync: false
       - key: EMAIL_DEFAULT_SENDER
-        value: noreply@kupeshair.org
+        sync: false
       - key: EMAIL_DEFAULT_SENDER_NAME
-        value: Kupes Hair Williamsburg
+        sync: false
       - key: ORG_NAME
         value: Kupes Hair Williamsburg
       - key: SUPPORT_EMAIL
