@@ -103,7 +103,13 @@ let selectedReenroll = new Set();
 let selectedDrafts = new Set();
 
 async function load() {
-  const params = new URLSearchParams({ search: qs('#f-search').value || '' });
+  // pageSize explicitly set high (a single shul's own roster, not the
+  // org-wide list) — the server defaults to 50 per page, which silently cut
+  // off anything past the first 50 rows with no way for a shul to see or
+  // page to the rest. A shul with several seasons of carried-over history
+  // easily exceeds that, so newly bulk-uploaded drafts could be present in
+  // the data but never rendered here.
+  const params = new URLSearchParams({ search: qs('#f-search').value || '', pageSize: 2000 });
   try {
     const { applicants, total } = await api('/applicants?' + params);
     const needsReenrollment = applicants.filter(a => a.approval_status === 'incomplete');
@@ -123,7 +129,8 @@ async function load() {
     qs('#draft-banner').innerHTML = drafts.length
       ? `<div class="card" style="margin-bottom:16px;border-color:var(--warning,#b7791f)">
           <strong>${drafts.length}</strong> applicant(s) from your last upload haven't been submitted yet — check the ones you want to send in below.
-          <div style="margin-top:8px">
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline btn-sm" onclick="selectAllDrafts()">Select All (${drafts.length})</button>
             <button class="btn btn-primary btn-sm" id="btn-submit-drafts" onclick="submitDrafts()" ${contractNotSigned ? 'disabled title="Sign your contract for this season first"' : ''}>Submit Selected (${selectedDrafts.size})</button>
           </div>
         </div>`
@@ -145,6 +152,11 @@ window.toggleReenrollSelect = (id, checked) => {
 };
 window.toggleDraftSelect = (id, checked) => {
   if (checked) selectedDrafts.add(id); else selectedDrafts.delete(id);
+  const btn = qs('#btn-submit-drafts');
+  if (btn) btn.textContent = `Submit Selected (${selectedDrafts.size})`;
+};
+window.selectAllDrafts = () => {
+  qsa('.draft-check').forEach(c => { c.checked = true; selectedDrafts.add(c.dataset.id); });
   const btn = qs('#btn-submit-drafts');
   if (btn) btn.textContent = `Submit Selected (${selectedDrafts.size})`;
 };
