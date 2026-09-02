@@ -39,6 +39,8 @@ renderShell('/admin/shuls', `
       <option value="pause">Pause</option>
       <option value="unpause">Unpause</option>
       <option value="carry-forward">Carry Forward to Season…</option>
+      <option value="email">Email</option>
+      <option value="sms">SMS</option>
       <option value="delete">Delete Permanently</option>
     </select>
     <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
@@ -231,6 +233,16 @@ const MASS_ACTIONS = {
       if (r.duplicatesFlagged) msg += ` — ${r.duplicatesFlagged} flagged as possible duplicate(s)`;
       return { msg, isError: !!r.duplicatesFlagged };
     },
+  },
+  email: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('shul', 'email', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
+  },
+  sms: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('shul', 'sms', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
   },
 };
 

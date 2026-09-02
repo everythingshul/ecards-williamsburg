@@ -37,6 +37,8 @@ renderShell('/admin/applicants', `
       <option value="approve">Approve</option>
       <option value="reject">Reject</option>
       <option value="set-pending">Set to Pending</option>
+      <option value="email">Email</option>
+      <option value="sms">SMS</option>
       <option value="delete">Delete Permanently</option>
     </select>
     <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
@@ -197,6 +199,16 @@ const MASS_ACTIONS = {
     confirm: n => `Permanently delete ${n} selected applicant(s)? This removes each applicant, their cards, and notes completely and cannot be undone.`,
     run: (ids) => api('/applicants/mass-delete-permanent', { method: 'POST', body: { ids } }),
     summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}`, isError: !!r.cardLockErrors }),
+  },
+  email: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('applicant', 'email', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
+  },
+  sms: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('applicant', 'sms', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
   },
 };
 qs('#btn-mass-apply').addEventListener('click', async () => {

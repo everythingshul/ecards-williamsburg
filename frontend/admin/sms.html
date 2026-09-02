@@ -223,7 +223,7 @@ qs('#btn-compose').addEventListener('click', async () => {
       <option value="applicants">Group: All Applicants</option>
       <option value="staff">Group: All Admins (with phone on file)</option>
     </select>
-    <div id="cp-single-wrap"><label>Phone Number <span class="req">*</span></label><input id="cp-to" placeholder="+15555550123"></div>
+    <div id="cp-single-wrap"><label>Phone Number <span class="req">*</span> <span class="small-muted">(comma-separate multiple numbers)</span></label><input id="cp-to" placeholder="+15555550123, +15555550124"></div>
     <div id="cp-season-wrap" style="display:none"><label>Season <span class="small-muted">(a shul/applicant is a fresh record every season)</span></label><select id="cp-season">${seasonOptions}</select></div>
     <label>Use Template</label><select id="cp-template">${tmplOptions}</select>
     <label>Message <span class="req">*</span></label><textarea id="cp-body" rows="5"></textarea>
@@ -254,8 +254,11 @@ window.sendComposedSms = async () => {
   }
   try {
     const r = await api('/sms/send', { method: 'POST', body: payload });
-    if (mode === 'single') toast(r.emailError ? `Could not send: ${r.emailError}` : 'Message sent', !!r.emailError);
-    else toast(`Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, !!r.failed && r.sent === 0);
+    // 'single' mode can now be one or several comma-separated numbers — same
+    // response shape either way (POST /sms/send always returns
+    // sent/failed/total), so one message covers both: a lone recipient
+    // reads naturally as "Sent to 1 of 1 recipient(s)".
+    toast(`Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, !!r.failed && r.sent === 0);
     closeModal(); loadSent();
   } catch (err) { toast(err.message, true); }
 };

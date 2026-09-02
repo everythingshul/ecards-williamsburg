@@ -24,6 +24,8 @@ renderShell('/admin/stores', `
       <option value="status-rejected">Reject</option>
       <option value="invite">Invite to Portal</option>
       <option value="carry-forward">Carry Forward to Season…</option>
+      <option value="email">Email</option>
+      <option value="sms">SMS</option>
       <option value="delete">Delete Permanently</option>
     </select>
     <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
@@ -93,6 +95,16 @@ const MASS_ACTIONS = {
     confirm: n => `Permanently delete ${n} selected store(s)? This removes each store and its billing records completely and cannot be undone.`,
     run: (ids) => api('/stores/mass-delete-permanent', { method: 'POST', body: { ids } }),
     summarize: r => ({ msg: `Deleted ${r.deleted}, skipped ${r.skipped}` }),
+  },
+  email: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('store', 'email', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
+  },
+  sms: {
+    confirm: null,
+    run: (ids) => openMassMessageModal('store', 'sms', ids),
+    summarize: r => ({ msg: `Sent to ${r.sent} of ${r.total} recipient(s)${r.failed ? `, ${r.failed} failed` : ''}`, isError: !!r.failed && r.sent === 0 }),
   },
 };
 qs('#btn-mass-apply').addEventListener('click', async () => {

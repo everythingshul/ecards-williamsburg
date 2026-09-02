@@ -46,6 +46,31 @@ export function findAccountByPhone(orgId, rawPhone) {
   return null;
 }
 
+// Forward lookup — the other direction from findAccountByEmail/
+// findAccountByPhone above: given a list of record ids for one known entity
+// type, resolve each one's own contact info (same field mapping/COALESCE
+// order as those reverse lookups and the SMS group-send in routes/sms.js).
+// Powers the mass Email/SMS actions on the Shuls/Applicants/Stores list
+// pages — recipients are resolved server-side from just the checked ids,
+// not trusted from whatever the client already has cached. Silently drops
+// any id with no contact info on file rather than erroring.
+export function resolveEmailsForIds(orgId, entityType, ids) {
+  if (!ids || !ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  if (entityType === 'shul') return db.prepare(`SELECT gabai_email AS contact FROM shuls WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  if (entityType === 'store') return db.prepare(`SELECT COALESCE(NULLIF(manager_email,''), owner_email) AS contact FROM stores WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  if (entityType === 'applicant') return db.prepare(`SELECT email AS contact FROM applicants WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  throw new Error(`Unsupported entity type: ${entityType}`);
+}
+export function resolvePhonesForIds(orgId, entityType, ids) {
+  if (!ids || !ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  if (entityType === 'shul') return db.prepare(`SELECT gabai_cell AS contact FROM shuls WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  if (entityType === 'store') return db.prepare(`SELECT COALESCE(NULLIF(manager_phone,''), owner_phone) AS contact FROM stores WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  if (entityType === 'applicant') return db.prepare(`SELECT COALESCE(NULLIF(husband_cell,''), NULLIF(wife_cell,''), home_phone) AS contact FROM applicants WHERE org_id = ? AND id IN (${placeholders})`).all(orgId, ...ids).map(r => r.contact).filter(Boolean);
+  throw new Error(`Unsupported entity type: ${entityType}`);
+}
+
 export function findAccountByEmail(orgId, rawEmail) {
   if (!rawEmail) return null;
   const email = String(rawEmail).trim().toLowerCase();

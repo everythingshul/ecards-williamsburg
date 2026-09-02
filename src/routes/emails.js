@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { sendMailChecked } from '../services/mail.js';
 import { sendXlsx } from '../services/xlsx.js';
-import { findAccountByEmail } from '../utils/contactLookup.js';
+import { findAccountByEmail, resolveEmailsForIds } from '../utils/contactLookup.js';
 
 const router = Router();
 router.use(auth, requirePermission('emails')); // internal team feature — staff/org_admin/super_admin only
@@ -124,13 +124,27 @@ router.get('/recipients/search', (req, res) => {
 // individual send (and its own emails_sent log row), same as composing and
 // sending the same email to each person one at a time, rather than one
 // email exposing every recipient's address to each other in the To field.
+//
+// Alternatively, `entity_type` ('shul'/'store'/'applicant') + `ids` (array)
+// sends to exactly those records' own email addresses, resolved server-side
+// — this is what the mass "Email"/"SMS" action on the Shuls/Applicants/
+// Stores list pages uses, so it only ever reaches the checked rows. Not
+// combinable with `to` in the same request.
 router.post('/send', requirePermission('emails', 'can_edit'), async (req, res) => {
-  const { to, subject, body_html, variables } = req.body || {};
-  if (!to || !subject || !body_html) return res.status(400).json({ error: 'to, subject, and body_html are required' });
-  const recipients = [...new Set(String(to).split(',').map(s => s.trim()).filter(Boolean))];
-  if (!recipients.length) return res.status(400).json({ error: 'At least one recipient is required' });
-  const invalid = recipients.filter(r => !EMAIL_RE.test(r));
-  if (invalid.length) return res.status(400).json({ error: `Not a valid email address: ${invalid.join(', ')}` });
+  const { to, entity_type, ids, subject, body_html, variables } = req.body || {};
+  if (!subject || !body_html) return res.status(400).json({ error: 'subject and body_html are required' });
+  let recipients;
+  if (entity_type) {
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids is required with entity_type' });
+    recipients = [...new Set(resolveEmailsForIds(req.user.org_id, entity_type, ids))];
+    if (!recipients.length) return res.status(400).json({ error: 'None of the selected records have an email address on file' });
+  } else {
+    if (!to) return res.status(400).json({ error: 'to, or entity_type + ids, is required' });
+    recipients = [...new Set(String(to).split(',').map(s => s.trim()).filter(Boolean))];
+    if (!recipients.length) return res.status(400).json({ error: 'At least one recipient is required' });
+    const invalid = recipients.filter(r => !EMAIL_RE.test(r));
+    if (invalid.length) return res.status(400).json({ error: `Not a valid email address: ${invalid.join(', ')}` });
+  }
   const substitute = (text) => String(text).replace(/\{\{(\w+)\}\}/g, (m, key) => (variables && variables[key] != null ? variables[key] : m));
   const finalSubject = substitute(subject);
   const finalBody = substitute(body_html);

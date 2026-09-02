@@ -1042,6 +1042,58 @@ window.sendQuickEmail = async (entityType, entityId, containerId, defaultPhone, 
   } catch (err) { toast(err.message, true); }
 };
 
+// Mass "Email"/"SMS" action — shared by the Shuls/Applicants/Stores list
+// pages' MASS_ACTIONS (entityType is 'shul'/'store'/'applicant', matching
+// resolveEmailsForIds/resolvePhonesForIds' entity_type on the backend).
+// Same shape as openMassCarryForwardModal in shuls.html: returns a Promise
+// resolving to the send result (so the caller's existing summarize()
+// handles the toast), or null if the modal is closed without sending — a
+// MutationObserver is the only way to catch that since openModal/closeModal
+// don't offer an on-close hook. No per-recipient {{variable}} substitution
+// (there's no single set of vars across a mixed batch of records) — same as
+// the SMS group blast this mirrors.
+function openMassMessageModal(entityType, kind, ids) {
+  return new Promise(async (resolve) => {
+    let templates = [];
+    try { ({ templates } = await api(kind === 'email' ? '/emails/templates/all' : '/sms/templates/all')); } catch { /* compose still works without templates */ }
+    const templateOptions = `<option value="">Start from scratch</option>` + templates.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+    const body = `
+      <p class="small-muted">Sending to ${ids.length} selected record(s), using whichever ${kind === 'email' ? 'email address' : 'phone number'} each has on file — any without one is skipped.</p>
+      ${templates.length ? `<label>Use Template</label><select id="mm-template">${templateOptions}</select>` : ''}
+      ${kind === 'email' ? `<label>Subject</label><input id="mm-subject"><label>Message</label><div id="mm-body"></div>` : `<label>Message</label><textarea id="mm-body" rows="5"></textarea>`}
+    `;
+    openModal(`Mass ${kind === 'email' ? 'Email' : 'SMS'}`, body, `<button class="btn btn-primary btn-sm" id="mm-send">Send</button>`);
+    const editor = kind === 'email' ? createRichTextEditor('mm-body') : null;
+    if (templates.length) {
+      qs('#mm-template').addEventListener('change', () => {
+        const t = templates.find(x => x.id === qs('#mm-template').value);
+        if (kind === 'email') { qs('#mm-subject').value = t ? t.subject : ''; editor.setHtml(t ? t.body_html : ''); }
+        else qs('#mm-body').value = t ? t.body : '';
+      });
+    }
+    let resolved = false;
+    const finish = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    const modalEl = document.getElementById('ec-modal');
+    const observer = new MutationObserver(() => {
+      if (modalEl && !document.body.contains(modalEl)) { observer.disconnect(); finish(null); }
+    });
+    observer.observe(document.body, { childList: true });
+    qs('#mm-send').addEventListener('click', async () => {
+      const messageBody = kind === 'email' ? editor.getHtml().trim() : qs('#mm-body').value.trim();
+      if (!messageBody) return toast('Enter a message', true);
+      if (kind === 'email' && !qs('#mm-subject').value.trim()) return toast('Enter a subject', true);
+      try {
+        const r = kind === 'email'
+          ? await api('/emails/send', { method: 'POST', body: { entity_type: entityType, ids, subject: qs('#mm-subject').value.trim(), body_html: messageBody } })
+          : await api('/sms/send', { method: 'POST', body: { entity_type: entityType, ids, body: messageBody } });
+        observer.disconnect();
+        closeModal();
+        finish(r);
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
 // Injects the same admin-configured header/footer nav that the homepage
 // renders directly, onto every other public-facing page (login, apply
 // forms, FAQ, contact, sign-*, forms, invite/reset flows). Prepends a slim
