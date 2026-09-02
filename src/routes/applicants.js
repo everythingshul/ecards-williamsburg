@@ -82,17 +82,18 @@ function isMergedSecondary(applicant) {
 
 // Season setting "require_shul_contribution": before an applicant can be
 // approved/carded, the shul must have confirmed how much they personally
-// gave the family, and that amount must meet the effective minimum bar
-// (an admin-only per-applicant override, falling back to the shul's
-// admin-only default, falling back to no minimum at all). Returns an
-// admin-facing error string (safe to include the real minimum — only admins
-// ever see /approve responses) or null if the applicant clears the gate.
+// gave the family, and that amount must meet the effective minimum bar —
+// applicant override, else shul default, else season default, else no
+// minimum. Returns an admin-facing error string (safe to include the real
+// minimum — only admins ever see /approve responses) or null if the
+// applicant clears the gate.
 function shulContributionError(applicant) {
   if (!applicant.shul_contribution_confirmed) {
     return 'The shul has not yet reported and confirmed how much they personally gave this family — cannot approve until they do.';
   }
   const shul = applicant.shul_id ? db.prepare('SELECT min_contribution_default FROM shuls WHERE id = ?').get(applicant.shul_id) : null;
-  const effectiveMin = applicant.min_contribution_override ?? shul?.min_contribution_default ?? 0;
+  const season = applicant.season_id ? db.prepare('SELECT min_contribution_default FROM seasons WHERE id = ?').get(applicant.season_id) : null;
+  const effectiveMin = applicant.min_contribution_override ?? shul?.min_contribution_default ?? season?.min_contribution_default ?? 0;
   const reported = applicant.shul_contribution_amount ?? 0;
   if (effectiveMin > 0 && reported < effectiveMin) {
     return `The shul-reported contribution ($${reported.toFixed(2)}) is below the required minimum of $${effectiveMin.toFixed(2)} for this applicant.`;
@@ -151,7 +152,7 @@ function seasonCapacityError(seasonId) {
 // flagged as a possible duplicate — from their side it should just look
 // like a normal pending/approved application. Applies to both the zip-code
 // auto-rejection below and any other rejection reason.
-function maskForShul(records, role, orgId) {
+export function maskForShul(records, role, orgId) {
   if (role !== 'shul') return records;
   // Card amount visibility is an admin-configurable toggle (Settings >
   // Organization > Shul Portal) — defaults to visible, same as before the
@@ -177,6 +178,8 @@ function maskForShul(records, role, orgId) {
     // only ever learns whether it must report/confirm an amount at all,
     // never the number it's being checked against.
     delete rec.min_contribution_override;
+    delete rec.match_rate_override;
+    delete rec.match_cap_override;
     rec.requiresShulContribution = requiresContribution(r.season_id);
     return rec;
   };
@@ -497,7 +500,7 @@ router.put('/:id', requirePermission('applicants', 'can_edit'), async (req, res)
   // admin-only (spec #5 for card_amount; shul_id because a shul reassigning
   // its own applicants to a different shul would be a data-integrity/scope
   // violation, not a legitimate self-service edit).
-  const fields = req.user.role === 'shul' ? EDITABLE_FIELDS.filter(f => f !== 'card_amount' && f !== 'provider_exempt') : [...EDITABLE_FIELDS, 'shul_id', 'permanent_comments', 'min_contribution_override'];
+  const fields = req.user.role === 'shul' ? EDITABLE_FIELDS.filter(f => f !== 'card_amount' && f !== 'provider_exempt') : [...EDITABLE_FIELDS, 'shul_id', 'permanent_comments', 'min_contribution_override', 'match_rate_override', 'match_cap_override'];
   const sets = fields.filter(f => b[f] !== undefined);
   // A 'soft_rejected' applicant (see POST /:id/soft-reject) has no shul —
   // that's what the status means. The moment this update actually gives it
@@ -1171,8 +1174,15 @@ router.post('/:id/notes', (req, res) => {
 // would otherwise be confusing/pointless for them to fill in, this drops
 // it from the template they download entirely. An admin's own template
 // still has it, since an admin's upload can span many shuls.
+// card_amount is also dropped from a shul's template: it's admin-only (the
+// single-applicant create/edit endpoints already ignore it from a shul —
+// see the cardAmount guard below and EDITABLE_FIELDS filtering), so a shul
+// shouldn't see a column for it. preferred_number is dropped too — a shul
+// filling out a spreadsheet for many applicants at once isn't the place to
+// ask each family's preferred contact info.
+const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_name', 'card_amount', 'preferred_number'];
 router.get('/import/template', (req, res) => {
-  const columns = req.user.role === 'shul' ? APPLICANT_IMPORT_COLUMNS.filter(c => c !== 'shul_name') : APPLICANT_IMPORT_COLUMNS;
+  const columns = req.user.role === 'shul' ? APPLICANT_IMPORT_COLUMNS.filter(c => !SHUL_EXCLUDED_IMPORT_COLUMNS.includes(c)) : APPLICANT_IMPORT_COLUMNS;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="applicant_import_template.xlsx"');
   res.send(buildXlsxTemplate(['id', ...columns]));
@@ -1276,7 +1286,9 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
     const existing = rowExisting[i];
     if (existing) {
       try {
-        const sets = Object.keys(APPLICANT_UPDATABLE_FIELDS).filter(f => { const v = APPLICANT_UPDATABLE_FIELDS[f](r); return v !== undefined && v !== ''; });
+        // card_amount is admin-only on a re-uploaded UPDATE row too — same
+        // guard as the single-record PUT /:id and the new-row INSERT above.
+        const sets = Object.keys(APPLICANT_UPDATABLE_FIELDS).filter(f => f !== 'card_amount' || req.user.role !== 'shul').filter(f => { const v = APPLICANT_UPDATABLE_FIELDS[f](r); return v !== undefined && v !== ''; });
         const vals = sets.map(f => APPLICANT_UPDATABLE_FIELDS[f](r));
         const yomtovRaw = String(r.home_for_yomtov ?? '').trim();
         if (yomtovRaw !== '') { sets.push('home_for_yomtov'); vals.push(/^(y|yes|true|1)$/i.test(yomtovRaw) ? 1 : 0); }
@@ -1317,12 +1329,17 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
       // An admin's own upload is unaffected — admin rows go straight to
       // 'pending' as before, same as every other admin-submitted row.
       const initialStatus = !isZipAllowed(req.user.org_id, r.zip) ? 'rejected' : (isAdminSubmitter ? 'pending' : 'draft');
+      // card_amount is admin-only (see the single-create endpoint's same
+      // guard above) — a shul-portal upload ignores anything in that
+      // column even though it's no longer on their downloadable template,
+      // in case a shul reuses an older template or an admin's own.
+      const rowCardAmount = req.user.role !== 'shul' && r.card_amount ? +r.card_amount : null;
       db.prepare(`INSERT INTO applicants (id, org_id, shul_id, season_id, external_id, first_name, last_name, marital_status, home_phone, husband_cell, wife_cell, email,
           address, city, state, zip, preferred_contact_method, preferred_number, num_children, home_for_yomtov, card_amount, comments, source, approval_status, provider_exempt)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, 'mass_upload', ?, ?)`)
         .run(id, req.user.org_id, shul.id, shul.season_id, generateApplicantExternalId(db), r.first_name, r.last_name, r.marital_status || '', normalizePhone(r.home_phone || ''), normalizePhone(r.husband_cell || ''), normalizePhone(r.wife_cell || ''), r.email || '',
           r.address || '', r.city || '', r.state || '', r.zip || '', r.preferred_contact_method || '', r.preferred_number || '', +r.num_children || 0,
-          /^(y|yes|true|1)$/i.test(String(r.home_for_yomtov || '')) ? 1 : 0, r.card_amount ? +r.card_amount : null, r.comments || '', initialStatus, providerExempt);
+          /^(y|yes|true|1)$/i.test(String(r.home_for_yomtov || '')) ? 1 : 0, rowCardAmount, r.comments || '', initialStatus, providerExempt);
       const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(id);
       const flag = detectAndFlag(req.user.org_id, 'applicant', applicant);
       createdIds.push(id); createdNames.push(`${applicant.first_name} ${applicant.last_name}`.trim());

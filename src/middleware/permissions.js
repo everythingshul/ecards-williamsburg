@@ -24,7 +24,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // server-side gate — a resource missing from this list, or a route that
 // only checks requireAdmin instead of requirePermission(), is a section no
 // per-user permission can ever actually restrict, no matter what the UI shows.
-export const PERMISSION_RESOURCES = ['dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit'];
+export const PERMISSION_RESOURCES = ['dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit', 'shul_payments'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource. Recent Actions is a full
@@ -62,7 +62,7 @@ export function computePermissionMap(user) {
 // so a portal account hitting one of those routes 403s before any query runs
 // — the same protection dashboard.js gets from requireAdmin, generalized to
 // every current and future resource that reuses this middleware.
-const PORTAL_ALLOWED_RESOURCES = { shul: ['shuls', 'applicants'], store: ['stores'] };
+const PORTAL_ALLOWED_RESOURCES = { shul: ['shuls', 'applicants', 'shul_payments'], store: ['stores'] };
 
 export function getPermission(user, resource) {
   if (user.role === 'super_admin') return { can_view: 1, can_edit: 1, can_export: 1, hidden_fields: [], scope: 'all' };

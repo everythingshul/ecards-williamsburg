@@ -298,7 +298,7 @@ async function openShul(id) {
       <div class="tabs" id="stabs">
         <button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button>
         <button data-t="contract">Contract</button><button data-t="applicants">Applicants (${applicants.length})</button>
-        <button data-t="messages">Messages</button><button data-t="history">History</button>
+        <button data-t="messages">Messages</button><button data-t="history">History</button><button data-t="payments">Payments</button>
       </div>
       <div id="tab-info">
         <div class="grid-2">
@@ -369,6 +369,9 @@ async function openShul(id) {
       <div id="tab-history" style="display:none">
         <div id="tab-history-list"><p class="small-muted">Loading…</p></div>
       </div>
+      <div id="tab-payments" style="display:none">
+        <div id="tab-payments-content"><p class="small-muted">Loading…</p></div>
+      </div>
     `;
     const footer = `
       <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Shul', '/shuls/${id}/other-seasons', 'openShul')">View Other Seasons</button>
@@ -385,7 +388,8 @@ async function openShul(id) {
     openModal(shul.name_en, body, footer);
     qsa('#stabs button').forEach(b => b.addEventListener('click', () => {
       qsa('#stabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
-      ['info','notes','contract','applicants','messages','history'].forEach(t => qs('#tab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+      ['info','notes','contract','applicants','messages','history','payments'].forEach(t => qs('#tab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+      if (b.dataset.t === 'payments') loadPaymentsTab(id, shul);
     }));
     loadMessagesTab('shul', id, 'tab-messages-list', shul.gabai_cell || shul.ruv_phone || '', shul.gabai_email || '', shul);
     loadHistoryTab('shul', id, 'tab-history-list');
@@ -405,6 +409,105 @@ window.saveShul = async (id) => {
   const minContrib = qs('#e-min_contribution_default').value;
   body.min_contribution_default = minContrib === '' ? null : +minContrib;
   try { await api(`/shuls/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
+const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other' };
+async function loadPaymentsTab(shulId, shul) {
+  const el = qs('#tab-payments-content');
+  try {
+    const [balance, { payments }, { allocations }] = await Promise.all([
+      api(`/shul-payments/balance/${shulId}`),
+      api(`/shul-payments?shul_id=${shulId}`),
+      api(`/shul-payments/allocations?shul_id=${shulId}`),
+    ]);
+    el.innerHTML = `
+      <div class="stat-grid">
+        <div class="card"><div class="small-muted">Pending Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.pending)}</div></div>
+        <div class="card"><div class="small-muted">Approved Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.approved)}</div></div>
+      </div>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Overrides</h4>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Online Card Payment (Stripe)</label>
+          <select id="e-stripe_payments_enabled">
+            <option value="" ${shul.stripe_payments_enabled == null ? 'selected' : ''}>Use org default</option>
+            <option value="1" ${shul.stripe_payments_enabled === 1 ? 'selected' : ''}>Always on for this shul</option>
+            <option value="0" ${shul.stripe_payments_enabled === 0 ? 'selected' : ''}>Always off for this shul</option>
+          </select></div>
+        <div><label style="margin-top:0">Match Rate Override <span class="small-muted">(blank = use season default)</span></label>
+          <input id="e-match_rate_override" type="number" min="0" max="1" step="0.01" value="${shul.match_rate_override ?? ''}" placeholder="Season default"></div>
+      </div>
+      <label>Match Cap Override (per applicant, this shul's giving) <span class="small-muted">(blank = use season default)</span></label>
+      <input id="e-match_cap_override" type="number" min="0" step="0.01" value="${shul.match_cap_override ?? ''}" placeholder="Season default" style="max-width:260px">
+      <button class="btn btn-sm btn-outline" style="margin-top:10px" onclick="savePaymentOverrides('${shulId}')">Save Overrides</button>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Add Manual Payment</h4>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Method</label>
+          <select id="mp-method">${Object.entries(MANUAL_METHOD_LABEL).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+        <div><label style="margin-top:0">Amount ($)</label><input id="mp-amount" type="number" min="0.01" step="0.01"></div>
+      </div>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Date</label><input id="mp-date" type="date"></div>
+        <div><label style="margin-top:0">Time</label><input id="mp-time" type="time"></div>
+      </div>
+      <label>Ref# / Check#</label><input id="mp-ref" style="max-width:260px">
+      <label>Notes</label><input id="mp-notes">
+      <button class="btn btn-sm btn-primary" style="margin-top:10px" onclick="addManualPayment('${shulId}','${shul.season_id}')">Add Payment</button>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Payment History</h4>
+      ${payments.length ? `<table><thead><tr><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>
+        ${payments.map(p => `<tr>
+          <td>${p.method === 'stripe_card' ? 'Card (Stripe)' : (MANUAL_METHOD_LABEL[p.method] || p.method)}</td>
+          <td>${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${fmtMoney(p.net_amount)}</td>
+          <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}${p.manual_ref ? `<div class="small-muted">Ref: ${esc(p.manual_ref)}</div>` : ''}${p.entered_by_first ? `<div class="small-muted">By ${esc(p.entered_by_first)} ${esc(p.entered_by_last||'')}</div>` : ''}</td>
+          <td>${fmtDateTime(p.created_at)}</td>
+          <td>${p.status === 'pending_approval' ? `<button class="btn btn-sm btn-outline" onclick="approvePayment('${p.id}','${shulId}')">Approve</button> <button class="btn btn-sm btn-outline" onclick="rejectPayment('${p.id}','${shulId}')">Reject</button>` : ''}</td>
+        </tr>`).join('')}
+      </tbody></table>` : '<p class="small-muted">No payments yet.</p>'}
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Allocations Given</h4>
+      ${allocations.length ? `<table><thead><tr><th>Applicant</th><th>Given</th><th>Match</th><th>Total</th><th>By</th><th>Date</th><th></th></tr></thead><tbody>
+        ${allocations.filter(a => a.base_amount !== 0).map(a => `<tr${a.reversed_at ? ' style="opacity:.55"' : ''}>
+          <td>${esc(a.first_name||'')} ${esc(a.last_name||'')}${a.is_admin_override ? ' ' + badge('override','pending') : ''}</td>
+          <td>${fmtMoney(a.base_amount)}</td><td>${fmtMoney(a.match_amount)}</td><td>${fmtMoney(a.total_amount)}</td>
+          <td>${esc(a.created_by_first||'')} ${esc(a.created_by_last||'')}</td>
+          <td>${fmtDateTime(a.created_at)}</td>
+          <td>${a.reversed_at ? badge('reversed','rejected') : `<button class="btn btn-sm btn-outline" onclick="reverseAllocation('${a.id}','${shulId}')">Undo</button>`}</td>
+        </tr>`).join('')}
+      </tbody></table>` : '<p class="small-muted">No allocations yet.</p>'}
+    `;
+  } catch (err) { el.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+}
+window.savePaymentOverrides = async (shulId) => {
+  const stripeVal = qs('#e-stripe_payments_enabled').value;
+  const rateVal = qs('#e-match_rate_override').value;
+  const capVal = qs('#e-match_cap_override').value;
+  const body = {
+    stripe_payments_enabled: stripeVal === '' ? null : +stripeVal,
+    match_rate_override: rateVal === '' ? null : +rateVal,
+    match_cap_override: capVal === '' ? null : +capVal,
+  };
+  try { await api(`/shuls/${shulId}`, { method: 'PUT', body }); toast('Saved'); openShul(shulId); } catch (err) { toast(err.message, true); }
+};
+window.addManualPayment = async (shulId, seasonId) => {
+  const amount = +qs('#mp-amount').value;
+  if (!(amount > 0)) return toast('Enter a valid amount', true);
+  const body = {
+    shul_id: shulId, season_id: seasonId, method: qs('#mp-method').value, amount,
+    manual_date: qs('#mp-date').value, manual_time: qs('#mp-time').value, manual_ref: qs('#mp-ref').value, notes: qs('#mp-notes').value,
+  };
+  try { await api('/shul-payments/manual', { method: 'POST', body }); toast('Payment added'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
+};
+window.approvePayment = async (paymentId, shulId) => {
+  try { await api(`/shul-payments/${paymentId}/approve`, { method: 'POST' }); toast('Approved'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
+};
+window.rejectPayment = async (paymentId, shulId) => {
+  const reason = prompt('Reason for rejecting this payment (optional):') || '';
+  try { await api(`/shul-payments/${paymentId}/reject`, { method: 'POST', body: { reason } }); toast('Rejected'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
+};
+window.reverseAllocation = async (allocationId, shulId) => {
+  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores this shul\'s balance.')) return;
+  try { await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' }); toast('Reversed'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
 };
 window.addShulNote = async (id) => {
   const note = qs('#new-note').value.trim(); if (!note) return;

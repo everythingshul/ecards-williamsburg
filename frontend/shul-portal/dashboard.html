@@ -19,6 +19,11 @@ renderShell('/shul-portal/dashboard', `
       <button class="btn btn-primary btn-sm" id="btn-new">+ Add Applicant</button>
     </div>
   </div>
+  <div class="card" style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <strong>Season Report</strong>
+    <select id="report-season" style="max-width:260px"><option value="all">All Seasons</option></select>
+    <button class="btn btn-outline btn-sm" onclick="downloadSeasonReport()">Download Report</button>
+  </div>
   <div class="stat-grid" id="shul-stats"><div class="small-muted">Loading…</div></div>
   <div id="shul-info-banner"></div>
   <div id="slots-banner"></div>
@@ -352,6 +357,14 @@ window.removeApplicantShul = async (id) => {
   if (!confirm('Remove this applicant from your list? They will no longer appear here.')) return;
   try { await api(`/applicants/${id}/soft-reject`, { method: 'POST' }); toast('Applicant removed'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
+// Season Report picker — every season this shul (matched by gabai_email
+// across every carried-forward season row, see routes/shuls.js's
+// myShulRowsAcrossSeasons) has ever had applicants in, past or current.
+api('/shuls/mine/seasons').then(({ seasons }) => {
+  qs('#report-season').innerHTML = '<option value="all">All Seasons</option>' +
+    seasons.map(s => `<option value="${s.season_id}">${esc(s.season_name)}${s.is_active ? ' (current)' : ''}</option>`).join('');
+}).catch(() => {});
+window.downloadSeasonReport = () => downloadAuthed(`/shuls/mine/report?season_id=${encodeURIComponent(qs('#report-season').value)}`, 'season-report.xlsx');
 load();
 </script>
 </body>

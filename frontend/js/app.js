@@ -257,6 +257,7 @@ const SHUL_NAV = [
   { href: '/shul-portal/dashboard', label: 'My Applicants' },
   { href: '/shul-portal/upload', label: 'Bulk Upload' },
   { href: '/shul-portal/shul-info', label: 'Shul Information' },
+  { href: '/shul-portal/payments', label: 'Payments' },
   { href: '/shul-portal/updates', label: 'Updates' },
 ];
 const STORE_NAV = [

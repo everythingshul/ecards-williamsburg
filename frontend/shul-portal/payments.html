@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payments · Kupes Hair Williamsburg</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireRole('shul');
+renderShell('/shul-portal/payments', `
+  <h2>Payments</h2>
+  <div class="stat-grid" id="balance-stats"><div class="small-muted">Loading…</div></div>
+
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin-top:0">Make a Payment</h3>
+    <div id="stripe-disabled-note" style="display:none" class="small-muted">Online card payment isn't available for your shul right now.</div>
+    <div id="stripe-mock-note" style="display:none" class="small-muted">Test mode — no real charge will be made.</div>
+    <div id="stripe-form-wrap" style="display:none">
+      <label>Amount ($)</label><input id="pay-amount" type="number" min="1" step="0.01" style="max-width:220px">
+      <div id="payment-element" style="margin-top:14px"></div>
+      <button class="btn btn-primary btn-sm" style="margin-top:14px" id="btn-pay" onclick="submitPayment()">Pay</button>
+      <div id="pay-status" class="small-muted" style="margin-top:8px"></div>
+    </div>
+    <button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="openRequestMethodModal()">Request a Different Payment Method</button>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin-top:0">Give to an Applicant</h3>
+    <p class="small-muted">Funded from your Approved Balance. You can add more to an applicant who already received money this season, but you can't take back what's already been given.</p>
+    <div class="grid-2">
+      <div><label style="margin-top:0">Applicant</label><select id="alloc-applicant"><option value="">Loading…</option></select></div>
+      <div><label style="margin-top:0">Amount ($)</label><input id="alloc-amount" type="number" min="0.01" step="0.01"></div>
+    </div>
+    <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="submitAllocation()">Give</button>
+  </div>
+
+  <h3 style="margin-top:20px">Payment History</h3>
+  <div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Method</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead>
+    <tbody id="payments-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>
+
+  <h3 style="margin-top:20px">What You've Given</h3>
+  <div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Applicant</th><th>You Gave</th><th>Total (incl. match)</th><th>Date</th></tr></thead>
+    <tbody id="allocations-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>
+`);
+
+let stripe = null, elements = null, payConfig = null;
+
+async function loadBalance() {
+  const b = await api('/shul-payments/mine/balance');
+  qs('#balance-stats').innerHTML = `
+    <div class="card"><div class="small-muted">Pending Approval</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.pending)}</div></div>
+    <div class="card"><div class="small-muted">Approved (available to give)</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.approved)}</div></div>
+  `;
+}
+
+async function loadPayForm() {
+  payConfig = await api('/shul-payments/mine/config');
+  if (!payConfig.stripeEnabled) { qs('#stripe-disabled-note').style.display = 'block'; return; }
+  if (payConfig.mockMode) qs('#stripe-mock-note').style.display = 'block';
+  if (!payConfig.publishableKey && !payConfig.mockMode) { qs('#stripe-disabled-note').textContent = 'Payment is not fully configured yet — contact the office.'; qs('#stripe-disabled-note').style.display = 'block'; return; }
+  qs('#stripe-form-wrap').style.display = 'block';
+}
+
+window.submitPayment = async () => {
+  const amount = +qs('#pay-amount').value;
+  if (!(amount > 0)) return toast('Enter a valid amount', true);
+  qs('#btn-pay').disabled = true;
+  qs('#pay-status').textContent = '';
+  try {
+    const { clientSecret, mock } = await api('/shul-payments/mine/stripe-intent', { method: 'POST', body: { amount } });
+    if (mock) {
+      // Mock mode — no real Stripe.js call to make; the webhook this would
+      // normally trigger never fires without a real Stripe account, so this
+      // is as far as the flow can be tested without live keys.
+      qs('#pay-status').textContent = 'Test mode: payment intent created. (No real Stripe account configured — nothing further to confirm.)';
+      qs('#btn-pay').disabled = false;
+      return;
+    }
+    if (!stripe) stripe = Stripe(payConfig.publishableKey);
+    const { error } = await stripe.confirmPayment({ clientSecret, confirmParams: { return_url: window.location.href }, redirect: 'if_required' });
+    if (error) { qs('#pay-status').textContent = error.message; qs('#btn-pay').disabled = false; return; }
+    qs('#pay-status').textContent = 'Payment submitted — it will show as pending until the office approves it.';
+    loadBalance(); loadPayments();
+  } catch (err) { qs('#pay-status').textContent = err.message; }
+  qs('#btn-pay').disabled = false;
+};
+
+window.openRequestMethodModal = () => {
+  const body = `
+    <label>Requested Method</label>
+    <select id="rm-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select>
+    <label>Message (optional)</label><textarea id="rm-message" rows="3"></textarea>
+  `;
+  openModal('Request a Different Payment Method', body, `<button class="btn btn-primary btn-sm" onclick="submitMethodRequest()">Send Request</button>`);
+};
+window.submitMethodRequest = async () => {
+  try {
+    await api('/shul-payments/mine/request-method', { method: 'POST', body: { requested_method: qs('#rm-method').value, message: qs('#rm-message').value } });
+    toast('Request sent — the office will follow up with you.');
+    closeModal();
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadApplicantsForAllocation() {
+  const { applicants } = await api('/applicants?status=approved&pageSize=500');
+  const approved = applicants.filter(a => a.approval_status === 'approved');
+  qs('#alloc-applicant').innerHTML = approved.length
+    ? approved.map(a => `<option value="${a.id}">${esc(a.first_name)} ${esc(a.last_name)}</option>`).join('')
+    : '<option value="">No approved applicants yet</option>';
+}
+window.submitAllocation = async () => {
+  const applicant_id = qs('#alloc-applicant').value;
+  const amount = +qs('#alloc-amount').value;
+  if (!applicant_id) return toast('Select an applicant', true);
+  if (!(amount > 0)) return toast('Enter a valid amount', true);
+  try {
+    await api('/shul-payments/mine/allocate', { method: 'POST', body: { applicant_id, amount } });
+    toast('Given');
+    qs('#alloc-amount').value = '';
+    loadBalance(); loadAllocations();
+  } catch (err) { toast(err.message, true); }
+};
+
+const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other', stripe_card: 'Card' };
+async function loadPayments() {
+  const { payments } = await api('/shul-payments/mine');
+  qs('#payments-tbody').innerHTML = payments.length ? payments.map(p => `<tr>
+      <td>${MANUAL_METHOD_LABEL[p.method] || p.method}</td><td>${fmtMoney(p.net_amount)}</td>
+      <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
+      <td>${fmtDateTime(p.created_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty-state">No payments yet.</td></tr>';
+}
+async function loadAllocations() {
+  const { allocations } = await api('/shul-payments/mine/allocations');
+  const active = allocations.filter(a => !a.reversed);
+  qs('#allocations-tbody').innerHTML = active.length ? active.map(a => `<tr>
+      <td>${esc(a.applicant_name)}</td><td>${fmtMoney(a.base_amount)}</td><td>${fmtMoney(a.display_total)}</td><td>${fmtDateTime(a.created_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty-state">Nothing given yet.</td></tr>';
+}
+
+(async () => {
+  loadBalance();
+  loadPayForm();
+  loadApplicantsForAllocation();
+  loadPayments();
+  loadAllocations();
+})();
+</script>
+<script src="https://js.stripe.com/v3/"></script>
+</body>
+</html>

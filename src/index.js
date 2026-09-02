@@ -44,6 +44,7 @@ import preferencesRoutes from './routes/preferences.js';
 import contactRoutes from './routes/contact.js';
 import analyticsRoutes from './routes/analytics.js';
 import migrationRoutes from './routes/migration.js';
+import shulPaymentRoutes from './routes/shulPayments.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -79,7 +80,11 @@ app.set('trust proxy', 1);
 // this adds no real exposure, just stops blocking legitimate embedding.
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: false }));
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || process.env.APP_URL || '*', credentials: true }));
-app.use(express.json({ limit: '15mb' })); // e-signature PNGs are base64 in JSON bodies
+// verify: stashes the raw request bytes on req.rawBody alongside the normal
+// parsed body — Stripe's webhook signature check (routes/shulPayments.js)
+// needs the exact raw bytes, and this is the standard way to get both
+// without a second body-parsing pass or reordering route registration.
+app.use(express.json({ limit: '15mb', verify: (req, res, buf) => { req.rawBody = buf; } })); // e-signature PNGs are base64 in JSON bodies
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 2000 }));
 // Auth endpoints get their own much tighter limit — the blanket 2000/15min
@@ -137,6 +142,7 @@ app.use('/api/preferences', preferencesRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/migration', migrationRoutes);
+app.use('/api/shul-payments', shulPaymentRoutes);
 
 // Signed/generated PDFs, uploaded logos, and update attachments.
 app.use('/uploads/contracts', express.static(join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'contracts')));

@@ -31,7 +31,7 @@ renderShell('/admin/audit', `
   <div id="actions-list">Loading…</div>
 `);
 
-const ENTITY_LABELS = { shul: 'shul', applicant: 'applicant', store: 'store', season: 'season', task: 'task', user: 'user', card: 'card' };
+const ENTITY_LABELS = { shul: 'shul', applicant: 'applicant', store: 'store', season: 'season', task: 'task', user: 'user', card: 'card', shul_allocation: 'allocation' };
 const ACTION_VERBS = { create: 'Created', update: 'Updated', delete: 'Deleted', approve: 'Approved', reject: 'Rejected', undo: 'Reversed a change to', login: 'Signed in', esign: 'Signed', send_contract: 'Sent a contract to', retract_signature: 'Retracted a signature on', resolve_duplicate: 'Resolved a duplicate flag on' };
 // Mass actions (bulk buttons + spreadsheet imports) log one audit_log row
 // per click/upload instead of one per affected record — entity_id is null,
@@ -75,14 +75,26 @@ function entityName(row) {
 // diff) a short field-by-field list underneath — one field per line, plain
 // labels, formatted values — instead of a single comma-packed "→" dump.
 function headline(a) {
-  const verb = ACTION_VERBS[a.action] || (a.action.charAt(0).toUpperCase() + a.action.slice(1));
   if (a.action === 'login') return 'Signed in';
+  if (a.entity_type === 'shul_allocation') {
+    const snap = a.after || a.before || {};
+    const shul = a.allocationShulName ? esc(a.allocationShulName) : 'A shul';
+    const applicant = a.allocationApplicantName ? esc(a.allocationApplicantName) : 'an applicant';
+    if (a.action === 'undo') return `${shul} — allocation to ${applicant} reversed (${fmtMoney(Math.abs(snap.base_amount || 0))})`;
+    const match = snap.match_amount ? ` (+${fmtMoney(snap.match_amount)} match)` : '';
+    return `${shul} gave ${fmtMoney(snap.base_amount || 0)} to ${applicant}${match}${snap.is_admin_override ? ' — admin override' : ''}`;
+  }
+  const verb = ACTION_VERBS[a.action] || (a.action.charAt(0).toUpperCase() + a.action.slice(1));
   const label = ENTITY_LABELS[a.entity_type] || a.entity_type;
   const name = entityName(a);
   return `${verb} ${label}${name ? ' — ' + esc(name) : ''}`;
 }
 function changeList(a) {
   if (['create', 'delete', 'login'].includes(a.action)) return '';
+  // The 'undo' row's before/after are two different shul_allocations rows
+  // (the original and its equal-and-opposite reversal), not a field-level
+  // diff of one record — a generic before→after list would be meaningless.
+  if (a.entity_type === 'shul_allocation') return '';
   const before = a.before || {}, after = a.after || {};
   const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
   if (!keys.length) return '';
@@ -160,6 +172,7 @@ async function load() {
         </div>
         ${a.undoable ? `<button class="btn btn-sm btn-outline" onclick="undoAction('${a.id}', false, '${a.action}')">Undo</button>` : ''}
         ${a.redoable ? `<button class="btn btn-sm btn-outline" onclick="undoAction('${a.undo_entry_id}', true)">Redo</button>` : ''}
+        ${a.allocationReversible ? `<button class="btn btn-sm btn-outline" onclick="reverseShulAllocation('${a.entity_id}')">Undo</button>` : ''}
       </div>
     </div>`;
   }).join('') : '<p class="small-muted">No actions in this window.</p>';
@@ -176,6 +189,17 @@ window.undoAction = async (id, isRedo, action) => {
     : (isRedo ? 'Redo this action? This brings the change back.' : 'Undo this action? This restores the affected record to how it was right before this change.');
   if (!confirm(message)) return;
   try { await api(`/audit/${id}/undo`, { method: 'POST' }); toast(isRedo ? 'Redone' : 'Undone'); load(); } catch (err) { toast(err.message, true); }
+};
+// Deliberately NOT routed through undoAction()/POST /audit/:id/undo — a
+// shul_allocation isn't in ENTITY_TABLES, so the generic column-restore undo
+// can't handle it. It has its own money-aware reversal (checks the
+// applicant's live card balance via disccardpromos before allowing it, see
+// services/matching.js reverseAllocation) already wired up for the admin
+// Shuls > Payments tab; this just gives Recent Actions a button to the same
+// endpoint instead of duplicating that logic.
+window.reverseShulAllocation = async (allocationId) => {
+  if (!confirm("Undo this allocation? This adds an equal-and-opposite entry to the applicant's card balance. Only allowed if the money hasn't been spent yet.")) return;
+  try { await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' }); toast('Undone'); load(); } catch (err) { toast(err.message, true); }
 };
 qs('#f-hours').addEventListener('change', load);
 load();

@@ -42,6 +42,29 @@ async function loadSeasons() {
       <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-contrib-${s.id}" ${s.require_shul_contribution?'checked':''} onchange="updateSeason('${s.id}',{require_shul_contribution:this.checked})">
         <label for="s-contrib-${s.id}" style="margin:0">Require shuls to report &amp; confirm a minimum contribution before an applicant can be approved</label></div>
       <p class="small-muted">When on, a shul must enter how much they personally gave a family and check a confirmation box before that applicant can be approved. The minimum amount required (set per shul, overridable per applicant) is never shown to the shul.</p>
+      <div><label style="margin-top:10px">Season Default Minimum Contribution <span class="small-muted">(blank = no minimum; a shul's own default, and any per-applicant override, still take priority over this)</span></label>
+        <input type="number" min="0" step="0.01" value="${s.min_contribution_default ?? ''}" placeholder="No minimum" onchange="updateSeason('${s.id}',{min_contribution_default: this.value === '' ? null : +this.value})"></div>
+      <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-slots-${s.id}" ${s.require_shul_slots?'checked':''} onchange="updateSeason('${s.id}',{require_shul_slots:this.checked})">
+        <label for="s-slots-${s.id}" style="margin:0">Require a slot limit when approving a shul</label></div>
+      <p class="small-muted">When off, admins aren't forced to set a slot limit when approving a shul into this season (shuls approved with no limit can submit any number of applicants). A specific shul can still be given its own slot limit either way, and this is separate from Max Accepted Applicants above.</p>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Matching Funds</h4>
+      <p class="small-muted">When a shul allocates money to an applicant, the system adds a match on top — deducted from these caps, never from any shul's own balance. A shul or applicant can override the rate/cap (most specific wins); the season-wide total has no override, it's one shared pool.</p>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Match Rate <span class="small-muted">(e.g. 0.5 = 50%; blank = no match)</span></label>
+          <input type="number" min="0" max="1" step="0.01" value="${s.match_rate ?? ''}" placeholder="No match" onchange="updateSeason('${s.id}',{match_rate: this.value === '' ? null : +this.value})"></div>
+        <div><label style="margin-top:0">Max Match Per Applicant <span class="small-muted">(blank = unlimited)</span></label>
+          <input type="number" min="0" step="0.01" value="${s.match_cap_per_applicant ?? ''}" placeholder="Unlimited" onchange="updateSeason('${s.id}',{match_cap_per_applicant: this.value === '' ? null : +this.value})"></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Max Match Per Shul <span class="small-muted">(blank = unlimited)</span></label>
+          <input type="number" min="0" step="0.01" value="${s.match_cap_per_shul ?? ''}" placeholder="Unlimited" onchange="updateSeason('${s.id}',{match_cap_per_shul: this.value === '' ? null : +this.value})"></div>
+        <div><label style="margin-top:0">Max Match For The Season <span class="small-muted">(one shared pool; blank = unlimited)</span></label>
+          <input type="number" min="0" step="0.01" value="${s.match_cap_total ?? ''}" placeholder="Unlimited" onchange="updateSeason('${s.id}',{match_cap_total: this.value === '' ? null : +this.value})"></div>
+      </div>
+      <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-fee-${s.id}" ${s.shul_pays_processing_fee?'checked':''} onchange="updateSeason('${s.id}',{shul_pays_processing_fee:this.checked})">
+        <label for="s-fee-${s.id}" style="margin:0">Shul pays the card processing fee</label></div>
+      <p class="small-muted">When on, Stripe's actual fee for that charge is deducted before the payment ever shows up as pending balance.</p>
       <div class="divider"></div>
       <button class="btn btn-sm btn-outline" onclick="openSeasonNotes('${s.id}','${esc(s.name).replace(/'/g,"\\'")}')">Notes</button>
       <button class="btn btn-sm btn-outline" onclick="openSeasonGiftCardApi('${s.id}','${esc(s.name).replace(/'/g,"\\'")}', ${JSON.stringify(s.disccardpromos_api_base||'')}, ${!!s.has_disccardpromos_api_key})">Gift Card API${s.disccardpromos_api_base && s.has_disccardpromos_api_key ? ' ' + badge('configured','active') : ''}</button>

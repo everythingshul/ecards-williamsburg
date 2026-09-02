@@ -566,6 +566,80 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- ===================== Shul Payments / Balances / Matching =====================
+-- A shul's balance is never stored as a running total — it's always computed
+-- live from these two ledgers (see services/shulBalance.js), the same "no
+-- cached number to drift out of sync" convention as store live-spend
+-- elsewhere in this app:
+--   pending_balance  = SUM(net_amount) of shul_payments still awaiting admin approval
+--   approved_balance = SUM(net_amount) of approved shul_payments
+--                       MINUS SUM(base_amount) of this shul's non-reversed shul_allocations
+--                       (match_amount is never deducted — it isn't the shul's own money)
+CREATE TABLE IF NOT EXISTS shul_payments (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  shul_id TEXT NOT NULL REFERENCES shuls(id),
+  season_id TEXT NOT NULL REFERENCES seasons(id),
+  method TEXT NOT NULL,              -- stripe_card | wire | quickpay | check | cash | other
+  amount REAL NOT NULL,              -- gross amount paid
+  fee_amount REAL NOT NULL DEFAULT 0,-- Stripe's processing fee, only ever nonzero for stripe_card
+                                      -- when the season has shul_pays_processing_fee on
+  net_amount REAL NOT NULL,          -- amount - fee_amount; what actually reaches pending balance
+  status TEXT NOT NULL DEFAULT 'pending_approval', -- pending_approval | approved | rejected
+  stripe_payment_intent_id TEXT,
+  -- Required together for every manual method (wire/quickpay/check/cash/other);
+  -- entered_by is the "signed with the name of the account adding it" requirement.
+  manual_date TEXT,
+  manual_time TEXT,
+  manual_ref TEXT,
+  entered_by TEXT REFERENCES users(id),
+  approved_by TEXT REFERENCES users(id),
+  approved_at TEXT,
+  rejected_reason TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- One row per "a shul gave $X to applicant Y" — base_amount always comes out
+-- of shul_id's own approved balance even when is_admin_override routes it to
+-- an applicant belonging to a different shul (the money stays linked to the
+-- shul that actually gave it, per spec). match_amount is the system top-up
+-- computed at allocation time and is never deducted from any shul's balance.
+-- Reversal is additive (a new row with reversal_of set), never a delete —
+-- same "equal-and-opposite, not an erasure" reasoning as everywhere else
+-- real money is tracked in this app.
+CREATE TABLE IF NOT EXISTS shul_allocations (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  shul_id TEXT NOT NULL REFERENCES shuls(id),
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  season_id TEXT NOT NULL REFERENCES seasons(id),
+  base_amount REAL NOT NULL,
+  match_amount REAL NOT NULL DEFAULT 0,
+  total_amount REAL NOT NULL,
+  match_rate_used REAL,
+  is_admin_override INTEGER DEFAULT 0,
+  created_by TEXT REFERENCES users(id),
+  giftcard_status TEXT,               -- 'ok' | 'failed' — result of the live disccardpromos push
+  giftcard_error TEXT,
+  reversed_at TEXT,
+  reversed_by TEXT REFERENCES users(id),
+  reversal_of TEXT REFERENCES shul_allocations(id),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- A shul portal asking for a payment method other than Stripe — logged (not
+-- just emailed) so admin has a durable list of open requests, same reasoning
+-- as contact_submissions above.
+CREATE TABLE IF NOT EXISTS shul_payment_method_requests (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  shul_id TEXT NOT NULL REFERENCES shuls(id),
+  requested_method TEXT,
+  message TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_org ON tasks(org_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_date);
@@ -579,6 +653,13 @@ CREATE INDEX IF NOT EXISTS idx_applicants_status ON applicants(approval_status);
 CREATE INDEX IF NOT EXISTS idx_cards_applicant ON cards(applicant_id);
 CREATE INDEX IF NOT EXISTS idx_txn_card ON card_transactions(card_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_shul_payments_shul ON shul_payments(shul_id);
+CREATE INDEX IF NOT EXISTS idx_shul_payments_season ON shul_payments(season_id);
+CREATE INDEX IF NOT EXISTS idx_shul_payments_status ON shul_payments(status);
+CREATE INDEX IF NOT EXISTS idx_shul_allocations_shul ON shul_allocations(shul_id);
+CREATE INDEX IF NOT EXISTS idx_shul_allocations_applicant ON shul_allocations(applicant_id);
+CREATE INDEX IF NOT EXISTS idx_shul_allocations_season ON shul_allocations(season_id);
 `);
 
 // Guarded additive migrations (safe to re-run; never destructive).
@@ -685,6 +766,42 @@ safeAlter(`ALTER TABLE shuls ADD COLUMN min_contribution_default REAL`);
 safeAlter(`ALTER TABLE applicants ADD COLUMN min_contribution_override REAL`);
 safeAlter(`ALTER TABLE applicants ADD COLUMN shul_contribution_amount REAL`);
 safeAlter(`ALTER TABLE applicants ADD COLUMN shul_contribution_confirmed INTEGER DEFAULT 0`);
+// The lowest tier of the minimum-contribution fallback chain — season <
+// shul < applicant, most-specific wins (see shulContributionError in
+// routes/applicants.js). Previously the chain bottomed out at 0 (no
+// minimum) once neither a shul default nor an applicant override was set.
+safeAlter(`ALTER TABLE seasons ADD COLUMN min_contribution_default REAL`);
+
+// Settings > Seasons > "Require shul slot limits" — whether slots_allocated
+// is mandatory at shul approval for this season (see
+// seasonRequiresShulSlots in routes/shuls.js). Defaults to 1 (required) so
+// every season that predates this toggle keeps behaving exactly as before;
+// a per-shul slots_allocated override still works regardless of this
+// setting, and it's completely independent of the season-wide
+// max_accepted_applicants cap above.
+safeAlter(`ALTER TABLE seasons ADD COLUMN require_shul_slots INTEGER DEFAULT 1`);
+
+// Matching funds (see services/matching.js): season sets the defaults,
+// shuls/applicants can override the rate and cap most-specifically-wins
+// (applicant override > shul override > season default). match_cap_total
+// is a single season-wide pool with no override — it's inherently one
+// shared number, not something that makes sense "per shul". A null rate/cap
+// means "not set" at that tier (falls through to the next), NOT zero.
+safeAlter(`ALTER TABLE seasons ADD COLUMN match_rate REAL`);
+safeAlter(`ALTER TABLE seasons ADD COLUMN match_cap_per_applicant REAL`);
+safeAlter(`ALTER TABLE seasons ADD COLUMN match_cap_per_shul REAL`);
+safeAlter(`ALTER TABLE seasons ADD COLUMN match_cap_total REAL`);
+// Stripe's actual processing fee, captured from the payment itself — see
+// routes/shulPayments.js. When on, the fee comes off before the payment
+// ever shows up as pending balance (decided up front, not at approval time).
+safeAlter(`ALTER TABLE seasons ADD COLUMN shul_pays_processing_fee INTEGER DEFAULT 0`);
+
+safeAlter(`ALTER TABLE shuls ADD COLUMN stripe_payments_enabled INTEGER`);
+safeAlter(`ALTER TABLE shuls ADD COLUMN match_rate_override REAL`);
+safeAlter(`ALTER TABLE shuls ADD COLUMN match_cap_override REAL`);
+
+safeAlter(`ALTER TABLE applicants ADD COLUMN match_rate_override REAL`);
+safeAlter(`ALTER TABLE applicants ADD COLUMN match_cap_override REAL`);
 
 // Per-season disccardpromos credentials (see services/giftcard.js) — for
 // now, each season can hold its own API base/key, entered on the season's

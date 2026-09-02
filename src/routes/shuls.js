@@ -16,6 +16,8 @@ import { validateBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/f
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteShul, captureShulSnapshot } from '../utils/entityDelete.js';
 import { generateApplicantExternalId } from '../utils/externalId.js';
+import { maskForShul } from './applicants.js';
+import { APPLICANT_IMPORT_COLUMNS } from '../services/importer.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -299,6 +301,61 @@ router.get('/export', requirePermission('shuls', 'can_export'), (req, res) => {
   sendXlsx(res, `shuls-${Date.now()}.xlsx`, redact(rows, req.permission.hidden_fields));
 });
 
+// A shul's portal login only ever points at ONE shul row at a time —
+// carrying a shul forward into a new season re-points users.shul_id at the
+// new season's row (see ensureShulPortalUser), so req.user.shul_id alone
+// can't reach any earlier season's data. Every shul row this same shul has
+// ever had (one per season it participated in) is found the same way
+// carryForwardShul() already matches "is this the same shul": by
+// gabai_email within the org, or by name_en for a shul with no gabai_email
+// on file at all.
+function myShulRowsAcrossSeasons(req) {
+  const me = db.prepare('SELECT * FROM shuls WHERE id = ?').get(req.user.shul_id);
+  if (!me) return [];
+  const rows = me.gabai_email
+    ? db.prepare('SELECT * FROM shuls WHERE org_id = ? AND gabai_email = ?').all(req.user.org_id, me.gabai_email)
+    : db.prepare('SELECT * FROM shuls WHERE org_id = ? AND name_en = ?').all(req.user.org_id, me.name_en);
+  return rows;
+}
+
+// Public (to the shul portal, not admin): every season this shul has a row
+// in, for the Season Report picker on their dashboard.
+router.get('/mine/seasons', (req, res) => {
+  if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const rows = myShulRowsAcrossSeasons(req);
+  const seasons = rows.map(r => {
+    const season = db.prepare('SELECT id, name, is_active FROM seasons WHERE id = ?').get(r.season_id);
+    return season && { season_id: season.id, season_name: season.name, is_active: !!season.is_active, shul_status: r.status };
+  }).filter(Boolean);
+  res.json({ seasons });
+});
+
+// A shul's self-service report — every applicant they've ever submitted,
+// across every season they've participated in (or just one, via
+// ?season_id=), masked exactly like every other shul-facing applicant view
+// (maskForShul: no rejection/duplicate status, card amount only if
+// Settings > Organization has it turned on).
+router.get('/mine/report', (req, res) => {
+  if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const rows = myShulRowsAcrossSeasons(req).filter(r => !req.query.season_id || req.query.season_id === 'all' || r.season_id === req.query.season_id);
+  const seasonNames = new Map();
+  const out = [];
+  for (const shulRow of rows) {
+    if (!seasonNames.has(shulRow.season_id)) {
+      seasonNames.set(shulRow.season_id, db.prepare('SELECT name FROM seasons WHERE id = ?').get(shulRow.season_id)?.name || '(unknown season)');
+    }
+    const applicants = db.prepare(`SELECT * FROM applicants WHERE shul_id = ? AND approval_status != 'incomplete' ORDER BY created_at DESC`).all(shulRow.id);
+    const masked = maskForShul(applicants, 'shul', req.user.org_id);
+    for (const a of masked) out.push({ season: seasonNames.get(shulRow.season_id), ...a });
+  }
+  const columns = ['season', 'id', ...APPLICANT_IMPORT_COLUMNS.filter(c => c !== 'shul_name')];
+  const formatted = out.map(r => Object.fromEntries(columns.map(c => {
+    if (c === 'home_for_yomtov') return [c, r[c] ? 'Yes' : 'No'];
+    return [c, r[c] ?? ''];
+  })));
+  sendXlsx(res, `season-report-${Date.now()}.xlsx`, formatted, columns);
+});
+
 router.get('/:id', (req, res) => {
   const shul = db.prepare('SELECT * FROM shuls WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!shul) return res.status(404).json({ error: 'Not found' });
@@ -312,7 +369,7 @@ router.get('/:id', (req, res) => {
   // Internal-only, not a configurable hidden field — a shul should never
   // even know this column exists, same boundary as shul_notes' contents
   // being an admin-facing thing (the shul just never has a UI for this one).
-  if (req.user.role === 'shul') { delete shulOut.permanent_comments; delete shulOut.min_contribution_default; }
+  if (req.user.role === 'shul') { delete shulOut.permanent_comments; delete shulOut.min_contribution_default; delete shulOut.match_rate_override; delete shulOut.match_cap_override; }
   // What the live shul application form would still consider missing on
   // this exact row — same schema-driven check the public apply form and
   // admin approval already use (see #147: a shul carried into a new season
@@ -423,7 +480,7 @@ async function carryForwardShul(orgId, userId, source, targetSeason, { slotsAllo
   let shulCreated = false;
   let flag = null;
   if (!target) {
-    if (slotsAllocated === undefined || slotsAllocated === null) return { error: 'slots_allocated is required to carry this shul into a new season', status: 400 };
+    if (seasonRequiresShulSlots(targetSeason.id) && (slotsAllocated === undefined || slotsAllocated === null)) return { error: 'slots_allocated is required to carry this shul into a new season', status: 400 };
     const id = uuid();
     // Carried forward into 'submitted' (the normal starting state), not
     // pre-approved — and no invite or contract email fires here at all.
@@ -439,7 +496,7 @@ async function carryForwardShul(orgId, userId, source, targetSeason, { slotsAllo
       .run(id, orgId, targetSeason.id, source.name_en, source.name_he || '', source.address || '', source.city || '', source.state || '', source.zip || '',
         source.ruv_first_name || '', source.ruv_last_name || '', source.ruv_phone || '', source.ruv_address || '', source.ruv_city || '', source.ruv_state || '', source.ruv_zip || '',
         source.gabai_first_name || '', source.gabai_last_name || '', source.gabai_cell || '', source.gabai_email || '', source.gabai_address || '', source.gabai_city || '', source.gabai_state || '', source.gabai_zip || '',
-        slotsAllocated, source.permanent_comments || null);
+        slotsAllocated ?? 0, source.permanent_comments || null);
     target = db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
     shulCreated = true;
 
@@ -582,7 +639,7 @@ router.put('/:id', (req, res) => {
   if (b.gabai_cell !== undefined) b.gabai_cell = normalizePhone(b.gabai_cell);
   if (!isValidPhone(b.ruv_phone)) return res.status(400).json({ error: 'Rav Phone Number must be a valid phone number (10 digits, or 11 digits starting with 1)' });
   if (!isValidPhone(b.gabai_cell)) return res.status(400).json({ error: 'Gabai Cell Number must be a valid phone number (10 digits, or 11 digits starting with 1)' });
-  const fields = isSelf ? SHUL_SELF_EDITABLE_FIELDS : [...SHUL_SELF_EDITABLE_FIELDS, 'slots_allocated', 'permanent_comments', 'min_contribution_default'];
+  const fields = isSelf ? SHUL_SELF_EDITABLE_FIELDS : [...SHUL_SELF_EDITABLE_FIELDS, 'slots_allocated', 'permanent_comments', 'min_contribution_default', 'stripe_payments_enabled', 'match_rate_override', 'match_cap_override'];
   const sets = fields.filter(f => b[f] !== undefined);
   if (sets.length) {
     db.prepare(`UPDATE shuls SET ${sets.map(f => `${f}=?`).join(',')}, updated_at=datetime('now') WHERE id=?`).run(...sets.map(f => b[f]), shul.id);
@@ -627,6 +684,19 @@ router.put('/:id', (req, res) => {
   res.json({ shul: shulOut, missingInfo });
 });
 
+// Whether shuls approved into this season must have a slot limit set —
+// Settings > Seasons > "Require shul slot limits" (defaults to required,
+// same as every season before this toggle existed). Off just means
+// slots_allocated isn't mandatory at approval; an admin can still set one
+// for a specific shul as a per-shul override either way, and the
+// max_accepted_applicants season-wide cap is completely independent of
+// this — both can be in effect at once.
+function seasonRequiresShulSlots(seasonId) {
+  if (!seasonId) return true;
+  const season = db.prepare('SELECT require_shul_slots FROM seasons WHERE id = ?').get(seasonId);
+  return !season || season.require_shul_slots !== 0;
+}
+
 // Approve: sets slot allocation, creates the shul portal login, emails set-up link.
 router.post('/:id/approve', requirePermission('shuls', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
@@ -634,14 +704,14 @@ router.post('/:id/approve', requirePermission('shuls', 'can_edit'), async (req, 
   if (!shul) return res.status(404).json({ error: 'Not found' });
   if (shul.is_paused) return res.status(423).json({ error: 'This shul has an unresolved duplicate flag and cannot be approved yet' });
   const slots = req.body?.slots_allocated;
-  if (slots === undefined || slots === null) return res.status(400).json({ error: 'slots_allocated is required to approve' });
+  if (seasonRequiresShulSlots(shul.season_id) && (slots === undefined || slots === null)) return res.status(400).json({ error: 'slots_allocated is required to approve' });
   if (!req.body?.bypass_contract && shulNeedsContractBeforeApproval(req.user.org_id, shul)) {
     return res.status(400).json({ error: "This shul's contract isn't required at signup and hasn't been sent yet. Send it from the Contract tab before approving, or bypass to skip the requirement.", code: 'CONTRACT_NOT_SENT' });
   }
 
   let user = ensureShulPortalUser(req.user.org_id, shul, req.body.portal_email);
   db.prepare(`UPDATE shuls SET status='approved', slots_allocated=?, portal_user_id=?, updated_at=datetime('now') WHERE id=?`)
-    .run(slots, user.id, shul.id);
+    .run(slots ?? 0, user.id, shul.id);
   const loginUrl = shulLoginUrl(user);
   const tmpl = renderSystemTemplate(req.user.org_id, 'accountApproved', { shulName: shul.name_en, loginUrl, slots });
   const { emailError } = await sendMailChecked(req.user.org_id, user.email, tmpl.subject, tmpl.body, { replyTo: tmpl.replyTo, sentBy: req.user.id });
@@ -704,15 +774,19 @@ router.post('/mass-approve', requirePermission('shuls', 'can_edit'), async (req,
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { ids, slots_allocated, bypass_contract } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
-  if (slots_allocated === undefined || slots_allocated === null) return res.status(400).json({ error: 'slots_allocated is required to approve' });
   let approved = 0, skipped = 0, emailErrors = 0; const affectedIds = [], names = [];
   for (const id of ids) {
     const shul = db.prepare('SELECT * FROM shuls WHERE id = ? AND org_id = ?').get(id, req.user.org_id);
     if (!shul || shul.is_paused) { skipped++; continue; }
     if (!bypass_contract && shulNeedsContractBeforeApproval(req.user.org_id, shul)) { skipped++; continue; }
+    // Unlike the single-shul route, this applies one uniform value across
+    // a whole batch — a shul whose season requires a slot limit is skipped
+    // rather than blocking the entire bulk action for shuls in seasons
+    // that don't.
+    if (seasonRequiresShulSlots(shul.season_id) && (slots_allocated === undefined || slots_allocated === null)) { skipped++; continue; }
     let user = ensureShulPortalUser(req.user.org_id, shul, null);
     db.prepare(`UPDATE shuls SET status='approved', slots_allocated=?, portal_user_id=?, updated_at=datetime('now') WHERE id=?`)
-      .run(slots_allocated, user.id, shul.id);
+      .run(slots_allocated ?? 0, user.id, shul.id);
     const loginUrl = shulLoginUrl(user);
     user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     const tmpl = renderSystemTemplate(req.user.org_id, 'accountApproved', { shulName: shul.name_en, loginUrl, slots: slots_allocated });

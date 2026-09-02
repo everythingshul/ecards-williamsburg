@@ -109,6 +109,13 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveRequiredFields()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Shul Payments</h3>
+      <p class="small-muted" id="stripe-status-note">Checking Stripe configuration…</p>
+      <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="stripe-enabled-default"><label style="margin:0">Online card payment (Stripe) is available to shuls by default</label></div>
+      <p class="small-muted">A specific shul can be turned on/off individually from their profile's Payments tab regardless of this default.</p>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveStripeEnabledDefault()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Full System Export</h3>
       <p class="small-muted">Download everything: every shul, applicant, card, transaction, store, billing record, task, and note, as one Excel workbook with a separate sheet per table.</p>
       <button class="btn btn-sm btn-primary" onclick="downloadFullExport()">Download Full System Export (.xlsx)</button>
@@ -301,6 +308,16 @@ async function loadShulCardAmountVisible() {
 window.saveShulCardAmountVisible = async () => {
   try { await api('/settings', { method: 'PUT', body: { shul_card_amount_visible: qs('#shul-card-amount-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
+async function loadStripeEnabledDefault() {
+  const [{ settings }, status] = await Promise.all([api('/settings'), api('/shul-payments/config')]);
+  qs('#stripe-enabled-default').checked = settings.stripe_payments_enabled_default !== '0';
+  qs('#stripe-status-note').innerHTML = status.mockMode
+    ? '<strong>MOCK MODE</strong> — STRIPE_SECRET_KEY isn\'t set, so no real charges happen; shuls can still test the whole payment flow.'
+    : `<span style="color:var(--success,#1b5e20)">Live</span> — connected to Stripe.${status.hasWebhookSecret ? '' : ' <strong>STRIPE_WEBHOOK_SECRET is not set</strong> — payments will not be recorded until it is.'}`;
+}
+window.saveStripeEnabledDefault = async () => {
+  try { await api('/settings', { method: 'PUT', body: { stripe_payments_enabled_default: qs('#stripe-enabled-default').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
 window.downloadFullExport = () => downloadAuthed('/system-export', 'ecards-full-export.xlsx');
 
 window.saveOrg = async () => {
@@ -378,7 +395,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadRequiredFields();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadRequiredFields(); loadStripeEnabledDefault();
 </script>
 </body>
 </html>

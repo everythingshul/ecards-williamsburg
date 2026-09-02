@@ -102,15 +102,60 @@ export function getRecentActions(orgId, hours = 48) {
     db.prepare(`SELECT id FROM audit_log WHERE id IN (${placeholders}) AND undone_at IS NOT NULL`).all(...undoEntryIds)
       .forEach(r => consumedIds.add(r.id));
   }
-  return rows.map(r => ({
+  // shul_allocation isn't in ENTITY_TABLES — its reversal is money-aware
+  // (checks live card balance via disccardpromos, see services/matching.js
+  // reverseAllocation), not a column-restore, so it deliberately never goes
+  // through the generic undo() flow above and 'undoable' is always false for
+  // it. The admin UI still needs to know whether a "create" row's allocation
+  // has already been reversed since — live-checked here (never cached, same
+  // rule as every other money figure in this app) rather than trusted from
+  // the audit row's own after_json, which is a point-in-time snapshot.
+  const allocationIds = [...new Set(rows.filter(r => r.entity_type === 'shul_allocation' && r.action === 'create').map(r => r.entity_id).filter(Boolean))];
+  const reversedAllocationIds = new Set();
+  if (allocationIds.length) {
+    const placeholders = allocationIds.map(() => '?').join(',');
+    db.prepare(`SELECT id FROM shul_allocations WHERE id IN (${placeholders}) AND reversed_at IS NOT NULL`).all(...allocationIds)
+      .forEach(r => reversedAllocationIds.add(r.id));
+  }
+  const parsed = rows.map(r => ({
     ...r,
     before: r.before_json ? JSON.parse(r.before_json) : null,
     after: r.after_json ? JSON.parse(r.after_json) : null,
+  }));
+  // shul_allocations before/after snapshots only carry shul_id/applicant_id,
+  // not names — resolved here (live, not denormalized onto the row at
+  // write time) purely so the Recent Actions headline reads "Congregation
+  // X gave $250 to Jane Doe" instead of raw ids.
+  const shulIds = new Set(), applicantIds = new Set();
+  parsed.forEach(r => {
+    if (r.entity_type !== 'shul_allocation') return;
+    const snap = r.after || r.before;
+    if (snap?.shul_id) shulIds.add(snap.shul_id);
+    if (snap?.applicant_id) applicantIds.add(snap.applicant_id);
+  });
+  const shulNames = {}, applicantNames = {};
+  if (shulIds.size) {
+    const placeholders = [...shulIds].map(() => '?').join(',');
+    db.prepare(`SELECT id, name_en FROM shuls WHERE id IN (${placeholders})`).all(...shulIds)
+      .forEach(r => { shulNames[r.id] = r.name_en; });
+  }
+  if (applicantIds.size) {
+    const placeholders = [...applicantIds].map(() => '?').join(',');
+    db.prepare(`SELECT id, first_name, last_name FROM applicants WHERE id IN (${placeholders})`).all(...applicantIds)
+      .forEach(r => { applicantNames[r.id] = `${r.first_name || ''} ${r.last_name || ''}`.trim(); });
+  }
+  return parsed.map(r => ({
+    ...r,
     undoable: (UNDOABLE_ACTIONS.includes(r.action) || r.action === 'mass-import' || r.action === 'mass-delete') && !!ENTITY_TABLES[r.entity_type] && !r.undone_at && !!(r.before_json || r.after_json),
     // Lets the UI put a "Redo" button directly on an already-undone row
     // instead of making the admin go find the separate "Reversed a change
     // to..." entry the undo created.
     redoable: !!r.undone_at && !!r.undo_entry_id && !consumedIds.has(r.undo_entry_id),
+    allocationReversible: r.entity_type === 'shul_allocation' && r.action === 'create' && !reversedAllocationIds.has(r.entity_id),
+    ...(r.entity_type === 'shul_allocation' ? {
+      allocationShulName: shulNames[(r.after || r.before)?.shul_id] || '',
+      allocationApplicantName: applicantNames[(r.after || r.before)?.applicant_id] || '',
+    } : {}),
   }));
 }
 

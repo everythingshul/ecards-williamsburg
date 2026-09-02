@@ -80,17 +80,41 @@ router.put('/:id', requirePermission('seasons', 'can_edit'), (req, res) => {
   if (f.is_active) db.prepare('UPDATE seasons SET is_active = 0 WHERE org_id = ?').run(req.user.org_id);
   // Explicit null clears the cap (unlimited); undefined leaves it as-is.
   const maxCap = f.max_accepted_applicants === undefined ? undefined : (f.max_accepted_applicants === null || f.max_accepted_applicants === '' ? null : +f.max_accepted_applicants);
+  // Same explicit-null-clears convention for the season's own minimum-
+  // contribution default (bottom tier of the shul/applicant override chain).
+  const minContribution = f.min_contribution_default === undefined ? undefined : (f.min_contribution_default === null || f.min_contribution_default === '' ? null : +f.min_contribution_default);
   // Same "explicit empty string clears it back to inheriting the org-wide
   // default" convention as system_email_templates' reply_to — undefined
   // (field not sent) leaves whatever was already saved untouched.
   const apiBase = f.disccardpromos_api_base === undefined ? undefined : (f.disccardpromos_api_base || null);
   const apiKey = f.disccardpromos_api_key === undefined ? undefined : (f.disccardpromos_api_key || null);
+  // Same explicit-null-clears convention for every matching-funds field —
+  // blank means "not set at this tier", not zero.
+  const clearable = (v) => v === undefined ? undefined : (v === null || v === '' ? null : +v);
+  const matchRate = clearable(f.match_rate);
+  const matchCapApplicant = clearable(f.match_cap_per_applicant);
+  const matchCapShul = clearable(f.match_cap_per_shul);
+  const matchCapTotal = clearable(f.match_cap_total);
   db.prepare(`UPDATE seasons SET name=COALESCE(?,name), start_date=COALESCE(?,start_date), end_date=COALESCE(?,end_date),
     default_card_amount=COALESCE(?,default_card_amount), max_accepted_applicants=CASE WHEN ? THEN ? ELSE max_accepted_applicants END, is_active=COALESCE(?,is_active),
     require_shul_contribution=COALESCE(?,require_shul_contribution),
+    min_contribution_default=CASE WHEN ? THEN ? ELSE min_contribution_default END,
+    require_shul_slots=COALESCE(?,require_shul_slots),
+    match_rate=CASE WHEN ? THEN ? ELSE match_rate END,
+    match_cap_per_applicant=CASE WHEN ? THEN ? ELSE match_cap_per_applicant END,
+    match_cap_per_shul=CASE WHEN ? THEN ? ELSE match_cap_per_shul END,
+    match_cap_total=CASE WHEN ? THEN ? ELSE match_cap_total END,
+    shul_pays_processing_fee=COALESCE(?,shul_pays_processing_fee),
     disccardpromos_api_base=CASE WHEN ? THEN ? ELSE disccardpromos_api_base END, disccardpromos_api_key=CASE WHEN ? THEN ? ELSE disccardpromos_api_key END WHERE id=?`)
     .run(f.name, f.start_date, f.end_date, f.default_card_amount, maxCap !== undefined ? 1 : 0, maxCap, f.is_active === undefined ? undefined : (f.is_active ? 1 : 0),
       f.require_shul_contribution === undefined ? undefined : (f.require_shul_contribution ? 1 : 0),
+      minContribution !== undefined ? 1 : 0, minContribution,
+      f.require_shul_slots === undefined ? undefined : (f.require_shul_slots ? 1 : 0),
+      matchRate !== undefined ? 1 : 0, matchRate,
+      matchCapApplicant !== undefined ? 1 : 0, matchCapApplicant,
+      matchCapShul !== undefined ? 1 : 0, matchCapShul,
+      matchCapTotal !== undefined ? 1 : 0, matchCapTotal,
+      f.shul_pays_processing_fee === undefined ? undefined : (f.shul_pays_processing_fee ? 1 : 0),
       apiBase !== undefined ? 1 : 0, apiBase, apiKey !== undefined ? 1 : 0, apiKey, season.id);
   res.json({ season: withCapacity(db.prepare('SELECT * FROM seasons WHERE id = ?').get(season.id)) });
 });
