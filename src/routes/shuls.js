@@ -244,12 +244,17 @@ router.get('/', (req, res) => {
   if (paused === '1' || paused === '0') { where += ' AND is_paused = ?'; params.push(+paused); }
   if (season_id) { where += ' AND season_id = ?'; params.push(season_id); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes wouldn't otherwise match once the typed
+    // run of digits crosses where a dash sits.
     where += ` AND (name_en LIKE ? OR name_he LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ?
       OR ruv_first_name LIKE ? OR ruv_last_name LIKE ? OR ruv_phone LIKE ? OR ruv_address LIKE ? OR ruv_city LIKE ?
       OR gabai_first_name LIKE ? OR gabai_last_name LIKE ? OR gabai_cell LIKE ? OR gabai_email LIKE ? OR gabai_address LIKE ? OR gabai_city LIKE ?
-      OR permanent_comments LIKE ?)`;
+      OR permanent_comments LIKE ? OR REPLACE(ruv_phone,'-','') LIKE ? OR REPLACE(gabai_cell,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits);
   }
   const allowedSort = ['created_at', 'name_en', 'status', 'city', 'slots_allocated'];
   const sortCol = allowedSort.includes(sort) ? sort : 'created_at';
@@ -278,12 +283,17 @@ router.get('/export', requirePermission('shuls', 'can_export'), (req, res) => {
   if (paused === '1' || paused === '0') { where += ' AND is_paused = ?'; params.push(+paused); }
   if (season_id) { where += ' AND season_id = ?'; params.push(season_id); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes wouldn't otherwise match once the typed
+    // run of digits crosses where a dash sits.
     where += ` AND (name_en LIKE ? OR name_he LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ?
       OR ruv_first_name LIKE ? OR ruv_last_name LIKE ? OR ruv_phone LIKE ? OR ruv_address LIKE ? OR ruv_city LIKE ?
       OR gabai_first_name LIKE ? OR gabai_last_name LIKE ? OR gabai_cell LIKE ? OR gabai_email LIKE ? OR gabai_address LIKE ? OR gabai_city LIKE ?
-      OR permanent_comments LIKE ?)`;
+      OR permanent_comments LIKE ? OR REPLACE(ruv_phone,'-','') LIKE ? OR REPLACE(gabai_cell,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits);
   }
   const rows = db.prepare(`SELECT * FROM shuls ${where} ORDER BY created_at DESC`).all(...params);
   sendXlsx(res, `shuls-${Date.now()}.xlsx`, redact(rows, req.permission.hidden_fields));

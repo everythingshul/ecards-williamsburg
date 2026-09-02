@@ -457,6 +457,10 @@ function createRichTextEditor(containerId, initialHtml = '') {
       <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
       <button type="button" data-cmd="createLink" title="Link">Link</button>
       <button type="button" data-action="image" title="Insert image">Image</button>
+      <button type="button" data-cmd="justifyLeft" title="Align left">&#8676;</button>
+      <button type="button" data-cmd="justifyCenter" title="Align center">&#8596;</button>
+      <button type="button" data-cmd="justifyRight" title="Align right">&#8677;</button>
+      <button type="button" data-action="rtl" title="Right-to-left paragraph direction">RTL</button>
       <button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button>
       <input type="file" accept="image/*" class="rte-file-input" style="display:none">
     </div>
@@ -474,6 +478,20 @@ function createRichTextEditor(containerId, initialHtml = '') {
         document.execCommand(cmd, false, btn.dataset.arg || null);
       }
     });
+  });
+  // No execCommand exists for paragraph direction (unlike alignment above),
+  // so this walks up from the selection to its nearest block-level element
+  // and flips its dir attribute — ltr/unset -> rtl -> ltr on repeated
+  // clicks. Falls back to the whole surface if the selection isn't inside
+  // a recognized block (e.g. everything is still one bare text run).
+  container.querySelector('button[data-action="rtl"]').addEventListener('click', () => {
+    surface.focus();
+    const sel = window.getSelection();
+    let node = sel.rangeCount ? sel.getRangeAt(0).commonAncestorContainer : surface;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    while (node && node !== surface && !/^(P|DIV|H1|H2|H3|H4|H5|H6|LI|BLOCKQUOTE)$/.test(node.tagName || '')) node = node.parentElement;
+    if (!node) node = surface;
+    node.dir = node.dir === 'rtl' ? 'ltr' : 'rtl';
   });
   const fileInput = container.querySelector('.rte-file-input');
   container.querySelector('button[data-action="image"]').addEventListener('click', () => fileInput.click());

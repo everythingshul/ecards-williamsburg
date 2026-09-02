@@ -116,11 +116,17 @@ router.get('/', (req, res) => {
   if (setup_status) { where += ' AND setup_status = ?'; params.push(setup_status); }
   if (season_id) { where += ' AND season_id = ?'; params.push(season_id); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes wouldn't otherwise match once the typed
+    // run of digits crosses where a dash sits.
     where += ` AND (name LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ? OR phone LIKE ?
       OR manager_name LIKE ? OR manager_phone LIKE ? OR manager_email LIKE ? OR owner_name LIKE ? OR owner_phone LIKE ? OR owner_email LIKE ?
-      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?)`;
+      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?
+      OR REPLACE(phone,'-','') LIKE ? OR REPLACE(manager_phone,'-','') LIKE ? OR REPLACE(owner_phone,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   // Live spend per store — computed fresh on every request from the synced
@@ -142,11 +148,17 @@ router.get('/export', requirePermission('stores', 'can_export'), (req, res) => {
   if (setup_status) { where += ' AND setup_status = ?'; params.push(setup_status); }
   if (season_id) { where += ' AND season_id = ?'; params.push(season_id); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes wouldn't otherwise match once the typed
+    // run of digits crosses where a dash sits.
     where += ` AND (name LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ? OR phone LIKE ?
       OR manager_name LIKE ? OR manager_phone LIKE ? OR manager_email LIKE ? OR owner_name LIKE ? OR owner_phone LIKE ? OR owner_email LIKE ?
-      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?)`;
+      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?
+      OR REPLACE(phone,'-','') LIKE ? OR REPLACE(manager_phone,'-','') LIKE ? OR REPLACE(owner_phone,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   const withSpend = stores.map(s => {

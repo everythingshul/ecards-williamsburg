@@ -232,10 +232,16 @@ router.get('/', (req, res) => {
   if (marital_status) { where += ' AND a.marital_status = ?'; params.push(marital_status); }
   if (home_for_yomtov !== undefined && home_for_yomtov !== '') { where += ' AND a.home_for_yomtov = ?'; params.push(home_for_yomtov === 'true' || home_for_yomtov === '1' ? 1 : 0); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes (e.g. pasted digits) wouldn't otherwise
+    // match at all once the typed run of digits crosses where a dash sits.
     where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR a.email LIKE ? OR a.home_phone LIKE ? OR a.husband_cell LIKE ? OR a.wife_cell LIKE ? OR a.external_id LIKE ?
-      OR a.address LIKE ? OR a.city LIKE ? OR a.state LIKE ? OR a.zip LIKE ? OR a.comments LIKE ? OR a.permanent_comments LIKE ?)`;
+      OR a.address LIKE ? OR a.city LIKE ? OR a.state LIKE ? OR a.zip LIKE ? OR a.comments LIKE ? OR a.permanent_comments LIKE ?
+      OR REPLACE(a.home_phone,'-','') LIKE ? OR REPLACE(a.husband_cell,'-','') LIKE ? OR REPLACE(a.wife_cell,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const allowedSort = ['created_at','last_name','approval_status','num_children','card_amount','external_id'];
   const sortCol = allowedSort.includes(sort) ? `a.${sort}` : 'a.created_at';
@@ -258,10 +264,16 @@ router.get('/export', requirePermission('applicants', 'can_export'), (req, res) 
   if (marital_status) { where += ' AND a.marital_status = ?'; params.push(marital_status); }
   if (home_for_yomtov !== undefined && home_for_yomtov !== '') { where += ' AND a.home_for_yomtov = ?'; params.push(home_for_yomtov === 'true' || home_for_yomtov === '1' ? 1 : 0); }
   if (search) {
+    // Phone columns get a second, dash-stripped comparison too — stored
+    // numbers are always formatted "123-456-7890" (normalizePhone), so a
+    // search typed without dashes (e.g. pasted digits) wouldn't otherwise
+    // match at all once the typed run of digits crosses where a dash sits.
     where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR a.email LIKE ? OR a.home_phone LIKE ? OR a.husband_cell LIKE ? OR a.wife_cell LIKE ? OR a.external_id LIKE ?
-      OR a.address LIKE ? OR a.city LIKE ? OR a.state LIKE ? OR a.zip LIKE ? OR a.comments LIKE ? OR a.permanent_comments LIKE ?)`;
+      OR a.address LIKE ? OR a.city LIKE ? OR a.state LIKE ? OR a.zip LIKE ? OR a.comments LIKE ? OR a.permanent_comments LIKE ?
+      OR REPLACE(a.home_phone,'-','') LIKE ? OR REPLACE(a.husband_cell,'-','') LIKE ? OR REPLACE(a.wife_cell,'-','') LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like);
+    const likeDigits = `%${search.replace(/-/g, '')}%`;
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const rows = db.prepare(`SELECT a.*, s.name_en as shul_name FROM applicants a LEFT JOIN shuls s ON s.id = a.shul_id ${where} ORDER BY a.created_at DESC`).all(...params);
   sendXlsx(res, `applicants-${Date.now()}.xlsx`, redact(rows, req.permission.hidden_fields));

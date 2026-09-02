@@ -23,6 +23,7 @@
   <div class="card">
     <form id="login-form">
       <label>Email</label><input type="email" name="email" required autofocus>
+      <div id="login-error" style="display:none;color:var(--danger);font-size:13px;margin:-4px 0 4px"></div>
       <label>Password</label><input type="password" name="password" required>
       <div style="margin-top:20px"><button class="btn btn-primary" style="width:100%">Sign In</button></div>
     </form>
@@ -44,7 +45,11 @@ qs('#login-form').addEventListener('submit', async (e) => {
     if (user.role === 'shul') location.href = '/shul-portal/dashboard';
     else if (user.role === 'store') location.href = await storeLandingUrl(user);
     else location.href = '/admin/dashboard';
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    const el = qs('#login-error');
+    el.textContent = err.message;
+    el.style.display = 'block';
+  }
 });
 </script>
 </body>
