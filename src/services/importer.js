@@ -26,7 +26,7 @@ export const SHUL_IMPORT_COLUMNS = [
 ];
 
 export const STORE_IMPORT_COLUMNS = [
-  'name', 'address', 'city', 'state', 'zip', 'phone', 'pos_system',
+  'name', 'address', 'city', 'state', 'zip', 'phone', 'pos_system', 'discount_details',
   'manager_name', 'manager_phone', 'manager_email', 'owner_name', 'owner_phone', 'owner_email', 'comments',
 ];
 

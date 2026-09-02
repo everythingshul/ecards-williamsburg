@@ -138,6 +138,7 @@ async function openStore(id) {
         <label>Zip</label><input id="e-zip" value="${esc(s.zip||'')}" style="max-width:160px">
         <label>Phone</label><input id="e-phone" value="${esc(s.phone||'')}">
         <label>Which POS system do you have? <span class="req">*</span></label><input id="e-pos_system" value="${esc(s.pos_system||'')}">
+        <label>Discount Details <span class="req">*</span></label><textarea id="e-discount_details" rows="2">${esc(s.discount_details||'')}</textarea>
         <label>Discount <span class="small-muted">(admin only — never shown to the store)</span></label><input id="e-discount" value="${esc(s.discount||'')}">
         <div class="divider"></div>
         <div class="checkbox-row"><input type="checkbox" id="e-same_person" ${s.same_person?'checked':''} onchange="qs('#e-manager-fields').style.display=this.checked?'none':''"><label style="margin:0">Manager and owner are the same person</label></div>
@@ -191,7 +192,7 @@ async function openStore(id) {
 }
 
 window.saveStore = async (id) => {
-  const fields = ['name','address','city','state','zip','phone','pos_system','discount','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','comments'];
+  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','discount','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','comments'];
   const body = Object.fromEntries(fields.map(f => [f, qs('#e-'+f).value]));
   body.setup_status = qs('#e-status').value; body.has_provider_account = qs('#e-has_account').checked;
   body.same_person = qs('#e-same_person').checked;
@@ -257,6 +258,7 @@ function openStoreForm() {
     <label>Zip</label><input id="n-zip" style="max-width:160px">
     <label>Phone <span class="req">*</span></label><input id="n-phone">
     <label>Which POS system do you have? <span class="req">*</span></label><input id="n-pos_system">
+    <label>Discount Details <span class="req">*</span></label><textarea id="n-discount_details" rows="2"></textarea>
     <div class="grid-2"><div><label>Manager Name</label><input id="n-manager_name"></div><div><label>Manager Phone</label><input id="n-manager_phone"></div></div>
     <label>Manager Email</label><input id="n-manager_email">
     <div class="grid-2"><div><label>Owner Name</label><input id="n-owner_name"></div><div><label>Owner Phone</label><input id="n-owner_phone"></div></div>
@@ -265,7 +267,7 @@ function openStoreForm() {
   loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
 }
 window.createStore = async () => {
-  const fields = ['name','address','city','state','zip','phone','pos_system','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email'];
+  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email'];
   const body = Object.fromEntries(fields.map(f => [f, qs('#n-'+f).value]));
   try { await api('/stores', { method: 'POST', body }); toast('Store created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };

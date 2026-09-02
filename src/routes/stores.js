@@ -35,11 +35,11 @@ router.post('/apply', async (req, res) => {
   if (!b.name || !b.owner_email) return res.status(400).json({ error: 'Store name and owner email are required' });
   const id = uuid();
   const samePerson = !!b.same_person;
-  db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, manager_name, manager_phone, manager_email,
+  db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, discount_details, manager_name, manager_phone, manager_email,
       owner_name, owner_phone, owner_email, same_person, comments, setup_status, has_provider_account, source)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,'pending',?, 'application')`)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,'pending',?, 'application')`)
     .run(id, orgId, getActiveSeasonId(orgId), b.name, b.address || '', b.city || '', b.state || '', b.zip || '',
-      normalizePhone(b.phone || ''), b.pos_system || '',
+      normalizePhone(b.phone || ''), b.pos_system || '', b.discount_details || '',
       samePerson ? b.owner_name || '' : b.manager_name || '', samePerson ? normalizePhone(b.owner_phone || '') : normalizePhone(b.manager_phone || ''), samePerson ? b.owner_email || '' : b.manager_email || '',
       b.owner_name || '', normalizePhone(b.owner_phone || ''), b.owner_email, samePerson ? 1 : 0,
       b.comments || '', b.has_provider_account ? 1 : 0);
@@ -122,11 +122,11 @@ router.get('/', (req, res) => {
     // run of digits crosses where a dash sits.
     where += ` AND (name LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ? OR phone LIKE ?
       OR manager_name LIKE ? OR manager_phone LIKE ? OR manager_email LIKE ? OR owner_name LIKE ? OR owner_phone LIKE ? OR owner_email LIKE ?
-      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?
+      OR pos_system LIKE ? OR discount_details LIKE ? OR comments LIKE ? OR discount LIKE ?
       OR REPLACE(phone,'-','') LIKE ? OR REPLACE(manager_phone,'-','') LIKE ? OR REPLACE(owner_phone,'-','') LIKE ?)`;
     const like = `%${search}%`;
     const likeDigits = `%${search.replace(/-/g, '')}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   // Live spend per store — computed fresh on every request from the synced
@@ -154,11 +154,11 @@ router.get('/export', requirePermission('stores', 'can_export'), (req, res) => {
     // run of digits crosses where a dash sits.
     where += ` AND (name LIKE ? OR address LIKE ? OR city LIKE ? OR state LIKE ? OR zip LIKE ? OR phone LIKE ?
       OR manager_name LIKE ? OR manager_phone LIKE ? OR manager_email LIKE ? OR owner_name LIKE ? OR owner_phone LIKE ? OR owner_email LIKE ?
-      OR pos_system LIKE ? OR comments LIKE ? OR discount LIKE ?
+      OR pos_system LIKE ? OR discount_details LIKE ? OR comments LIKE ? OR discount LIKE ?
       OR REPLACE(phone,'-','') LIKE ? OR REPLACE(manager_phone,'-','') LIKE ? OR REPLACE(owner_phone,'-','') LIKE ?)`;
     const like = `%${search}%`;
     const likeDigits = `%${search.replace(/-/g, '')}%`;
-    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   const withSpend = stores.map(s => {
@@ -213,10 +213,10 @@ router.post('/', requirePermission('stores', 'can_edit'), (req, res) => {
     if (!isValidPhone(b[f])) return res.status(400).json({ error: `${label} must be a valid phone number (10 digits, or 11 digits starting with 1)` });
   }
   const id = uuid();
-  db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, manager_name, manager_phone, manager_email,
+  db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, discount_details, manager_name, manager_phone, manager_email,
       owner_name, owner_phone, owner_email, same_person, comments, setup_status, has_provider_account, discount)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`)
-    .run(id, req.user.org_id, getActiveSeasonId(req.user.org_id), b.name, b.address || '', b.city || '', b.state || '', b.zip || '', normalizePhone(b.phone || ''), b.pos_system || '',
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`)
+    .run(id, req.user.org_id, getActiveSeasonId(req.user.org_id), b.name, b.address || '', b.city || '', b.state || '', b.zip || '', normalizePhone(b.phone || ''), b.pos_system || '', b.discount_details || '',
       b.manager_name || '', normalizePhone(b.manager_phone || ''), b.manager_email || '', b.owner_name || '', normalizePhone(b.owner_phone || ''), b.owner_email || '',
       b.same_person ? 1 : 0, b.comments || '', b.setup_status || 'pending', b.has_provider_account ? 1 : 0, b.discount || '');
   const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(id);
@@ -227,7 +227,7 @@ router.post('/', requirePermission('stores', 'can_edit'), (req, res) => {
 router.put('/:id', requirePermission('stores', 'can_edit'), (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
-  const fields = ['name','address','city','state','zip','phone','pos_system','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments','setup_status','has_provider_account','provider_store_id','discount'];
+  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments','setup_status','has_provider_account','provider_store_id','discount'];
   const b = req.body || {};
   if (b.phone !== undefined) b.phone = normalizePhone(b.phone);
   if (b.manager_phone !== undefined) b.manager_phone = normalizePhone(b.manager_phone);
@@ -466,10 +466,10 @@ async function carryForwardStore(orgId, userId, source, targetSeason, { ip } = {
   let emailError = null, agreementEmailError = null;
   if (!target) {
     const id = uuid();
-    db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, manager_name, manager_phone, manager_email,
+    db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, discount_details, manager_name, manager_phone, manager_email,
         owner_name, owner_phone, owner_email, same_person, comments, setup_status, has_provider_account, source)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, 'carried_forward')`)
-      .run(id, orgId, targetSeason.id, source.name, source.address || '', source.city || '', source.state || '', source.zip || '', source.phone || '', source.pos_system || '',
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, 'carried_forward')`)
+      .run(id, orgId, targetSeason.id, source.name, source.address || '', source.city || '', source.state || '', source.zip || '', source.phone || '', source.pos_system || '', source.discount_details || '',
         source.manager_name || '', source.manager_phone || '', source.manager_email || '', source.owner_name || '', source.owner_phone || '', source.owner_email || '',
         source.same_person, source.comments || '', source.setup_status || 'pending', source.has_provider_account ? 1 : 0);
     target = db.prepare('SELECT * FROM stores WHERE id = ?').get(id);
@@ -618,7 +618,7 @@ router.get('/import/template', requireAdmin, (req, res) => {
 // and applicants imports.
 const STORE_UPDATABLE_FIELDS = {
   name: r => r.name, address: r => r.address, city: r => r.city, state: r => r.state, zip: r => r.zip,
-  phone: r => r.phone && normalizePhone(r.phone), pos_system: r => r.pos_system,
+  phone: r => r.phone && normalizePhone(r.phone), pos_system: r => r.pos_system, discount_details: r => r.discount_details,
   manager_name: r => r.manager_name, manager_phone: r => r.manager_phone && normalizePhone(r.manager_phone), manager_email: r => r.manager_email,
   owner_name: r => r.owner_name, owner_phone: r => r.owner_phone && normalizePhone(r.owner_phone), owner_email: r => r.owner_email,
   comments: r => r.comments,
@@ -709,11 +709,11 @@ router.post('/import', requirePermission('stores', 'can_edit'), upload.single('f
     try {
       const id = uuid();
       const samePerson = !!r.same_person;
-      db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, manager_name, manager_phone, manager_email,
+      db.prepare(`INSERT INTO stores (id, org_id, season_id, name, address, city, state, zip, phone, pos_system, discount_details, manager_name, manager_phone, manager_email,
           owner_name, owner_phone, owner_email, same_person, comments, setup_status, has_provider_account, source)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,'pending',?, 'mass_upload')`)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,'pending',?, 'mass_upload')`)
         .run(id, req.user.org_id, season?.id || null, r.name, r.address || '', r.city || '', r.state || '', r.zip || '',
-          normalizePhone(r.phone || ''), r.pos_system || '',
+          normalizePhone(r.phone || ''), r.pos_system || '', r.discount_details || '',
           samePerson ? r.owner_name || '' : r.manager_name || '', samePerson ? normalizePhone(r.owner_phone || '') : normalizePhone(r.manager_phone || ''), samePerson ? r.owner_email || '' : r.manager_email || '',
           r.owner_name || '', normalizePhone(r.owner_phone || ''), r.owner_email, samePerson ? 1 : 0,
           r.comments || '', r.has_provider_account ? 1 : 0);

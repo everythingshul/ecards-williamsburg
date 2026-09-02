@@ -676,6 +676,11 @@ safeAlter(`ALTER TABLE stores ADD COLUMN season_id TEXT REFERENCES seasons(id)`)
 // dollar policy) — never returned to the store's own portal login (see
 // routes/stores.js GET / and GET /:id, which strip it for role==='store').
 safeAlter(`ALTER TABLE stores ADD COLUMN discount TEXT`);
+// Store-reported detail on the Store Application itself — required, part of
+// STORE_APPLICATION_SCHEMA (utils/builtinSchemas.js) — distinct from the
+// admin-only `discount` note above: this is what the applying store says
+// they're offering, visible to the store like any other application field.
+safeAlter(`ALTER TABLE stores ADD COLUMN discount_details TEXT`);
 safeAlter(`ALTER TABLE seasons ADD COLUMN max_accepted_applicants INTEGER`);
 safeAlter(`ALTER TABLE shuls ADD COLUMN is_locked INTEGER DEFAULT 0`);
 safeAlter(`ALTER TABLE applicants ADD COLUMN external_id TEXT`);
