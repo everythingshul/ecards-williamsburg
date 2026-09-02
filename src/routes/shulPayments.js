@@ -5,7 +5,7 @@ import { requirePermission } from '../middleware/permissions.js';
 import { pendingBalance, approvedBalance, shulBalances } from '../services/shulBalance.js';
 import { createAllocation, reverseAllocation, shulDisplayMatch } from '../services/matching.js';
 import * as stripePay from '../services/stripe.js';
-import { sendMailChecked } from '../services/mail.js';
+import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
 
 const router = Router();
@@ -100,12 +100,16 @@ router.post('/mine/request-method', async (req, res) => {
   db.prepare('INSERT INTO shul_payment_method_requests (id, org_id, shul_id, requested_method, message) VALUES (?,?,?,?,?)')
     .run(id, req.user.org_id, req.user.shul_id, requested_method, message || '');
   const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(req.user.shul_id);
-  const admins = db.prepare(`SELECT email FROM users WHERE org_id = ? AND role IN ('super_admin','org_admin','staff') AND is_active = 1`).all(req.user.org_id);
-  const body = `<p><strong>${esc(shul?.name_en || 'A shul')}</strong> requested a different payment method: <strong>${esc(requested_method)}</strong>.</p>${message ? `<p>Message: ${esc(message)}</p>` : ''}<p>Please follow up with them directly.</p>`;
-  for (const a of admins) {
-    const { emailError } = await sendMailChecked(req.user.org_id, a.email, `Payment method request from ${shul?.name_en || 'a shul'}`, body, { sentBy: req.user.id });
-    if (emailError) console.error('[mail] payment method request notify failed:', emailError);
-  }
+  // Same pattern as every other internal admin notice (new shul/store
+  // signup, doc signed) — a dedicated, admin-configured "office" address
+  // (Settings > Notify on Payment Method Requests), not every admin/staff
+  // user's own login email. No-op (silently) if that setting is blank,
+  // same as the others.
+  await notifyNewSignup(req.user.org_id, 'notify_payment_method_request_email', 'paymentMethodRequest', {
+    shulName: shul?.name_en || 'A shul',
+    requestedMethod: requested_method,
+    message: message ? `<p>Message: ${esc(message)}</p>` : '',
+  });
   res.status(201).json({ ok: true });
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }

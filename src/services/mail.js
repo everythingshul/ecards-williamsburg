@@ -218,6 +218,11 @@ export const SYSTEM_EMAIL_TEMPLATES = {
       <p><strong>Signed by:</strong> {{signerName}}<br><strong>Signed at:</strong> {{signedAt}}</p>
       <p><a href="{{entityUrl}}">View in the admin portal</a></p>`,
   },
+  paymentMethodRequest: {
+    label: 'Internal Notice: Payment Method Request', vars: ['shulName', 'requestedMethod', 'message'],
+    subject: 'Payment method request from {{shulName}}',
+    body: `<p><strong>{{shulName}}</strong> requested a different payment method: <strong>{{requestedMethod}}</strong>.</p>{{message}}<p>Please follow up with them directly.</p>`,
+  },
 };
 
 // Renders every field the shul/store just submitted as a plain label/value

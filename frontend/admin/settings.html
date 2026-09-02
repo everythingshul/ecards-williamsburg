@@ -60,6 +60,12 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveDocSignedNotifyEmail()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Notify on Payment Method Requests</h3>
+      <p class="small-muted">Optional — when set, an internal email is sent every time a shul requests a payment method other than online card (Wire/Quick Pay/Check/Cash/Other). Multiple addresses can be listed, comma-separated. Leave blank to turn off.</p>
+      <label>Notify Emails</label><input id="org-notify_payment_method_request_email" placeholder="e.g. office@yourorg.org">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="savePaymentMethodRequestNotifyEmail()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Our SMS Number</h3>
       <p class="small-muted">Your SimpleSender sending number. Incoming-message sync (SMS Center &gt; Inbox) uses this to tell replies to you apart from messages you sent — anything addressed to this number is inbound. Update this if the number is ever reassigned.</p>
       <label>SMS Number</label><input id="org-sms_own_number" placeholder="+18555996232">
@@ -204,6 +210,13 @@ async function loadDocSignedNotifyEmail() {
   const { settings } = await api('/settings');
   qs('#org-notify_doc_signed_email').value = settings.notify_doc_signed_email || '';
 }
+async function loadPaymentMethodRequestNotifyEmail() {
+  const { settings } = await api('/settings');
+  qs('#org-notify_payment_method_request_email').value = settings.notify_payment_method_request_email || '';
+}
+window.savePaymentMethodRequestNotifyEmail = async () => {
+  try { await api('/settings', { method: 'PUT', body: { notify_payment_method_request_email: qs('#org-notify_payment_method_request_email').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
 window.saveDocSignedNotifyEmail = async () => {
   try {
     await api('/settings', { method: 'PUT', body: { notify_doc_signed_email: qs('#org-notify_doc_signed_email').value } });
@@ -413,7 +426,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanner(); loadRequiredFields(); loadStripeEnabledDefault();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanner(); loadRequiredFields(); loadStripeEnabledDefault();
 </script>
 </body>
 </html>
