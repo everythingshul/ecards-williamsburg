@@ -325,9 +325,18 @@ export function getShulMergeGroupIds(orgId, startIds) {
 // left in place (never deleted) as a historical record, marked
 // duplicate_status='merged' and pointed at the primary via
 // duplicate_of_shul_id, unpaused along with its portal login.
-export function mergeShuls(orgId, userId, { primaryId, values } = {}) {
+// `memberIds` mirrors mergeApplicants' same-named param (see the compare
+// view's per-member Dismiss button) — a chained group can have a member
+// that isn't actually the same shul as the rest, and leaving it off
+// memberIds keeps it, and its flag(s) against the merged members, exactly
+// as they were: still open, still flagged. Falls back to the full
+// transitive group when omitted.
+export function mergeShuls(orgId, userId, { primaryId, values, memberIds } = {}) {
   if (!primaryId) throw new Error('primaryId is required');
-  const groupIds = getShulMergeGroupIds(orgId, [primaryId]);
+  const fullGroupIds = getShulMergeGroupIds(orgId, [primaryId]);
+  const groupIds = Array.isArray(memberIds) && memberIds.length
+    ? [...new Set(memberIds.filter(id => fullGroupIds.includes(id)).concat(primaryId))]
+    : fullGroupIds;
   const placeholders = groupIds.map(() => '?').join(',');
   const members = db.prepare(`SELECT * FROM shuls WHERE id IN (${placeholders}) AND org_id = ?`).all(...groupIds, orgId);
   if (members.length < 2) throw new Error('Need at least two related records to merge');

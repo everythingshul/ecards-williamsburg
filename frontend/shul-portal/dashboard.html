@@ -267,6 +267,10 @@ async function openApplicant(id) {
 }
 // Once an admin has approved the applicant, the record is locked to the
 // shul — read-only display, same fields the editable view below shows.
+// Phone numbers are the one exception (see the shulLockedToPhoneOnly gate
+// in routes/applicants.js's PUT /:id) — a family's number changes, and the
+// shul shouldn't have to go through an admin just to fix that, so those
+// three fields stay live inputs here instead of plain text.
 function openApplicantReadOnly(a) {
   openModal(`${esc(a.first_name)} ${esc(a.last_name)}`, `
     <div class="grid-2">
@@ -283,12 +287,12 @@ function openApplicantReadOnly(a) {
       <div><strong>Children</strong><br>${a.num_children??0}</div>
     </div>
     <div class="grid-2">
-      <div><strong>Home Phone</strong><br>${esc(a.home_phone||'')}</div>
+      <div><label style="margin-top:0">Home Phone</label><input id="ro-home_phone" value="${esc(a.home_phone||'')}"></div>
       <div><strong>Email</strong><br>${esc(a.email||'')}</div>
     </div>
     <div class="grid-2">
-      <div><strong>Husband Cell</strong><br>${esc(a.husband_cell||'')}</div>
-      <div><strong>Wife Cell</strong><br>${esc(a.wife_cell||'')}</div>
+      <div><label style="margin-top:0">Husband Cell</label><input id="ro-husband_cell" value="${esc(a.husband_cell||'')}"></div>
+      <div><label style="margin-top:0">Wife Cell</label><input id="ro-wife_cell" value="${esc(a.wife_cell||'')}"></div>
     </div>
     <div class="grid-2">
       <div><strong>Preferred Contact</strong><br>${esc(a.preferred_contact_method||'')}</div>
@@ -305,9 +309,13 @@ function openApplicantReadOnly(a) {
     <p><strong>Comments</strong><br>${esc(a.comments||'')||'<span class="small-muted">None</span>'}</p>
     ${'card_amount' in a ? `<div class="divider"></div><p><strong>Card Amount</strong><br>${a.card_amount!=null?fmtMoney(a.card_amount):'Not yet set'}</p>` : ''}
     ${a.requiresShulContribution ? `<div class="divider"></div><p><strong>Amount Your Shul Gave This Family</strong><br>${a.shul_contribution_amount!=null?fmtMoney(a.shul_contribution_amount):'Not entered'}</p>` : ''}
-    <p class="small-muted">This applicant has been approved and is locked; contact your admin for changes.</p>
-  `, '');
+    <p class="small-muted">This applicant has been approved and is locked; contact your admin for any other changes. Phone numbers can still be updated below.</p>
+  `, `<button class="btn btn-primary btn-sm" onclick="savePhoneNumbers('${a.id}')">Save Phone Numbers</button>`);
 }
+window.savePhoneNumbers = async (id) => {
+  const body = { home_phone: qs('#ro-home_phone').value, husband_cell: qs('#ro-husband_cell').value, wife_cell: qs('#ro-wife_cell').value };
+  try { await api(`/applicants/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+};
 // Anything not yet approved (draft/pending/rejected) stays editable by the
 // shul — same schema-driven form the public application and re-enrollment
 // flows use, pre-filled with what's already on file. Saving doesn't require

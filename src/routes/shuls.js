@@ -330,6 +330,19 @@ router.get('/mine/seasons', (req, res) => {
   res.json({ seasons });
 });
 
+// Admin-authored banner shown at the top of every shul portal page (see
+// renderShell() in app.js) — rich HTML with RTL support, same
+// createRichTextEditor used by Updates, toggled and edited from Settings >
+// Shul Portal Banner and stored as plain org-wide settings rows (no
+// dedicated table — same pattern as the homepage popup). No permission
+// check beyond the router's own 'shuls' gate above, since it's just
+// read-only banner content, not applicant data.
+router.get('/mine/portal-banner', (req, res) => {
+  const rows = db.prepare(`SELECT key, value FROM settings WHERE org_id = ? AND key IN ('shul_portal_banner_enabled', 'shul_portal_banner_html')`).all(req.user.org_id);
+  const s = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  res.json({ enabled: s.shul_portal_banner_enabled === '1', html: s.shul_portal_banner_html || '' });
+});
+
 // A shul's self-service report — every applicant they've ever submitted,
 // across every season they've participated in (or just one, via
 // ?season_id=), masked exactly like every other shul-facing applicant view
@@ -1151,9 +1164,9 @@ router.get('/duplicates/:flagId/group', requireAdmin, (req, res) => {
 router.post('/duplicates/:flagId/merge', requirePermission('shuls', 'can_edit'), (req, res) => {
   const flag = db.prepare(`SELECT * FROM duplicate_flags WHERE id = ? AND org_id = ? AND entity_type='shul'`).get(req.params.flagId, req.user.org_id);
   if (!flag) return res.status(404).json({ error: 'Not found' });
-  const { primaryId, values } = req.body || {};
+  const { primaryId, values, memberIds } = req.body || {};
   try {
-    const result = mergeShuls(req.user.org_id, req.user.id, { primaryId, values });
+    const result = mergeShuls(req.user.org_id, req.user.id, { primaryId, values, memberIds });
     logAudit(req.user.org_id, req.user.id, 'merge', 'shul', primaryId, null, result, req.ip);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }

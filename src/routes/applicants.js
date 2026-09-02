@@ -33,6 +33,10 @@ const EDITABLE_FIELDS = ['first_name','last_name','marital_status','home_phone',
   'address','city','state','zip','preferred_contact_method','preferred_number','num_children','home_for_yomtov','comments','card_amount','provider_exempt',
   'shul_contribution_amount','shul_contribution_confirmed'];
 
+// The one thing a shul can still edit on its own applicant after it's been
+// approved — see the shulLockedToPhoneOnly gate in PUT /:id below.
+const PHONE_FIELDS = ['home_phone', 'husband_cell', 'wife_cell'];
+
 // Which applicant fields Settings > Organization > Gift Card Loading lets an
 // admin choose to push to disccardpromos — external_id and the shul's group
 // name are always included regardless (they're how a customer gets matched
@@ -471,11 +475,13 @@ router.put('/:id', requirePermission('applicants', 'can_edit'), async (req, res)
   if (!applicant) return res.status(404).json({ error: 'Not found' });
   if (req.user.role === 'shul' && applicant.shul_id !== req.user.shul_id) return res.status(403).json({ error: 'Not your applicant' });
   // A shul can edit its own applicant's info right up until an admin has
-  // actually reviewed it — once approved, the record is locked to the shul
-  // (an admin can still edit anything, any time, via requirePermission above).
-  if (req.user.role === 'shul' && applicant.approval_status === 'approved') {
-    return res.status(403).json({ error: 'This applicant has already been approved — contact your admin for changes.' });
-  }
+  // actually reviewed it — once approved, the record is locked to the shul,
+  // EXCEPT phone numbers, which stay editable indefinitely: a family's
+  // number changes and the shul needs to fix it without going through an
+  // admin. Still pushed to disccardpromos exactly like any other edit (see
+  // the sets.length && provider_account_id block below) — an admin can
+  // still edit anything, any time, via requirePermission above.
+  const shulLockedToPhoneOnly = req.user.role === 'shul' && applicant.approval_status === 'approved';
   const b = req.body || {};
   if (b.home_phone !== undefined) b.home_phone = normalizePhone(b.home_phone);
   if (b.husband_cell !== undefined) b.husband_cell = normalizePhone(b.husband_cell);
@@ -500,7 +506,9 @@ router.put('/:id', requirePermission('applicants', 'can_edit'), async (req, res)
   // admin-only (spec #5 for card_amount; shul_id because a shul reassigning
   // its own applicants to a different shul would be a data-integrity/scope
   // violation, not a legitimate self-service edit).
-  const fields = req.user.role === 'shul' ? EDITABLE_FIELDS.filter(f => f !== 'card_amount' && f !== 'provider_exempt') : [...EDITABLE_FIELDS, 'shul_id', 'permanent_comments', 'min_contribution_override', 'match_rate_override', 'match_cap_override'];
+  const fields = req.user.role !== 'shul' ? [...EDITABLE_FIELDS, 'shul_id', 'permanent_comments', 'min_contribution_override', 'match_rate_override', 'match_cap_override']
+    : shulLockedToPhoneOnly ? PHONE_FIELDS
+    : EDITABLE_FIELDS.filter(f => f !== 'card_amount' && f !== 'provider_exempt');
   const sets = fields.filter(f => b[f] !== undefined);
   // A 'soft_rejected' applicant (see POST /:id/soft-reject) has no shul —
   // that's what the status means. The moment this update actually gives it

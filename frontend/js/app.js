@@ -311,6 +311,16 @@ function renderShell(activeHref, contentHtml) {
       if (link) link.querySelector('.nav-label').innerHTML += ` ${badge('!', 'rejected')}`;
       layoutNavOverflow();
     }).catch(() => {});
+    // Admin-authored banner (Settings > Shul Portal, rich text + RTL) shown
+    // at the top of every shul portal page — prepended after the shell
+    // renders rather than baked into the template above, since it's the
+    // same async-settings-fetch pattern as everything else in this block.
+    api('/shuls/mine/portal-banner').then(({ enabled, html }) => {
+      if (!enabled || !html) return;
+      const content = document.getElementById('content');
+      if (!content) return;
+      content.insertAdjacentHTML('afterbegin', `<div class="card" style="margin-bottom:16px;border-inline-start:4px solid var(--brand-gold-dark)" dir="auto">${html}</div>`);
+    }).catch(() => {});
   }
   if (['staff', 'org_admin', 'super_admin'].includes(role)) {
     api('/dashboard/pending-counts').then(({ counts }) => {
