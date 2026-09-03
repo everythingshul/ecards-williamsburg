@@ -83,6 +83,7 @@ function statusCell(s) {
   return label ? badge(label.text, label.cls) : badge(s.status, s.status);
 }
 const SHUL_COLUMNS = [
+  { key: 'shul_number', label: 'Shul ID', sort: 'shul_number', render: s => `<code>${esc(s.shul_number||'')}</code>` },
   { key: 'name', label: 'Shul', sort: 'name_en', render: s => `<strong>${esc(s.name_en)}</strong>${s.name_he ? `<br><span dir="rtl" class="small-muted">${esc(s.name_he)}</span>` : ''}${s.is_paused ? ' ' + badge('paused','paused') : ''}` },
   { key: 'state_city', label: 'State / City', render: s => `${esc(s.state)}, ${esc(s.city)}` },
   { key: 'address', label: 'Address', render: s => esc(s.address||'') },
@@ -95,7 +96,7 @@ const SHUL_COLUMNS = [
   { key: 'applicant_count', label: 'Applicants', render: s => s.applicant_count },
   { key: 'created_at', label: 'Submitted', sort: 'created_at', render: s => fmtDate(s.created_at) },
 ];
-const DEFAULT_SHUL_COLUMNS = ['name','state_city','rav','gabai','status','slots_allocated','applicant_count','created_at'];
+const DEFAULT_SHUL_COLUMNS = ['shul_number','name','state_city','rav','gabai','status','slots_allocated','applicant_count','created_at'];
 let activeColumns = DEFAULT_SHUL_COLUMNS;
 
 function renderThead() {
@@ -314,8 +315,11 @@ async function openShul(id) {
       </div>
       <div id="tab-info">
         <div class="grid-2">
+          <div><strong>Shul ID</strong><br><code>${esc(shul.shul_number||'')}</code></div>
           <div><strong>Status</strong><br>${badge(shul.status, shul.status)} ${shul.is_paused ? badge('paused','paused') : ''}</div>
-          <div><label>Slots Allocated</label><input id="e-slots_allocated" type="number" value="${shul.slots_allocated ?? 0}"></div>
+        </div>
+        <div class="grid-2" style="margin-top:10px">
+          <div><label style="margin-top:0">Slots Allocated</label><input id="e-slots_allocated" type="number" value="${shul.slots_allocated ?? 0}"></div>
         </div>
         <div class="divider"></div>
         <div class="grid-2">

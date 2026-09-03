@@ -52,10 +52,22 @@ router.get('/stats', (req, res) => {
   const cardPerm = getPermission(req.user, 'cards');
   const stats = {};
 
+  // Per-user dashboard section blocking (Users & Permissions > Dashboard >
+  // Hidden Fields — reuses the same hidden_fields mechanism as every other
+  // resource, just naming whole panels instead of record columns, since a
+  // dashboard stat isn't a field on any one record). Checked in ADDITION to
+  // the existing per-resource can_view checks below, not instead of them —
+  // a user who can't view 'stores' at all never saw store spend either way;
+  // this is for someone who CAN view stores but shouldn't see this one
+  // dashboard panel specifically. Enforced here, not just hidden client-side
+  // (see redact() elsewhere) — the section's data is simply never computed
+  // or sent when hidden.
+  const hidden = new Set(req.permission.hidden_fields || []);
+
   const seasonClause = seasonId ? ' AND season_id = ?' : '';
   const seasonParams = seasonId ? [seasonId] : [];
 
-  if (shulPerm.can_view) {
+  if (shulPerm.can_view && !hidden.has('shuls_stats')) {
     stats.shuls = {
       total: db.prepare(`SELECT COUNT(*) c FROM shuls WHERE org_id = ? AND is_locked = 0${seasonClause}`).get(orgId, ...seasonParams).c,
       pending: db.prepare(`SELECT COUNT(*) c FROM shuls WHERE org_id = ? AND is_locked = 0 AND status IN ('submitted','contract_sent','contract_signed')${seasonClause}`).get(orgId, ...seasonParams).c,
@@ -63,7 +75,7 @@ router.get('/stats', (req, res) => {
       paused: db.prepare(`SELECT COUNT(*) c FROM shuls WHERE org_id = ? AND is_locked = 0 AND is_paused = 1${seasonClause}`).get(orgId, ...seasonParams).c,
     };
   }
-  if (applicantPerm.can_view) {
+  if (applicantPerm.can_view && !hidden.has('applicants_stats')) {
     stats.applicants = {
       total: db.prepare(`SELECT COUNT(*) c FROM applicants WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).c,
       pending: db.prepare(`SELECT COUNT(*) c FROM applicants WHERE org_id = ? AND approval_status = 'pending'${seasonClause}`).get(orgId, ...seasonParams).c,
@@ -71,25 +83,43 @@ router.get('/stats', (req, res) => {
       paused: db.prepare(`SELECT COUNT(*) c FROM applicants WHERE org_id = ? AND is_paused = 1${seasonClause}`).get(orgId, ...seasonParams).c,
     };
   }
-  if (cardPerm.can_view) {
+  if (cardPerm.can_view && !hidden.has('cards_stats')) {
     stats.cards = {
       total: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).c,
       activated: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status='activated'${seasonClause}`).get(orgId, ...seasonParams).c,
       totalLoaded: db.prepare(`SELECT COALESCE(SUM(amount),0) t FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).t,
     };
   }
+  // Store spend is per-transaction, not per-season directly — scope it
+  // through the card a transaction was made against (a card belongs to
+  // exactly one season). Shared by both funds stats below and topStores.
+  const storeSeasonClause = seasonId ? ' AND c2.season_id = ?' : '';
+  if (cardPerm.can_view && !hidden.has('funds_stats')) {
+    // Approved Funds: what's actually been committed and pushed to
+    // disccardpromos — every approved applicant's card_amount, the moment
+    // they're approved (see routes/applicants.js POST /:id/approve's
+    // upsertAccountForApproval call), independent of whether a physical
+    // card has since been assigned (assignCard is a separate manual step,
+    // so `cards` rows/totalLoaded above can lag behind this). Total Spent
+    // is the same underlying transaction data as topStores/totalStoreSpend
+    // below, just always computed here (not gated on 'stores' can_view) so
+    // it survives the Store Spend panel being hidden independently.
+    stats.funds = {
+      approvedFunds: db.prepare(`SELECT COALESCE(SUM(card_amount),0) t FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).get(orgId, ...seasonParams).t,
+      totalSpent: db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
+        FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id WHERE c2.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).total,
+    };
+  }
   // Duplicate flags aren't tied to a season (a flagged duplicate is either
   // resolved or not, independent of which season it was raised in), so this
   // stays org-wide regardless of the season filter.
-  stats.duplicates = {
-    open: db.prepare(`SELECT COUNT(*) c FROM duplicate_flags WHERE org_id = ? AND status = 'open'`).get(orgId).c,
-  };
+  if (!hidden.has('duplicates')) {
+    stats.duplicates = {
+      open: db.prepare(`SELECT COUNT(*) c FROM duplicate_flags WHERE org_id = ? AND status = 'open'`).get(orgId).c,
+    };
+  }
   const storePerm = getPermission(req.user, 'stores');
-  if (storePerm.can_view) {
-    // Store spend is per-transaction, not per-season directly — scope it
-    // through the card a transaction was made against (a card belongs to
-    // exactly one season).
-    const storeSeasonClause = seasonId ? ' AND c2.season_id = ?' : '';
+  if (storePerm.can_view && !hidden.has('store_spend')) {
     stats.topStores = db.prepare(`SELECT s.id, s.name, COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total_purchases
       FROM stores s LEFT JOIN card_transactions t ON t.store_id = s.id LEFT JOIN cards c2 ON c2.id = t.card_id
       WHERE s.org_id = ?${storeSeasonClause} GROUP BY s.id ORDER BY total_purchases DESC LIMIT 5`).all(orgId, ...seasonParams).filter(s => s.total_purchases > 0);
@@ -108,6 +138,7 @@ router.get('/stats', (req, res) => {
 // frontend can render a continuous trend without gap-filling itself.
 router.get('/daily', (req, res) => {
   const orgId = req.user.org_id;
+  if ((req.permission.hidden_fields || []).includes('daily_breakdown')) return res.json({ daily: [] });
   const seasonId = req.query.season_id || '';
   const days = Math.min(90, Math.max(1, +req.query.days || 30));
   const seasonClause = seasonId ? ' AND season_id = ?' : '';

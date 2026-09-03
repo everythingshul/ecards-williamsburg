@@ -66,6 +66,17 @@ const Auth = {
   canAny(resources, action = 'can_view') {
     return resources.some(r => this.can(r, action));
   },
+  // hidden_fields for a resource — same map Auth.can() reads, just the
+  // field/section-key list instead of the view/edit/export booleans. Used
+  // both for real record fields (shuls/applicants) and, on the admin
+  // Dashboard, for whole panel/section keys (see routes/dashboard.js) —
+  // either way it's just "which of this resource's named things are hidden
+  // from this user." Empty (not hidden) if permissions haven't loaded yet,
+  // matching Auth.can()'s fail-open default.
+  hiddenFields(resource) {
+    const u = this.user();
+    return u?.permissions?.[resource]?.hidden_fields || [];
+  },
 };
 
 async function api(path, { method = 'GET', body, isForm = false } = {}) {

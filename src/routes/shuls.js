@@ -15,7 +15,7 @@ import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { validateBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteShul, captureShulSnapshot } from '../utils/entityDelete.js';
-import { generateApplicantExternalId } from '../utils/externalId.js';
+import { generateApplicantExternalId, generateShulNumber } from '../utils/externalId.js';
 import { maskForShul } from './applicants.js';
 import { APPLICANT_IMPORT_COLUMNS } from '../services/importer.js';
 
@@ -105,11 +105,12 @@ router.post('/apply', async (req, res) => {
   db.prepare(`INSERT INTO shuls (id, org_id, season_id, name_en, name_he, address, city, state, zip, lat, lng, place_id,
       ruv_first_name, ruv_last_name, ruv_phone, ruv_address, ruv_city, ruv_state, ruv_zip, ruv_place_id,
       gabai_first_name, gabai_last_name, gabai_cell, gabai_email, gabai_address, gabai_city, gabai_state, gabai_zip, gabai_place_id,
-      status, source)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, 'submitted', 'form')`)
+      status, source, shul_number)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, 'submitted', 'form', ?)`)
     .run(id, orgId, seasonId, b.name_en, b.name_he || '', b.address, b.city, b.state, b.zip, b.lat || null, b.lng || null, b.place_id || null,
       b.ruv_first_name, b.ruv_last_name, b.ruv_phone, b.ruv_address || '', b.ruv_city || '', b.ruv_state || '', b.ruv_zip || '', b.ruv_place_id || null,
-      b.gabai_first_name, b.gabai_last_name, b.gabai_cell, b.gabai_email, b.gabai_address || '', b.gabai_city || '', b.gabai_state || '', b.gabai_zip || '', b.gabai_place_id || null);
+      b.gabai_first_name, b.gabai_last_name, b.gabai_cell, b.gabai_email, b.gabai_address || '', b.gabai_city || '', b.gabai_state || '', b.gabai_zip || '', b.gabai_place_id || null,
+      generateShulNumber(db));
 
   const shulRow = db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
   const flag = detectAndFlag(orgId, 'shul', shulRow);
@@ -258,7 +259,7 @@ router.get('/', (req, res) => {
     const likeDigits = `%${search.replace(/-/g, '')}%`;
     params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits);
   }
-  const allowedSort = ['created_at', 'name_en', 'status', 'city', 'slots_allocated'];
+  const allowedSort = ['created_at', 'name_en', 'status', 'city', 'slots_allocated', 'shul_number'];
   const sortCol = allowedSort.includes(sort) ? sort : 'created_at';
   const sortDir = dir === 'ASC' ? 'ASC' : 'DESC';
   const total = db.prepare(`SELECT COUNT(*) c FROM shuls ${where}`).get(...params).c;
@@ -520,15 +521,23 @@ async function carryForwardShul(orgId, userId, source, targetSeason, { slotsAllo
     // explicitly mass-invites / mass-sends-contracts / approves them when
     // ready, rather than every carry-forward silently emailing the shul the
     // moment it's created.
+    // shul_number is copied forward from the source, not regenerated — it's
+    // the same real-world shul continuing into a new season (same as its
+    // name/rav/gabai info, all copied unchanged too), and an admin's
+    // applicant mass-upload sheet needs that ID to keep meaning "this shul"
+    // across seasons, not go stale the moment a shul re-enrolls. See
+    // generateShulNumber's own comment and the shul_number lookup in
+    // routes/applicants.js POST /import for how the resulting one-ID/
+    // multiple-season-rows case is disambiguated (prefers the active season).
     db.prepare(`INSERT INTO shuls (id, org_id, season_id, name_en, name_he, address, city, state, zip,
         ruv_first_name, ruv_last_name, ruv_phone, ruv_address, ruv_city, ruv_state, ruv_zip,
         gabai_first_name, gabai_last_name, gabai_cell, gabai_email, gabai_address, gabai_city, gabai_state, gabai_zip,
-        status, source, slots_allocated, permanent_comments)
-      VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 'submitted','carried_forward', ?, ?)`)
+        status, source, slots_allocated, permanent_comments, shul_number)
+      VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 'submitted','carried_forward', ?, ?, ?)`)
       .run(id, orgId, targetSeason.id, source.name_en, source.name_he || '', source.address || '', source.city || '', source.state || '', source.zip || '',
         source.ruv_first_name || '', source.ruv_last_name || '', source.ruv_phone || '', source.ruv_address || '', source.ruv_city || '', source.ruv_state || '', source.ruv_zip || '',
         source.gabai_first_name || '', source.gabai_last_name || '', source.gabai_cell || '', source.gabai_email || '', source.gabai_address || '', source.gabai_city || '', source.gabai_state || '', source.gabai_zip || '',
-        slotsAllocated ?? 0, source.permanent_comments || null);
+        slotsAllocated ?? 0, source.permanent_comments || null, source.shul_number || generateShulNumber(db));
     target = db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
     shulCreated = true;
 
@@ -643,10 +652,10 @@ router.post('/', requirePermission('shuls', 'can_edit'), (req, res) => {
   const id = uuid();
   const season = db.prepare('SELECT * FROM seasons WHERE org_id = ? AND is_active = 1 ORDER BY created_at DESC LIMIT 1').get(req.user.org_id);
   db.prepare(`INSERT INTO shuls (id, org_id, season_id, name_en, name_he, address, city, state, zip,
-      ruv_first_name, ruv_last_name, ruv_phone, gabai_first_name, gabai_last_name, gabai_cell, gabai_email, status, source, slots_allocated)
-    VALUES (?,?,?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, 'submitted','admin', ?)`)
+      ruv_first_name, ruv_last_name, ruv_phone, gabai_first_name, gabai_last_name, gabai_cell, gabai_email, status, source, slots_allocated, shul_number)
+    VALUES (?,?,?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, 'submitted','admin', ?, ?)`)
     .run(id, req.user.org_id, season?.id || null, b.name_en, b.name_he || '', b.address, b.city, b.state, b.zip,
-      b.ruv_first_name, b.ruv_last_name, b.ruv_phone, b.gabai_first_name, b.gabai_last_name, b.gabai_cell, b.gabai_email, b.slots_allocated || 0);
+      b.ruv_first_name, b.ruv_last_name, b.ruv_phone, b.gabai_first_name, b.gabai_last_name, b.gabai_cell, b.gabai_email, b.slots_allocated || 0, generateShulNumber(db));
   const shul = db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
   const flag = detectAndFlag(req.user.org_id, 'shul', shul);
   logAudit(req.user.org_id, req.user.id, 'create', 'shul', id, null, shul, req.ip);
@@ -1307,12 +1316,12 @@ router.post('/import', requirePermission('shuls', 'can_edit'), upload.single('fi
       db.prepare(`INSERT INTO shuls (id, org_id, season_id, name_en, name_he, address, city, state, zip,
           ruv_first_name, ruv_last_name, ruv_phone, ruv_address, ruv_city, ruv_state, ruv_zip,
           gabai_first_name, gabai_last_name, gabai_cell, gabai_email, gabai_address, gabai_city, gabai_state, gabai_zip,
-          status, source, slots_allocated)
-        VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 'submitted','mass_upload', ?)`)
+          status, source, slots_allocated, shul_number)
+        VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 'submitted','mass_upload', ?, ?)`)
         .run(id, req.user.org_id, season?.id || null, r.name_en, r.name_he || '', r.address || '', r.city || '', r.state || '', r.zip || '',
           r.ruv_first_name || '', r.ruv_last_name || '', normalizePhone(r.ruv_phone || ''), r.ruv_address || '', r.ruv_city || '', r.ruv_state || '', r.ruv_zip || '',
           r.gabai_first_name || '', r.gabai_last_name || '', normalizePhone(r.gabai_cell || ''), r.gabai_email, r.gabai_address || '', r.gabai_city || '', r.gabai_state || '', r.gabai_zip || '',
-          Number(r.slots_allocated) || 0);
+          Number(r.slots_allocated) || 0, generateShulNumber(db));
       const shul = db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
       const flag = detectAndFlag(req.user.org_id, 'shul', shul);
       createdIds.push(id); createdNames.push(shul.name_en);

@@ -24,6 +24,18 @@ const RESOURCE_LABELS = {
 const HIDABLE_FIELDS = {
   shuls: ['name_en','name_he','address','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email'],
   applicants: ['first_name','last_name','home_phone','husband_cell','wife_cell','email','address','card_amount','comments'],
+  // Not real record fields — whole Dashboard panels (see routes/dashboard.js
+  // and Auth.hiddenFields() in app.js), reusing the same hidden_fields
+  // mechanism so blocking a section needs no new permissions UI.
+  dashboard: ['shuls_stats','applicants_stats','cards_stats','funds_stats','duplicates','store_spend','daily_breakdown','tasks'],
+};
+// Cosmetic only (submitted value is still the raw key) — a snake_case
+// record field reads fine as-is ("card_amount"), but a dashboard section
+// key benefits more from a real label ("Store Spend" vs "store_spend").
+const HIDABLE_FIELD_LABELS = {
+  shuls_stats: 'Shul Stats', applicants_stats: 'Applicant Stats', cards_stats: 'Card Stats',
+  funds_stats: 'Approved Funds & Total Spent', duplicates: 'Duplicate Flags', store_spend: 'Store Spend',
+  daily_breakdown: 'Daily Breakdown', tasks: 'My Open Tasks',
 };
 
 renderShell('/admin/users', `
@@ -106,7 +118,7 @@ function permRow(resource, p) {
     </div>
     <label style="margin-top:10px">Scope</label>
     <select class="p-scope"><option value="all" ${p.scope==='all'?'selected':''}>All records</option><option value="assigned" ${p.scope==='assigned'?'selected':''}>Only assigned records</option></select>
-    ${fields ? `<label>Hidden Fields (invisible to this user)</label><div class="pill-row">${fields.map(f => `<label class="checkbox-row"><input type="checkbox" class="p-hide" value="${f}" ${p.hidden_fields.includes(f)?'checked':''}>${f}</label>`).join('')}</div>` : ''}
+    ${fields ? `<label>${resource === 'dashboard' ? 'Hidden Sections (invisible to this user)' : 'Hidden Fields (invisible to this user)'}</label><div class="pill-row">${fields.map(f => `<label class="checkbox-row"><input type="checkbox" class="p-hide" value="${f}" ${p.hidden_fields.includes(f)?'checked':''}>${esc(HIDABLE_FIELD_LABELS[f] || f)}</label>`).join('')}</div>` : ''}
   </div>`;
 }
 

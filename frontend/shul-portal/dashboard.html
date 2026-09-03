@@ -13,7 +13,7 @@
 <script>
 Auth.requireRole('shul');
 renderShell('/shul-portal/dashboard', `
-  <div class="flex-between"><h2>My Applicants</h2>
+  <div class="flex-between"><h2>My Applicants <span class="small-muted" id="my-shul-id" style="font-size:14px;font-weight:normal"></span></h2>
     <div style="display:flex;gap:8px">
       <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/applicants/my-export','my-applicants.xlsx')">Export</button>
       <button class="btn btn-primary btn-sm" id="btn-new">+ Add Applicant</button>
@@ -56,6 +56,7 @@ function contactLine(a) {
 let shulInfoIncomplete = false;
 let contractNotSigned = false;
 api(`/shuls/${Auth.user().shul_id}`).then(({ shul, applicants, missingInfo }) => {
+  qs('#my-shul-id').textContent = shul.shul_number ? `Shul ID: ${shul.shul_number}` : '';
   if (missingInfo && missingInfo.length) {
     shulInfoIncomplete = true;
     qs('#shul-info-banner').innerHTML = `<div class="card" style="margin-bottom:16px;border-color:var(--danger)">

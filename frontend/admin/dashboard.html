@@ -48,11 +48,23 @@ renderShell('/admin/dashboard', `
       <tbody id="daily-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
-  <div class="card">
+  <div class="card" id="my-tasks-panel">
     <div class="flex-between"><h3 style="margin:0" id="my-tasks-heading">My Open Tasks</h3><a href="/admin/tasks" class="btn btn-sm btn-outline">View All Tasks</a></div>
     <div id="my-tasks" style="margin-top:10px"></div>
   </div>
 `);
+
+// Per-user dashboard section blocking (Users & Permissions > Dashboard >
+// Hidden Fields) — every OTHER section here is hidden server-side (see
+// routes/dashboard.js: the corresponding stats.* key or /daily's rows are
+// simply never sent), so the frontend already hides them for free by only
+// rendering what's present in the response. "My Open Tasks" is the one
+// exception — it's backed by a completely different resource (/tasks, not
+// /dashboard), so there's nothing dashboard.js could omit; hidden here on
+// the client instead, and the panel is removed from the DOM entirely rather
+// than left empty.
+const hiddenDashboardSections = new Set(Auth.hiddenFields('dashboard'));
+if (hiddenDashboardSections.has('tasks')) qs('#my-tasks-panel').remove();
 
 api('/sms/inbox/unread-count').then(({ count }) => {
   if (!count) return;
@@ -90,6 +102,8 @@ async function loadStats() {
     if (stats.cards) tiles.push(
       ['Cards Issued', stats.cards.total], ['Cards Activated', stats.cards.activated],
       ['Total Loaded', fmtMoney(stats.cards.totalLoaded)]);
+    if (stats.funds) tiles.push(
+      ['Approved Funds', fmtMoney(stats.funds.approvedFunds)], ['Total Spent', fmtMoney(stats.funds.totalSpent)]);
     qs('#stats').innerHTML = tiles.map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
     qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
     if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;
@@ -138,11 +152,14 @@ async function loadDaily() {
       seasons.map(s => `<option value="${s.id}" ${active && s.id === active.id ? 'selected' : ''}>${esc(s.name)}${active && s.id === active.id ? ' (active)' : ''}</option>`).join('');
     renderCapacityBanner(qs('#dash-season').value);
   } catch { /* dropdown stays on "All Seasons" if this fails */ }
-  qs('#dash-season').addEventListener('change', () => { renderCapacityBanner(qs('#dash-season').value); loadStats(); loadDaily(); });
+  const dailyHidden = hiddenDashboardSections.has('daily_breakdown');
+  if (dailyHidden) qs('#daily-panel')?.remove();
+  qs('#dash-season').addEventListener('change', () => { renderCapacityBanner(qs('#dash-season').value); loadStats(); if (!dailyHidden) loadDaily(); });
   qs('#dash-days').addEventListener('change', loadDaily);
   loadStats();
-  loadDaily();
+  if (!dailyHidden) loadDaily();
 
+  if (hiddenDashboardSections.has('tasks')) return;
   try {
     const { tasks } = await api('/tasks?assigned_to=me&status=open&pageSize=8');
     const today = new Date().toISOString().slice(0, 10);

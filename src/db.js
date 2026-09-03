@@ -4,7 +4,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { normalizePhone } from './utils/phone.js';
-import { generateApplicantExternalId } from './utils/externalId.js';
+import { generateApplicantExternalId, generateShulNumber } from './utils/externalId.js';
 
 export const DATA_DIR = process.env.DATA_DIR || join(process.cwd(), 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -681,6 +681,12 @@ safeAlter(`ALTER TABLE stores ADD COLUMN discount TEXT`);
 // admin-only `discount` note above: this is what the applying store says
 // they're offering, visible to the store like any other application field.
 safeAlter(`ALTER TABLE stores ADD COLUMN discount_details TEXT`);
+// Human-readable 4-digit "Shul ID" (see utils/externalId.js's
+// generateShulNumber) — assigned on every new shul, visible in the admin
+// Shuls list/detail and the shul portal, and what an admin's applicant
+// mass-upload sheet uses to reference a shul unambiguously (see
+// routes/applicants.js POST /import) instead of matching on name.
+safeAlter(`ALTER TABLE shuls ADD COLUMN shul_number TEXT`);
 safeAlter(`ALTER TABLE seasons ADD COLUMN max_accepted_applicants INTEGER`);
 safeAlter(`ALTER TABLE shuls ADD COLUMN is_locked INTEGER DEFAULT 0`);
 safeAlter(`ALTER TABLE applicants ADD COLUMN external_id TEXT`);
@@ -879,6 +885,13 @@ normalizePhoneColumn('organizations', 'support_phone');
   const missing = db.prepare(`SELECT id FROM applicants WHERE external_id IS NULL OR external_id = ''`).all();
   const setExternalId = db.prepare('UPDATE applicants SET external_id = ? WHERE id = ?');
   for (const row of missing) setExternalId.run(generateApplicantExternalId(db), row.id);
+}
+// Same backfill for shuls' shul_number (see routes/shuls.js, which assigns
+// one on every new create).
+{
+  const missing = db.prepare(`SELECT id FROM shuls WHERE shul_number IS NULL OR shul_number = ''`).all();
+  const setShulNumber = db.prepare('UPDATE shuls SET shul_number = ? WHERE id = ?');
+  for (const row of missing) setShulNumber.run(generateShulNumber(db), row.id);
 }
 
 // ---------------------------------------------------------------------------

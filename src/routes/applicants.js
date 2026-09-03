@@ -300,7 +300,7 @@ router.get('/my-export', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND shul_id = ? AND approval_status IN ('pending','approved') ORDER BY created_at DESC`)
     .all(req.user.org_id, req.user.shul_id);
-  const columns = ['id', ...APPLICANT_IMPORT_COLUMNS.filter(c => c !== 'shul_name')];
+  const columns = ['id', ...APPLICANT_IMPORT_COLUMNS.filter(c => c !== 'shul_id')];
   const out = rows.map(r => Object.fromEntries(columns.map(c => {
     if (c === 'id') return [c, r.id];
     if (c === 'home_for_yomtov') return [c, r.home_for_yomtov ? 'Yes' : 'No'];
@@ -1177,18 +1177,21 @@ router.post('/:id/notes', (req, res) => {
 });
 
 // CSV/XLSX bulk import (spec #1 "via XCLS and CSV files", #3 mass upload, #5 shul self-upload).
-// If the requester is a shul-portal user, shul_name is ignored server-side
+// If the requester is a shul-portal user, shul_id is ignored server-side
 // (always their own shul — see forcedShul below) — and, since that column
 // would otherwise be confusing/pointless for them to fill in, this drops
 // it from the template they download entirely. An admin's own template
-// still has it, since an admin's upload can span many shuls.
+// still has it, since an admin's upload can span many shuls — matched by
+// each shul's own 4-digit Shul ID (shuls.shul_number), not by name; a
+// missing or unrecognized shul_id skips just that row instead of blocking
+// the whole sheet (see the per-row lookup in POST /import below).
 // card_amount is also dropped from a shul's template: it's admin-only (the
 // single-applicant create/edit endpoints already ignore it from a shul —
 // see the cardAmount guard below and EDITABLE_FIELDS filtering), so a shul
 // shouldn't see a column for it. preferred_number is dropped too — a shul
 // filling out a spreadsheet for many applicants at once isn't the place to
 // ask each family's preferred contact info.
-const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_name', 'card_amount', 'preferred_number'];
+const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_id', 'card_amount', 'preferred_number'];
 router.get('/import/template', (req, res) => {
   const columns = req.user.role === 'shul' ? APPLICANT_IMPORT_COLUMNS.filter(c => !SHUL_EXCLUDED_IMPORT_COLUMNS.includes(c)) : APPLICANT_IMPORT_COLUMNS;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1255,18 +1258,20 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
   // only, same idea as the single admin-add's bypass_required checkbox)
   // skips this whole check for the entire sheet. first_name/last_name stay
   // hard-required per new row below regardless — a nameless record isn't
-  // useful even as a placeholder. shul_name isn't one of the fixed
-  // questions (shul assignment isn't part of the intake questions) —
-  // checked separately, and only for an admin upload; a shul-portal
-  // upload's shul is always forced to their own, and shul_name is never
-  // bypassable since without a shul a new row has nowhere to go. Update
-  // rows skip all of this — they're patching specific cells on a record
-  // that's already valid, not submitting a fresh application.
+  // useful even as a placeholder. Update rows skip all of this — they're
+  // patching specific cells on a record that's already valid, not
+  // submitting a fresh application.
+  //
+  // shul_id is deliberately NOT part of this all-or-nothing gate — see the
+  // per-row shul lookup below. A missing or unmatched shul_id only skips
+  // that one row (same as any other per-row shul problem, e.g. a paused
+  // shul or a full season), it never blocks the rest of the sheet — the
+  // whole point of switching this from name-matching to an unambiguous ID
+  // is that one wrong/typo'd ID shouldn't cost the whole batch.
   const isAdminSubmitter = req.user.role !== 'shul';
   const bypassRequired = isAdminSubmitter && (req.body.bypass_required === 'true' || req.body.bypass_required === true);
   const schemaErrors = bypassRequired ? [] : validateRowsBySchema(getEffectiveSchema('applicant_application'), rows, { isAdmin: isAdminSubmitter, skipKeys: ['shul_id'] })
     .filter(e => !rowExisting[e.row - 2]);
-  const shulNameErrors = forcedShul ? [] : rows.map((r, i) => (!rowExisting[i] && !r.shul_name) ? { row: i + 2, error: 'Missing required field: shul_name' } : null).filter(Boolean);
   const idNotFoundErrors = rows.map((r, i) => (r.id && String(r.id).trim() && !rowExisting[i]) ? { row: i + 2, error: `No existing applicant found with id "${r.id}"` } : null).filter(Boolean);
   // Update rows (matched by id) skip validateRowsBySchema entirely (see
   // rowExisting above) since a blank cell there means "leave alone," not
@@ -1277,7 +1282,7 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
     const bad = [['home_phone', 'Home Phone'], ['husband_cell', 'Husband Cell'], ['wife_cell', 'Wife Cell']].find(([f]) => r[f] && !isValidPhone(r[f]));
     return bad ? { row: i + 2, error: `${bad[1]} must be a valid phone number (10 digits, or 11 digits starting with 1)` } : null;
   }).filter(Boolean);
-  const requiredErrors = [...schemaErrors, ...shulNameErrors, ...idNotFoundErrors, ...updatePhoneErrors].sort((a, b) => a.row - b.row);
+  const requiredErrors = [...schemaErrors, ...idNotFoundErrors, ...updatePhoneErrors].sort((a, b) => a.row - b.row);
   if (requiredErrors.length) {
     return res.status(400).json({ error: 'Some rows have errors. Nothing was imported — fix the sheet and re-upload.', errors: requiredErrors });
   }
@@ -1320,8 +1325,17 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
     if (!r.first_name || !r.last_name) { errors.push({ row: i + 2, error: 'Missing first_name or last_name' }); continue; }
     let shul = forcedShul;
     if (!shul) {
-      shul = r.shul_name ? db.prepare('SELECT * FROM shuls WHERE org_id = ? AND name_en = ?').get(req.user.org_id, r.shul_name) : null;
-      if (!shul) { errors.push({ row: i + 2, error: `Shul not found: "${r.shul_name || ''}" (must match an existing shul name exactly)` }); continue; }
+      const shulId = r.shul_id ? String(r.shul_id).trim() : '';
+      if (!shulId) { errors.push({ row: i + 2, error: 'Missing shul_id — row skipped' }); continue; }
+      // A shul's 4-digit shul_number can belong to more than one row (see
+      // generateShulNumber/carryForwardShul: it's copied forward every
+      // season, on purpose, so the ID keeps meaning "this shul" over time)
+      // — prefer whichever row is in the org's currently active season,
+      // falling back to the most recently created one if none is active,
+      // same disambiguation contactLookup.js's reverse lookups already use.
+      shul = db.prepare(`SELECT * FROM shuls WHERE org_id = ? AND shul_number = ? ORDER BY (season_id = ?) DESC, created_at DESC LIMIT 1`)
+        .get(req.user.org_id, shulId, getActiveSeasonId(req.user.org_id));
+      if (!shul) { errors.push({ row: i + 2, error: `No shul found with ID "${shulId}" — row skipped` }); continue; }
     }
     if (shul.is_paused) { errors.push({ row: i + 2, error: `Shul "${shul.name_en}" is paused` }); continue; }
     const capError = seasonCapacityError(shul.season_id);
