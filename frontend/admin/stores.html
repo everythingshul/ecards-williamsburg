@@ -336,8 +336,8 @@ async function openImportModal() {
   try { ({ seasons } = await api('/seasons')); } catch { /* season picker just won't show options if this fails */ }
   const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. To mass-edit existing stores, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that store (only the cells you actually changed), instead of creating a new one. Nothing is imported until you click Upload below, and if any row has an error the whole file is rejected — no partial imports.</p>
     <input type="file" id="import-file" accept=".xlsx">
-    <label style="margin-top:12px">Season <span class="small-muted">(for a one-time backfill of a past/other season — defaults to the current season)</span></label>
-    <select id="import-season">${seasons.map(s => `<option value="${s.id}" ${s.is_active ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    <label style="margin-top:12px">Season <span class="req">*</span></label>
+    <select id="import-season"><option value="">Select a season…</option>${seasons.map(s => `<option value="${s.id}">${esc(s.name)}${s.is_active ? ' (active)' : ''}</option>`).join('')}</select>
     <div class="checkbox-row" style="margin-top:12px"><input type="checkbox" id="import-bypass"><label style="margin:0">Bypass missing required fields (admin only — rows with blanks are still imported; name and owner email still required)</label></div>
     <div id="import-result" style="margin-top:14px"></div>`;
   openModal('Mass Upload Stores', body, `<button class="btn btn-primary btn-sm" id="btn-run-import" onclick="runImport()">Upload</button>`);
@@ -347,9 +347,9 @@ window.runImport = async () => {
   if (btn.disabled) return;
   const file = qs('#import-file').files[0];
   if (!file) return toast('Choose a file first', true);
-  const fd = new FormData(); fd.append('file', file); fd.append('bypass_required', qs('#import-bypass').checked);
-  const seasonId = qs('#import-season')?.value;
-  if (seasonId) fd.append('season_id', seasonId);
+  const seasonId = qs('#import-season').value;
+  if (!seasonId) return toast('Select a season', true);
+  const fd = new FormData(); fd.append('file', file); fd.append('season_id', seasonId); fd.append('bypass_required', qs('#import-bypass').checked);
   btn.disabled = true; btn.textContent = 'Uploading…';
   try {
     const r = await api('/stores/import', { method: 'POST', isForm: true, body: fd });

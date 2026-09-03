@@ -629,14 +629,12 @@ router.post('/import', requirePermission('stores', 'can_edit'), upload.single('f
   if (!/\.xlsx$/i.test(req.file.originalname || '')) return res.status(400).json({ error: 'Only .xlsx files are accepted (CSV does not reliably support Hebrew text).' });
   const jobId = uuid();
   const rows = parseSpreadsheet(req.file.buffer, req.file.originalname);
-  // Defaults to the newest active season same as everywhere else; season_id
-  // lets an admin target a specific (e.g. older/already-superseded) season
-  // instead — for a one-time backfill import that shouldn't land in
-  // whatever season happens to be current right now.
-  const season = req.body.season_id
-    ? db.prepare('SELECT * FROM seasons WHERE id = ? AND org_id = ?').get(req.body.season_id, req.user.org_id)
-    : db.prepare('SELECT * FROM seasons WHERE org_id = ? AND is_active = 1 ORDER BY created_at DESC LIMIT 1').get(req.user.org_id);
-  if (req.body.season_id && !season) return res.status(400).json({ error: 'Season not found' });
+  // Required, not defaulted — an admin must explicitly pick which season
+  // every row in this upload lands in, rather than silently falling back to
+  // whatever happens to be active right now.
+  if (!req.body.season_id) return res.status(400).json({ error: 'A season is required for a mass upload.' });
+  const season = db.prepare('SELECT * FROM seasons WHERE id = ? AND org_id = ?').get(req.body.season_id, req.user.org_id);
+  if (!season) return res.status(400).json({ error: 'Season not found' });
 
   // Spreadsheet cells arrive as strings ("TRUE"/"1"/"yes"), not real
   // booleans — normalize the two checkbox columns up front so both

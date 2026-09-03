@@ -1185,13 +1185,14 @@ router.post('/:id/notes', (req, res) => {
 // each shul's own 4-digit Shul ID (shuls.shul_number), not by name; a
 // missing or unrecognized shul_id skips just that row instead of blocking
 // the whole sheet (see the per-row lookup in POST /import below).
-// card_amount is also dropped from a shul's template: it's admin-only (the
-// single-applicant create/edit endpoints already ignore it from a shul —
-// see the cardAmount guard below and EDITABLE_FIELDS filtering), so a shul
-// shouldn't see a column for it. preferred_number is dropped too — a shul
-// filling out a spreadsheet for many applicants at once isn't the place to
-// ask each family's preferred contact info.
-const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_id', 'card_amount', 'preferred_number'];
+// preferred_number is also dropped from a shul's template — a shul filling
+// out a spreadsheet for many applicants at once isn't the place to ask each
+// family's preferred contact info. (card_amount used to be excluded here
+// too; it's gone from APPLICANT_IMPORT_COLUMNS entirely now — new-applicant
+// mass upload never sets it, admin included — so there's nothing left to
+// exclude. It's still settable via the separate export/edit/re-upload
+// UPDATE flow, same as the single-applicant edit form.)
+const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_id', 'preferred_number'];
 router.get('/import/template', (req, res) => {
   const columns = req.user.role === 'shul' ? APPLICANT_IMPORT_COLUMNS.filter(c => !SHUL_EXCLUDED_IMPORT_COLUMNS.includes(c)) : APPLICANT_IMPORT_COLUMNS;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1221,6 +1222,20 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
   const rows = parseSpreadsheet(req.file.buffer, req.file.originalname);
   const jobId = uuid();
   const forcedShul = req.user.role === 'shul' ? db.prepare('SELECT * FROM shuls WHERE id = ?').get(req.user.shul_id) : null;
+  // Required for an admin upload (not a shul-portal one — forcedShul already
+  // pins them to their own current shul/season, no ambiguity to resolve) —
+  // the season a shul_id gets matched within (see the per-row lookup
+  // below), replacing an earlier "prefer the active season, else most
+  // recent" heuristic with an explicit, deterministic admin choice. A
+  // shul_number can legitimately belong to more than one season's row (see
+  // carryForwardShul — it's copied forward on purpose), so which one a row
+  // resolves to has to be unambiguous, not guessed.
+  let importSeason = null;
+  if (!forcedShul) {
+    if (!req.body.season_id) return res.status(400).json({ error: 'A season is required for a mass upload.' });
+    importSeason = db.prepare('SELECT * FROM seasons WHERE id = ? AND org_id = ?').get(req.body.season_id, req.user.org_id);
+    if (!importSeason) return res.status(400).json({ error: 'Season not found' });
+  }
   // Same shul-info-complete gate as POST / and complete-reenrollment (#147)
   // — a shul-portal bulk upload is still "submitting applicants," all-or-
   // nothing like the rest of this route's validation.
@@ -1330,12 +1345,12 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
       // A shul's 4-digit shul_number can belong to more than one row (see
       // generateShulNumber/carryForwardShul: it's copied forward every
       // season, on purpose, so the ID keeps meaning "this shul" over time)
-      // — prefer whichever row is in the org's currently active season,
-      // falling back to the most recently created one if none is active,
-      // same disambiguation contactLookup.js's reverse lookups already use.
-      shul = db.prepare(`SELECT * FROM shuls WHERE org_id = ? AND shul_number = ? ORDER BY (season_id = ?) DESC, created_at DESC LIMIT 1`)
-        .get(req.user.org_id, shulId, getActiveSeasonId(req.user.org_id));
-      if (!shul) { errors.push({ row: i + 2, error: `No shul found with ID "${shulId}" — row skipped` }); continue; }
+      // — matched against the season this whole upload was targeted at
+      // (importSeason, required above), not guessed, so which row a shul_id
+      // resolves to is always exactly what the admin picked.
+      shul = db.prepare(`SELECT * FROM shuls WHERE org_id = ? AND shul_number = ? AND season_id = ?`)
+        .get(req.user.org_id, shulId, importSeason.id);
+      if (!shul) { errors.push({ row: i + 2, error: `No shul found with ID "${shulId}" in ${importSeason.name} — row skipped` }); continue; }
     }
     if (shul.is_paused) { errors.push({ row: i + 2, error: `Shul "${shul.name_en}" is paused` }); continue; }
     const capError = seasonCapacityError(shul.season_id);

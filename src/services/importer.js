@@ -33,5 +33,5 @@ export const STORE_IMPORT_COLUMNS = [
 export const APPLICANT_IMPORT_COLUMNS = [
   'first_name', 'last_name', 'marital_status', 'home_phone', 'husband_cell', 'wife_cell', 'email',
   'address', 'city', 'state', 'zip', 'shul_id',
-  'preferred_number', 'num_children', 'home_for_yomtov', 'card_amount', 'comments',
+  'preferred_number', 'num_children', 'home_for_yomtov', 'comments',
 ];
