@@ -47,10 +47,11 @@ router.get('/builtin-schemas', (req, res) => {
 // subset of that form's schema fields that actually appear as a column on
 // the sheet (importer.js's SHUL/APPLICANT/STORE_IMPORT_COLUMNS lists aren't
 // identical to the schema's field list — e.g. checkboxes like
-// store_application's same_person never had a sheet column, and shul_id/
-// slots_allocated are sheet-only columns with no schema field) — only this
-// overlap is safe to offer a checkbox for, since only these fields have both
-// a real template column to add/remove AND a schema required-ness to toggle.
+// store_application's same_person never had a sheet column, and
+// applicant_application's shul_id is a sheet-only column with no schema
+// field) — only this overlap is safe to offer a checkbox for, since only
+// these fields have both a real template column to add/remove AND a schema
+// required-ness to toggle.
 const IMPORT_COLUMNS_BY_TYPE = {
   shul_application: SHUL_IMPORT_COLUMNS,
   store_application: STORE_IMPORT_COLUMNS,

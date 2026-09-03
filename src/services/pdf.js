@@ -174,7 +174,6 @@ const DATA_FIELD_DEFS = {
     ['gabai_first_name', 'Gabai First Name'], ['gabai_last_name', 'Gabai Last Name'], ['gabai_full_name', 'Gabai Full Name'],
     ['gabai_cell', 'Gabai Cell'], ['gabai_email', 'Gabai Email'],
     ['gabai_address', 'Gabai Address'], ['gabai_city', 'Gabai City'], ['gabai_state', 'Gabai State'], ['gabai_zip', 'Gabai Zip'],
-    ['slots_allocated', 'Slots Allocated'],
     ['season_name', 'Season Name'], ['org_name', 'Organization Name'], ['today_date', "Today's Date"],
   ],
   applicant: [
@@ -219,7 +218,6 @@ function buildDataFieldValues(kind, record, { orgName = '', seasonName = '', shu
       gabai_full_name: [record.gabai_first_name, record.gabai_last_name].filter(Boolean).join(' '),
       gabai_cell: record.gabai_cell || '', gabai_email: record.gabai_email || '',
       gabai_address: record.gabai_address || '', gabai_city: record.gabai_city || '', gabai_state: record.gabai_state || '', gabai_zip: record.gabai_zip || '',
-      slots_allocated: record.slots_allocated != null ? String(record.slots_allocated) : '',
       season_name: seasonName, org_name: orgName, today_date: todayDate,
     };
   }

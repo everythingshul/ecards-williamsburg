@@ -22,7 +22,6 @@ export const SHUL_IMPORT_COLUMNS = [
   'name_en', 'name_he', 'address', 'city', 'state', 'zip',
   'ruv_first_name', 'ruv_last_name', 'ruv_phone', 'ruv_address', 'ruv_city', 'ruv_state', 'ruv_zip',
   'gabai_first_name', 'gabai_last_name', 'gabai_cell', 'gabai_email', 'gabai_address', 'gabai_city', 'gabai_state', 'gabai_zip',
-  'slots_allocated',
 ];
 
 export const STORE_IMPORT_COLUMNS = [

@@ -433,10 +433,6 @@ router.post('/', requirePermission('applicants', 'can_edit'), (req, res) => {
     const shulErrors = shulInfoErrors(shul);
     if (shulErrors.length) return res.status(400).json({ error: `Please complete your shul's information before submitting applicants: ${shulErrors.join('; ')}`, code: 'SHUL_INFO_INCOMPLETE' });
   }
-  // 'incomplete' (carried-over, not yet re-enrolled) rows don't count as
-  // used slots — see the identical check in complete-reenrollment below.
-  const used = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status NOT IN ('rejected','incomplete','draft')`).get(shulId).c;
-  if (shul.slots_allocated && used >= shul.slots_allocated) return res.status(400).json({ error: `This shul has used all ${shul.slots_allocated} allocated slot(s) for this season` });
   const capError = seasonCapacityError(shul.season_id);
   if (capError) return res.status(400).json({ error: capError });
   // Same fixed question set (utils/builtinSchemas.js) a shul portal add, an
@@ -595,10 +591,6 @@ router.post('/:id/complete-reenrollment', requirePermission('applicants', 'can_e
       return res.status(400).json({ error: 'Please sign your contract for this season before re-enrolling applicants.', code: 'CONTRACT_NOT_SIGNED' });
     }
   }
-  if (shul?.slots_allocated) {
-    const used = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status NOT IN ('rejected','incomplete','draft')`).get(applicant.shul_id).c;
-    if (used >= shul.slots_allocated) return res.status(400).json({ error: `This shul has used all ${shul.slots_allocated} allocated slot(s) for this season` });
-  }
   const b = req.body || {};
   if (b.home_phone !== undefined) b.home_phone = normalizePhone(b.home_phone);
   if (b.husband_cell !== undefined) b.husband_cell = normalizePhone(b.husband_cell);
@@ -627,10 +619,8 @@ router.post('/:id/complete-reenrollment', requirePermission('applicants', 'can_e
 // per-applicant review needed since nothing is missing on that one. Anyone
 // still missing something is left alone rather than partially submitted, so
 // the shul still goes through the normal one-at-a-time completion flow for
-// those specific applicants. Same ownership, shul-info-complete (#147), and
-// allocated-slots gates as the single-applicant route above — re-checked
-// per applicant since completing one changes how many slots are left for
-// the next.
+// those specific applicants. Same ownership and shul-info-complete (#147)
+// gates as the single-applicant route above.
 router.post('/mass-complete-reenrollment', requirePermission('applicants', 'can_edit'), (req, res) => {
   const shulId = req.user.role === 'shul' ? req.user.shul_id : req.body?.shul_id;
   if (!shulId) return res.status(400).json({ error: 'shul_id is required' });
@@ -654,13 +644,9 @@ router.post('/mass-complete-reenrollment', requirePermission('applicants', 'can_
   const candidates = Array.isArray(ids) && ids.length
     ? db.prepare(`SELECT * FROM applicants WHERE shul_id = ? AND approval_status = 'incomplete' AND id IN (${ids.map(() => '?').join(',')})`).all(shulId, ...ids)
     : db.prepare(`SELECT * FROM applicants WHERE shul_id = ? AND approval_status = 'incomplete'`).all(shulId);
-  let completed = 0, skippedIncomplete = 0, skippedSlotsFull = 0;
+  let completed = 0, skippedIncomplete = 0;
   const affectedIds = [], names = [];
   for (const applicant of candidates) {
-    if (shul.slots_allocated) {
-      const used = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status NOT IN ('rejected','incomplete','draft')`).get(shulId).c;
-      if (used >= shul.slots_allocated) { skippedSlotsFull++; continue; }
-    }
     const errors = validateBySchema(getEffectiveSchema('applicant_application'), applicant, { isAdmin: false });
     if (errors.length) { skippedIncomplete++; continue; }
     const initialStatus = isZipAllowed(req.user.org_id, applicant.zip) ? 'pending' : 'rejected';
@@ -671,8 +657,8 @@ router.post('/mass-complete-reenrollment', requirePermission('applicants', 'can_
     completed++;
   }
   logMassAudit(req.user.org_id, req.user.id, 'mass-complete-reenrollment', 'applicant', affectedIds,
-    { skippedIncomplete, skippedSlotsFull, shul_id: shulId, names }, req.ip);
-  res.json({ completed, skippedIncomplete, skippedSlotsFull });
+    { skippedIncomplete, shul_id: shulId, names }, req.ip);
+  res.json({ completed, skippedIncomplete });
 });
 
 // Shul-portal only: turns specific 'draft' rows (created by the shul's own
@@ -680,10 +666,7 @@ router.post('/mass-complete-reenrollment', requirePermission('applicants', 'can_
 // submissions. A shul-uploaded new row never auto-submits — the shul picks
 // which of them to actually send in, same explicit checkbox-then-submit
 // pattern as mass-complete-reenrollment above. Same shul-info-complete and
-// contract-signed gates as every other shul-portal submission path; only the
-// per-shul slots cap applies here (not the org-wide season cap) — same as
-// complete-reenrollment, since these rows already exist and aren't a brand
-// new application being created.
+// contract-signed gates as every other shul-portal submission path.
 router.post('/mass-submit-drafts', requirePermission('applicants', 'can_edit'), (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const shul = db.prepare('SELECT * FROM shuls WHERE id = ? AND org_id = ?').get(req.user.shul_id, req.user.org_id);
@@ -696,12 +679,8 @@ router.post('/mass-submit-drafts', requirePermission('applicants', 'can_edit'), 
   const { ids } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
   const candidates = db.prepare(`SELECT * FROM applicants WHERE shul_id = ? AND approval_status = 'draft' AND id IN (${ids.map(() => '?').join(',')})`).all(shul.id, ...ids);
-  let submitted = 0, skippedIncomplete = 0, skippedSlotsFull = 0; const affectedIds = [], names = [];
+  let submitted = 0, skippedIncomplete = 0; const affectedIds = [], names = [];
   for (const applicant of candidates) {
-    if (shul.slots_allocated) {
-      const used = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status NOT IN ('rejected','incomplete','draft')`).get(shul.id).c;
-      if (used >= shul.slots_allocated) { skippedSlotsFull++; continue; }
-    }
     // Same required-field gate as mass-complete-reenrollment just above —
     // a draft is only a placeholder until this moment, so nothing stops a
     // shul from creating one with just a name and leaving the rest blank;
@@ -716,8 +695,8 @@ router.post('/mass-submit-drafts', requirePermission('applicants', 'can_edit'), 
     affectedIds.push(applicant.id); names.push(`${applicant.first_name} ${applicant.last_name}`.trim());
     submitted++;
   }
-  logMassAudit(req.user.org_id, req.user.id, 'mass-submit-drafts', 'applicant', affectedIds, { skippedIncomplete, skippedSlotsFull, names }, req.ip);
-  res.json({ submitted, skippedIncomplete, skippedSlotsFull });
+  logMassAudit(req.user.org_id, req.user.id, 'mass-submit-drafts', 'applicant', affectedIds, { skippedIncomplete, names }, req.ip);
+  res.json({ submitted, skippedIncomplete });
 });
 
 // Manually move an applicant back to 'pending' — for un-rejecting one after

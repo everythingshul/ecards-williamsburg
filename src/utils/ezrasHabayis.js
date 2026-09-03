@@ -16,9 +16,9 @@ export function getOrCreateEzrasHabayisShul(orgId, seasonId) {
   const id = uuid();
   db.prepare(`INSERT INTO shuls (id, org_id, season_id, name_en, name_he, address, city, state, zip,
       ruv_first_name, ruv_last_name, ruv_phone, gabai_first_name, gabai_last_name, gabai_cell, gabai_email,
-      status, source, slots_allocated, is_locked)
+      status, source, is_locked)
     VALUES (?,?,?,'Ezras Habayis','','N/A','N/A','NA','00000', 'N/A','N/A','000-000-0000', 'N/A','N/A','000-000-0000','ezras-habayis@system.local',
-      'approved','admin', 0, 1)`)
+      'approved','admin', 1)`)
     .run(id, orgId, seasonId || null);
   return db.prepare('SELECT * FROM shuls WHERE id = ?').get(id);
 }

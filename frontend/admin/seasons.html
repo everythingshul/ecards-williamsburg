@@ -44,9 +44,6 @@ async function loadSeasons() {
       <p class="small-muted">When on, a shul must enter how much they personally gave a family and check a confirmation box before that applicant can be approved. The minimum amount required (set per shul, overridable per applicant) is never shown to the shul.</p>
       <div><label style="margin-top:10px">Season Default Minimum Contribution <span class="small-muted">(blank = no minimum; a shul's own default, and any per-applicant override, still take priority over this)</span></label>
         <input type="number" min="0" step="0.01" value="${s.min_contribution_default ?? ''}" placeholder="No minimum" onchange="updateSeason('${s.id}',{min_contribution_default: this.value === '' ? null : +this.value})"></div>
-      <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-slots-${s.id}" ${s.require_shul_slots?'checked':''} onchange="updateSeason('${s.id}',{require_shul_slots:this.checked})">
-        <label for="s-slots-${s.id}" style="margin:0">Require a slot limit when approving a shul</label></div>
-      <p class="small-muted">When off, admins aren't forced to set a slot limit when approving a shul into this season (shuls approved with no limit can submit any number of applicants). A specific shul can still be given its own slot limit either way, and this is separate from Max Accepted Applicants above.</p>
       <div class="divider"></div>
       <h4 style="margin-bottom:4px">Matching Funds</h4>
       <p class="small-muted">When a shul allocates money to an applicant, the system adds a match on top — deducted from these caps, never from any shul's own balance. A shul or applicant can override the rate/cap (most specific wins); the season-wide total has no override, it's one shared pool.</p>

@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS shuls (
   gabai_first_name TEXT, gabai_last_name TEXT, gabai_cell TEXT, gabai_email TEXT,
   gabai_address TEXT, gabai_city TEXT, gabai_state TEXT, gabai_zip TEXT, gabai_place_id TEXT,
   status TEXT NOT NULL DEFAULT 'submitted', -- submitted | contract_sent | contract_signed | approved | rejected
-  slots_allocated INTEGER DEFAULT 0,
+  slots_allocated INTEGER DEFAULT 0, -- vestigial: backed the removed per-shul allocated-slots feature, no longer read/written
   is_paused INTEGER DEFAULT 0,       -- duplicate hold freeze
   duplicate_of_shul_id TEXT REFERENCES shuls(id),
   duplicate_status TEXT,             -- NULL | 'flagged' | 'bypassed' | 'resolved'
@@ -790,13 +790,11 @@ safeAlter(`ALTER TABLE applicants ADD COLUMN shul_contribution_confirmed INTEGER
 // minimum) once neither a shul default nor an applicant override was set.
 safeAlter(`ALTER TABLE seasons ADD COLUMN min_contribution_default REAL`);
 
-// Settings > Seasons > "Require shul slot limits" — whether slots_allocated
-// is mandatory at shul approval for this season (see
-// seasonRequiresShulSlots in routes/shuls.js). Defaults to 1 (required) so
-// every season that predates this toggle keeps behaving exactly as before;
-// a per-shul slots_allocated override still works regardless of this
-// setting, and it's completely independent of the season-wide
-// max_accepted_applicants cap above.
+// require_shul_slots and shuls.slots_allocated (above) backed the per-shul
+// "allocated slots" feature, since removed — the app no longer reads or
+// writes either column. Left in place rather than dropped, per this
+// project's additive-only migration policy (see the file header), so any
+// historical data already on disk isn't destroyed.
 safeAlter(`ALTER TABLE seasons ADD COLUMN require_shul_slots INTEGER DEFAULT 1`);
 
 // Matching funds (see services/matching.js): season sets the defaults,

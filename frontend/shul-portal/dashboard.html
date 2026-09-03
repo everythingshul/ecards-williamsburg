@@ -26,7 +26,6 @@ renderShell('/shul-portal/dashboard', `
   </div>
   <div class="stat-grid" id="shul-stats"><div class="small-muted">Loading…</div></div>
   <div id="shul-info-banner"></div>
-  <div id="slots-banner"></div>
   <div id="reenroll-banner"></div>
   <div id="draft-banner"></div>
   <div class="toolbar"><input id="f-search" placeholder="Search name…"></div>
@@ -42,13 +41,6 @@ function contactLine(a) {
   return `${esc(method)}${num ? ': ' + esc(num) : ''}${a.email ? '<br>' + esc(a.email) : ''}`;
 }
 
-// Slot usage banner — "used" mirrors the exact rule the server enforces when
-// a new applicant is submitted or a carried-over one is completed
-// (routes/applicants.js: every pending/approved applicant counts against
-// the cap, since pending ones could still be approved). Still-"incomplete"
-// carried-over applicants deliberately don't count yet — nobody's chosen to
-// re-enroll them — so pre-enrolling more candidates than there are slots
-// doesn't make the banner falsely show as already full.
 // missingInfo mirrors the same server-side gate that blocks any applicant
 // submission/re-enrollment for this shul (#147) — shown here up front, and
 // used to disable "+ Add Applicant" instead of letting the click round-trip
@@ -77,23 +69,14 @@ api(`/shuls/${Auth.user().shul_id}`).then(({ shul, applicants, missingInfo }) =>
       <strong>Your contract for this season isn't signed yet.</strong> You can't re-enroll carried-over applicants until it's signed.
     </div>`);
   }
-  // Always shows how many have been submitted — slots-remaining only makes
-  // sense once the org has actually allocated a number to this shul, but
-  // "how many have I submitted so far" is useful either way.
   const used = applicants.filter(a => !['rejected', 'incomplete', 'draft'].includes(a.approval_status)).length;
   const approved = applicants.filter(a => a.approval_status === 'approved').length;
   const pending = applicants.filter(a => a.approval_status === 'pending').length;
-  const full = shul.slots_allocated && used >= shul.slots_allocated;
   qs('#shul-stats').innerHTML = [
-    ['Slots Allocated', shul.slots_allocated ?? 0],
     ['Pending Applicants', pending],
     ['Total Submitted', used],
     ['Total Approved', approved],
   ].map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
-  qs('#slots-banner').innerHTML = (shul.slots_allocated || full) ? `<div class="card" style="margin-bottom:16px;${full ? 'border-color:var(--danger)' : ''}">
-    ${shul.slots_allocated ? `<strong>${Math.max(0, shul.slots_allocated - used)} slot(s) available</strong> of ${shul.slots_allocated} allocated.` : ''}
-    ${full ? ' <strong style="color:var(--danger)">All allocated slots are used.</strong>' : ''}
-  </div>` : '';
 }).catch(() => {});
 
 // Which carried-over applicants the shul has checked off to re-enroll —
@@ -171,11 +154,8 @@ window.submitDrafts = async () => {
   try {
     const r = await api('/applicants/mass-submit-drafts', { method: 'POST', body: { ids: [...selectedDrafts] } });
     let msg = `Submitted ${r.submitted}`;
-    const notes = [];
-    if (r.skippedIncomplete) notes.push(`${r.skippedIncomplete} still missing information`);
-    if (r.skippedSlotsFull) notes.push(`${r.skippedSlotsFull} skipped — all slots used`);
-    if (notes.length) msg += ` (${notes.join(', ')})`;
-    toast(msg, !r.submitted && (r.skippedIncomplete || r.skippedSlotsFull));
+    if (r.skippedIncomplete) msg += ` (${r.skippedIncomplete} still missing information)`;
+    toast(msg, !r.submitted && r.skippedIncomplete);
     load();
   } catch (err) { toast(err.message, true); }
 };
@@ -211,8 +191,7 @@ window.createApplicant = async () => {
 // Season" action) — not a real submission yet. Renders the fixed Applicant
 // Application question set (utils/builtinSchemas.js), pre-filled with
 // whatever's already known, and requires completing every required field
-// before it counts as a real submission for this season (and this shul's
-// allocated slots).
+// before it counts as a real submission for this season.
 async function openReenrollment(a) {
   const schema = await loadBuiltinSchema('applicant_application');
   if (!schema) { toast('Could not load the application form — try again shortly.', true); return; }
@@ -250,11 +229,8 @@ window.massReenroll = async (selectedOnly) => {
   try {
     const r = await api('/applicants/mass-complete-reenrollment', { method: 'POST', body: selectedOnly ? { ids: [...selectedReenroll] } : {} });
     let msg = `Re-enrolled ${r.completed}`;
-    const notes = [];
-    if (r.skippedIncomplete) notes.push(`${r.skippedIncomplete} still missing information`);
-    if (r.skippedSlotsFull) notes.push(`${r.skippedSlotsFull} skipped — all slots used`);
-    if (notes.length) msg += ` (${notes.join(', ')})`;
-    toast(msg, !r.completed && (r.skippedIncomplete || r.skippedSlotsFull));
+    if (r.skippedIncomplete) msg += ` (${r.skippedIncomplete} still missing information)`;
+    toast(msg, !r.completed && r.skippedIncomplete);
     load();
   } catch (err) { toast(err.message, true); }
 };

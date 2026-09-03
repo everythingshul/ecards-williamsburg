@@ -147,9 +147,9 @@ export const SYSTEM_EMAIL_TEMPLATES = {
       <p>If the button doesn't work, copy this link: {{signUrl}}</p>`,
   },
   accountApproved: {
-    label: 'Shul Approved / Account Setup', vars: ['shulName', 'loginUrl', 'slots'],
+    label: 'Shul Approved / Account Setup', vars: ['shulName', 'loginUrl'],
     subject: "You're approved! Set up your account: {{shulName}}",
-    body: `<p>Mazal tov. <strong>{{shulName}}</strong> has been approved with <strong>{{slots}} slot(s)</strong> for this season.</p>
+    body: `<p>Mazal tov. <strong>{{shulName}}</strong> has been approved for this season.</p>
       <p>Create your account password to begin submitting applicants:</p>
       <p style="text-align:center;margin:28px 0;"><a href="{{loginUrl}}" style="background:#c9a76a;color:#241a15;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">Set Up Account</a></p>`,
   },

@@ -92,11 +92,10 @@ const SHUL_COLUMNS = [
   { key: 'gabai', label: 'Gabai', render: s => `${esc(s.gabai_first_name)} ${esc(s.gabai_last_name)}<br><span class="small-muted">${esc(s.gabai_cell)}</span>` },
   { key: 'gabai_email', label: 'Gabai Email', render: s => esc(s.gabai_email||'') },
   { key: 'status', label: 'Status', sort: 'status', render: statusCell },
-  { key: 'slots_allocated', label: 'Slots', sort: 'slots_allocated', render: s => s.slots_allocated ?? 0 },
   { key: 'applicant_count', label: 'Applicants', render: s => s.applicant_count },
   { key: 'created_at', label: 'Submitted', sort: 'created_at', render: s => fmtDate(s.created_at) },
 ];
-const DEFAULT_SHUL_COLUMNS = ['shul_number','name','state_city','rav','gabai','status','slots_allocated','applicant_count','created_at'];
+const DEFAULT_SHUL_COLUMNS = ['shul_number','name','state_city','rav','gabai','status','applicant_count','created_at'];
 let activeColumns = DEFAULT_SHUL_COLUMNS;
 
 function renderThead() {
@@ -176,18 +175,12 @@ qs('#btn-new').addEventListener('click', () => openShulForm());
 qs('#btn-import').addEventListener('click', () => openImportModal());
 qs('#btn-export').addEventListener('click', () => downloadAuthed('/shuls/export?' + new URLSearchParams({ search: state.search, status: state.status, paused: state.paused, season_id: state.season_id }), 'shuls.xlsx'));
 qs('#f-dupes').addEventListener('click', showDuplicates);
-// One entry per option in #mass-action — confirm() is skipped when null
-// (approve prompts for slots instead, which doubles as its own gate: a
-// null slots value from the cancelled prompt aborts via run() returning
-// null). summarize() turns each endpoint's own count shape into one line.
+// One entry per option in #mass-action. summarize() turns each endpoint's
+// own count shape into one line.
 const MASS_ACTIONS = {
   approve: {
-    confirm: null,
-    run: async (ids) => {
-      const slots = prompt('Number of slots to allocate for each selected shul this season:', '0');
-      if (slots === null) return null;
-      return api('/shuls/mass-approve', { method: 'POST', body: { ids, slots_allocated: +slots } });
-    },
+    confirm: n => `Approve ${n} selected shul(s)? Each gets a portal login (if it doesn't have one yet) and an account setup email.`,
+    run: (ids) => api('/shuls/mass-approve', { method: 'POST', body: { ids } }),
     summarize: r => { let msg = `Approved ${r.approved}, skipped ${r.skipped} (paused, or contract not yet sent)`; if (r.emailErrors) msg += ` — ${r.emailErrors} account setup email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
   },
   reject: {
@@ -249,19 +242,16 @@ const MASS_ACTIONS = {
 
 // Same action as the single-shul "Carry Forward to Season…" button, run
 // across every selected shul at once — always carries ALL of each shul's
-// current-season applicants (no per-shul picker in a bulk action, same
-// reasoning as mass-approve's one uniform slots_allocated). Resolves to null
-// (aborting the mass-action, matching approve's cancelled-prompt behavior)
-// if the admin closes the modal without submitting.
+// current-season applicants (no per-shul picker in a bulk action). Resolves
+// to null (aborting the mass-action) if the admin closes the modal without
+// submitting.
 function openMassCarryForwardModal(ids) {
   return new Promise(async (resolve) => {
     let seasons = [];
     try { ({ seasons } = await api('/seasons')); } catch { /* season list just won't show options if this fails */ }
     const body = `<p class="small-muted">Carries all <strong>${ids.length}</strong> selected shul(s) — and every applicant currently under each — into a different season. Each shul reuses a matching shul there if one already exists (by Gabai email, else name), otherwise creates one in pending status. No email is sent — use the "Invite to Portal" and "Send Contract" mass actions afterward when you're ready. Any applicant already carried into that season is skipped, not duplicated.</p>
       <label>Target Season</label>
-      <select id="mcf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
-      <label style="margin-top:12px">Slots Allocated <span class="small-muted">(applied to each shul that needs a new record created there)</span></label>
-      <input id="mcf-slots" type="number" value="0" style="max-width:160px">`;
+      <select id="mcf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>`;
     openModal('Carry Forward to Season (Mass)', body, `<button class="btn btn-primary btn-sm" id="mcf-go">Carry Forward</button>`);
     // openModal/closeModal don't offer an on-close hook, so a plain "click
     // the backdrop or × instead of submitting" would leave this promise
@@ -279,7 +269,7 @@ function openMassCarryForwardModal(ids) {
       const season_id = qs('#mcf-season')?.value;
       if (!season_id) return toast('No season selected', true);
       try {
-        const r = await api('/shuls/mass-carry-forward', { method: 'POST', body: { ids, season_id, slots_allocated: +qs('#mcf-slots').value || 0 } });
+        const r = await api('/shuls/mass-carry-forward', { method: 'POST', body: { ids, season_id } });
         observer.disconnect();
         closeModal();
         finish(r);
@@ -317,9 +307,6 @@ async function openShul(id) {
         <div class="grid-2">
           <div><strong>Shul ID</strong><br><code>${esc(shul.shul_number||'')}</code></div>
           <div><strong>Status</strong><br>${badge(shul.status, shul.status)} ${shul.is_paused ? badge('paused','paused') : ''}</div>
-        </div>
-        <div class="grid-2" style="margin-top:10px">
-          <div><label style="margin-top:0">Slots Allocated</label><input id="e-slots_allocated" type="number" value="${shul.slots_allocated ?? 0}"></div>
         </div>
         <div class="divider"></div>
         <div class="grid-2">
@@ -421,7 +408,6 @@ window.saveShul = async (id) => {
   const fields = ['name_en','name_he','address','city','state','zip','ruv_first_name','ruv_last_name','ruv_phone','ruv_address','ruv_city','ruv_state','ruv_zip',
     'gabai_first_name','gabai_last_name','gabai_cell','gabai_email','gabai_address','gabai_city','gabai_state','gabai_zip','permanent_comments'];
   const body = Object.fromEntries(fields.map(f => [f, qs('#e-'+f).value]));
-  body.slots_allocated = +qs('#e-slots_allocated').value;
   const minContrib = qs('#e-min_contribution_default').value;
   body.min_contribution_default = minContrib === '' ? null : +minContrib;
   try { await api(`/shuls/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
@@ -530,16 +516,15 @@ window.addShulNote = async (id) => {
   try { await api(`/shuls/${id}/notes`, { method: 'POST', body: { note } }); closeModal(); openShul(id); } catch (err) { toast(err.message, true); }
 };
 window.approveShul = async (id) => {
-  const slots = prompt('Number of slots to allocate for this shul this season:', qs('#edit-slots')?.value || '0');
-  if (slots === null) return;
+  if (!confirm('Approve this shul? It gets a portal login (if it doesn\'t have one yet) and an account setup email.')) return;
   try {
-    const r = await api(`/shuls/${id}/approve`, { method: 'POST', body: { slots_allocated: +slots } });
+    const r = await api(`/shuls/${id}/approve`, { method: 'POST' });
     toast(r.emailError ? `Shul approved, but the account setup email failed to send: ${r.emailError}` : 'Shul approved. Account setup email sent.', !!r.emailError);
     closeModal(); load();
   } catch (err) {
     if (err.data?.code === 'CONTRACT_NOT_SENT' && confirm(`${err.message}\n\nClick OK to approve anyway without a contract on file (bypass).`)) {
       try {
-        const r = await api(`/shuls/${id}/approve`, { method: 'POST', body: { slots_allocated: +slots, bypass_contract: true } });
+        const r = await api(`/shuls/${id}/approve`, { method: 'POST', body: { bypass_contract: true } });
         toast(r.emailError ? `Shul approved, but the account setup email failed to send: ${r.emailError}` : 'Shul approved. Account setup email sent.', !!r.emailError);
         closeModal(); load();
       } catch (err2) { toast(err2.message, true); }
@@ -587,13 +572,12 @@ function openShulForm() {
     <label>Rav Phone *</label><input id="n-ruv_phone">
     <div class="divider"></div>
     <div class="grid-2"><div><label>Gabai First Name *</label><input id="n-gabai_first_name"></div><div><label>Gabai Last Name *</label><input id="n-gabai_last_name"></div></div>
-    <div class="grid-2"><div><label>Gabai Cell *</label><input id="n-gabai_cell"></div><div><label>Gabai Email *</label><input id="n-gabai_email"></div></div>
-    <label>Slots Allocated</label><input id="n-slots_allocated" type="number" value="0" style="max-width:160px">`;
+    <div class="grid-2"><div><label>Gabai Cell *</label><input id="n-gabai_cell"></div><div><label>Gabai Email *</label><input id="n-gabai_email"></div></div>`;
   openModal('Add Shul', body, `<button class="btn btn-primary btn-sm" onclick="createShul()">Create</button>`);
   loadGoogleMaps().then(() => { attachPlacesAutocomplete('n-address', { address: 'n-address', city: 'n-city', state: 'n-state', zip: 'n-zip' }); });
 }
 window.createShul = async () => {
-  const fields = ['name_en','name_he','address','city','state','zip','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email','slots_allocated'];
+  const fields = ['name_en','name_he','address','city','state','zip','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email'];
   const body = Object.fromEntries(fields.map(f => [f, qs('#n-'+f)?.value]));
   try { await api('/shuls', { method: 'POST', body }); toast('Shul created'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
@@ -648,8 +632,6 @@ window.openCarryForwardModal = async () => {
   const body = `<p class="small-muted">Carries <strong>${esc(name)}</strong> into a different season — reuses a matching shul there if one already exists (by Gabai email, else name), otherwise creates one in pending status. No email is sent — invite it to the portal and send its contract whenever you're ready. Each applicant can only be carried into a given season once — re-running this won't create duplicates.</p>
     <label>Target Season</label>
     <select id="cf-season">${seasons.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
-    <label style="margin-top:12px">Slots Allocated <span class="small-muted">(only used if a new shul record is created for that season)</span></label>
-    <input id="cf-slots" type="number" value="0" style="max-width:160px">
     <label style="margin-top:14px">Applicants to carry over <span class="small-muted">(they'll need to complete any missing info before counting as a real submission)</span></label>
     <div style="margin-bottom:6px"><button type="button" class="btn btn-outline btn-sm" onclick="qsa('.cf-applicant').forEach(c=>c.checked=true)">Select All</button> <button type="button" class="btn btn-outline btn-sm" onclick="qsa('.cf-applicant').forEach(c=>c.checked=false)">Select None</button></div>
     <div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
@@ -664,7 +646,7 @@ window.runCarryForward = async () => {
   if (!seasonId) return toast('No season selected', true);
   const applicant_ids = qsa('.cf-applicant').filter(c => c.checked).map(c => c.value);
   try {
-    const r = await api(`/shuls/${id}/carry-forward`, { method: 'POST', body: { season_id: seasonId, slots_allocated: +qs('#cf-slots').value || 0, applicant_ids } });
+    const r = await api(`/shuls/${id}/carry-forward`, { method: 'POST', body: { season_id: seasonId, applicant_ids } });
     qs('#cf-result').innerHTML = `<p><strong>${r.shulCreated ? 'Created' : 'Reused'}</strong> the shul in the target season, carried over <strong>${r.applicantsCarried}</strong> applicant(s) as needing re-enrollment${r.applicantsSkipped ? ` (${r.applicantsSkipped} already carried into that season, skipped)` : ''}.${r.duplicate ? ` <span style="color:var(--danger)">A possible duplicate was flagged in the target season — see Duplicates.</span>` : ''}</p>`;
     load();
   } catch (err) { toast(err.message, true); }
@@ -675,12 +657,12 @@ const SHUL_COMPARE_FIELDS = [
   ['name_en','Name (English)'], ['name_he','Name (Hebrew)'], ['address','Address'], ['city','City'], ['state','State'], ['zip','Zip'],
   ['ruv_first_name','Rav First Name'], ['ruv_last_name','Rav Last Name'], ['ruv_phone','Rav Phone'],
   ['gabai_first_name','Gabai First Name'], ['gabai_last_name','Gabai Last Name'], ['gabai_cell','Gabai Cell'], ['gabai_email','Gabai Email'],
-  ['status','Status'], ['slots_allocated','Slots Allocated'], ['source','Source'],
+  ['status','Status'], ['source','Source'],
 ];
 // Keep in sync with SHUL_MERGE_FIELDS in services/duplicates.js — real
 // identity/contact data an admin can pick a per-field winner for when
-// merging. status/slots_allocated/source/portal_user_id aren't "merged";
-// the surviving (primary) record keeps its own.
+// merging. status/source/portal_user_id aren't "merged"; the surviving
+// (primary) record keeps its own.
 const SHUL_MERGE_FIELDS = [
   ['name_en','Name (English)'], ['name_he','Name (Hebrew)'], ['address','Address'], ['city','City'], ['state','State'], ['zip','Zip'],
   ['ruv_first_name','Rav First Name'], ['ruv_last_name','Rav Last Name'], ['ruv_phone','Rav Phone'],
