@@ -322,15 +322,20 @@ function renderShell(activeHref, contentHtml) {
       if (link) link.querySelector('.nav-label').innerHTML += ` ${badge('!', 'rejected')}`;
       layoutNavOverflow();
     }).catch(() => {});
-    // Admin-authored banner (Settings > Shul Portal, rich text + RTL) shown
-    // at the top of every shul portal page — prepended after the shell
-    // renders rather than baked into the template above, since it's the
-    // same async-settings-fetch pattern as everything else in this block.
-    api('/shuls/mine/portal-banner').then(({ enabled, html }) => {
-      if (!enabled || !html) return;
+    // Admin-authored banner (Settings > Shul Portal Banners, rich text +
+    // RTL), one independent one per shul portal page — prepended after the
+    // shell renders rather than baked into the template above, since it's
+    // the same async-settings-fetch pattern as everything else in this
+    // block. activeHref's last path segment (e.g. 'dashboard', 'payments')
+    // is the key routes/shuls.js's GET /mine/portal-banner returns banners
+    // under, matching SHUL_NAV below.
+    api('/shuls/mine/portal-banner').then(({ banners }) => {
+      const pageKey = activeHref.split('/').filter(Boolean).pop();
+      const b = banners?.[pageKey];
+      if (!b || !b.enabled || !b.html) return;
       const content = document.getElementById('content');
       if (!content) return;
-      content.insertAdjacentHTML('afterbegin', `<div class="card" style="margin-bottom:16px;border-inline-start:4px solid var(--brand-gold-dark)" dir="auto">${html}</div>`);
+      content.insertAdjacentHTML('afterbegin', `<div class="card" style="margin-bottom:16px;border-inline-start:4px solid var(--brand-gold-dark)" dir="auto">${b.html}</div>`);
     }).catch(() => {});
   }
   if (['staff', 'org_admin', 'super_admin'].includes(role)) {

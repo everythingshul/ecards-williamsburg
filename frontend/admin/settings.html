@@ -102,11 +102,10 @@ renderShell('/admin/settings', `
       <p class="small-muted">When off, the "Card $" column and field are hidden from the shul portal (list and applicant detail) but remain fully visible to admins.</p>
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulCardAmountVisible()">Save</button>
       <div class="divider"></div>
-      <div class="checkbox-row"><input type="checkbox" id="shul-banner-enabled"><label style="margin:0">Show a banner at the top of every shul portal page</label></div>
-      <p class="small-muted">Supports rich text and right-to-left text (use the RTL button in the toolbar). Turn it off and the shul portal looks exactly as if it were never there.</p>
-      <label style="margin-top:10px">Banner Text</label>
-      <div id="shul-banner-editor"></div>
-      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulBanner()">Save</button>
+      <h4 style="margin-bottom:4px">Shul Portal Banners</h4>
+      <p class="small-muted">Each shul portal page can show its own banner at the top — different text (or none at all) per page. Supports rich text and right-to-left text (use the RTL button in the toolbar).</p>
+      <div id="shul-banners-list"></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulBanners()">Save Banners</button>
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Homepage Popup</h3>
@@ -306,15 +305,35 @@ async function loadPopup() {
 window.savePopup = async () => {
   try { await api('/settings', { method: 'PUT', body: { homepage_popup_enabled: qs('#popup-enabled').checked ? '1' : '0', homepage_popup_message: qs('#popup-message').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
-let shulBannerEditor = null;
-async function loadShulBanner() {
-  const { settings } = await api('/settings');
-  qs('#shul-banner-enabled').checked = settings.shul_portal_banner_enabled === '1';
-  shulBannerEditor = createRichTextEditor('shul-banner-editor', settings.shul_portal_banner_html || '');
+// Keep in sync with SHUL_NAV in app.js and SHUL_PORTAL_BANNER_PAGES in
+// routes/shuls.js — the key is the last segment of each page's href, which
+// is what GET/PUT the banner content is keyed by.
+const SHUL_PORTAL_BANNER_PAGES = [
+  ['dashboard', 'My Applicants'],
+  ['upload', 'Bulk Upload'],
+  ['shul-info', 'Shul Information'],
+  ['payments', 'Payments'],
+  ['updates', 'Updates'],
+];
+const shulBannerEditors = {};
+async function loadShulBanners() {
+  const { banners } = await api('/shuls/mine/portal-banner');
+  qs('#shul-banners-list').innerHTML = SHUL_PORTAL_BANNER_PAGES.map(([key, label]) => `
+    <div style="margin:14px 0 18px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="checkbox-row"><input type="checkbox" id="sb-enabled-${key}" ${banners?.[key]?.enabled ? 'checked' : ''}><label style="margin:0">Show on <strong>${esc(label)}</strong></label></div>
+      <div id="sb-editor-${key}" style="margin-top:8px"></div>
+    </div>`).join('');
+  SHUL_PORTAL_BANNER_PAGES.forEach(([key]) => {
+    shulBannerEditors[key] = createRichTextEditor(`sb-editor-${key}`, banners?.[key]?.html || '');
+  });
 }
-window.saveShulBanner = async () => {
+window.saveShulBanners = async () => {
+  const banners = {};
+  SHUL_PORTAL_BANNER_PAGES.forEach(([key]) => {
+    banners[key] = { enabled: qs(`#sb-enabled-${key}`).checked, html: shulBannerEditors[key].getHtml() };
+  });
   try {
-    await api('/settings', { method: 'PUT', body: { shul_portal_banner_enabled: qs('#shul-banner-enabled').checked ? '1' : '0', shul_portal_banner_html: shulBannerEditor.getHtml() } });
+    await api('/settings', { method: 'PUT', body: { shul_portal_banners: JSON.stringify(banners) } });
     toast('Saved');
   } catch (err) { toast(err.message, true); }
 };
@@ -504,7 +523,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanner(); loadRequiredFields(); loadImportTemplates(); loadStripeEnabledDefault();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadRequiredFields(); loadImportTemplates(); loadStripeEnabledDefault();
 </script>
 </body>
 </html>

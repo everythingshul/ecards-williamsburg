@@ -350,17 +350,31 @@ router.get('/mine/seasons', (req, res) => {
   res.json({ seasons });
 });
 
-// Admin-authored banner shown at the top of every shul portal page (see
-// renderShell() in app.js) — rich HTML with RTL support, same
-// createRichTextEditor used by Updates, toggled and edited from Settings >
-// Shul Portal Banner and stored as plain org-wide settings rows (no
-// dedicated table — same pattern as the homepage popup). No permission
-// check beyond the router's own 'shuls' gate above, since it's just
-// read-only banner content, not applicant data.
+// Admin-authored banner shown at the top of each shul portal page (see
+// renderShell() in app.js) — one independent banner per page (keyed by the
+// last segment of its href, matching SHUL_NAV in app.js), rich HTML with
+// RTL support, same createRichTextEditor used by Updates. Edited from
+// Settings > Shul Portal Banners and stored as a single JSON blob under the
+// 'shul_portal_banners' org-wide setting (no dedicated table — same pattern
+// as the homepage popup). No permission check beyond the router's own
+// 'shuls' gate above, since it's just read-only banner content, not
+// applicant data.
+const SHUL_PORTAL_BANNER_PAGES = ['dashboard', 'upload', 'shul-info', 'payments', 'updates'];
 router.get('/mine/portal-banner', (req, res) => {
-  const rows = db.prepare(`SELECT key, value FROM settings WHERE org_id = ? AND key IN ('shul_portal_banner_enabled', 'shul_portal_banner_html')`).all(req.user.org_id);
+  const rows = db.prepare(`SELECT key, value FROM settings WHERE org_id = ? AND key IN ('shul_portal_banners', 'shul_portal_banner_enabled', 'shul_portal_banner_html')`).all(req.user.org_id);
   const s = Object.fromEntries(rows.map(r => [r.key, r.value]));
-  res.json({ enabled: s.shul_portal_banner_enabled === '1', html: s.shul_portal_banner_html || '' });
+  let banners = {};
+  try { banners = JSON.parse(s.shul_portal_banners) || {}; } catch { banners = {}; }
+  // One-time compatibility fallback: before per-page banners existed, a
+  // single banner (shul_portal_banner_enabled/_html) showed identically on
+  // every shul portal page. Until an admin saves anything under the new
+  // per-page key, keep showing that same content everywhere rather than
+  // silently dropping whatever was already configured — the first per-page
+  // save (Settings > Shul Portal Banners) switches over for good.
+  if (!Object.keys(banners).length && s.shul_portal_banner_enabled === '1' && s.shul_portal_banner_html) {
+    banners = Object.fromEntries(SHUL_PORTAL_BANNER_PAGES.map(p => [p, { enabled: true, html: s.shul_portal_banner_html }]));
+  }
+  res.json({ banners });
 });
 
 // A shul's self-service report — every applicant they've ever submitted,
