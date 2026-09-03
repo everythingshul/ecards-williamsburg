@@ -29,6 +29,16 @@ export function hardDeleteShul(shul) {
   db.prepare('UPDATE shuls SET duplicate_of_shul_id = NULL WHERE duplicate_of_shul_id = ?').run(shul.id);
   db.prepare('DELETE FROM contracts WHERE shul_id = ?').run(shul.id);
   db.prepare('DELETE FROM shul_notes WHERE shul_id = ?').run(shul.id);
+  // shul_allocations/shul_payments/shul_payment_method_requests all have a
+  // NOT NULL foreign key on shul_id (foreign_keys=ON, db.js) — added after
+  // this cascade was first written, and missed then, so deleting a shul
+  // with any payment/allocation history threw an unhandled FOREIGN KEY
+  // constraint error instead of a real delete. Erased here, not
+  // unlinked, matching how this same cascade already erases (not
+  // preserves) contracts/notes for a deleted shul.
+  db.prepare('DELETE FROM shul_allocations WHERE shul_id = ?').run(shul.id);
+  db.prepare('DELETE FROM shul_payments WHERE shul_id = ?').run(shul.id);
+  db.prepare('DELETE FROM shul_payment_method_requests WHERE shul_id = ?').run(shul.id);
   if (shul.portal_user_id) db.prepare('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE id = ?').run(shul.portal_user_id);
   deletePolymorphicRefs('shul', shul.id);
   db.prepare('DELETE FROM shuls WHERE id = ?').run(shul.id);
@@ -41,6 +51,10 @@ export function hardDeleteApplicant(applicant) {
   db.prepare('DELETE FROM card_transactions WHERE card_id IN (SELECT id FROM cards WHERE applicant_id = ?)').run(applicant.id);
   db.prepare('DELETE FROM cards WHERE applicant_id = ?').run(applicant.id);
   db.prepare('DELETE FROM applicant_notes WHERE applicant_id = ?').run(applicant.id);
+  // Same NOT NULL FK gap as hardDeleteShul above, on the applicant_id side —
+  // an applicant who's ever had money allocated to them (shul_payments >
+  // give to applicant) couldn't be deleted at all before this.
+  db.prepare('DELETE FROM shul_allocations WHERE applicant_id = ?').run(applicant.id);
   db.prepare('UPDATE applicants SET duplicate_of_applicant_id = NULL WHERE duplicate_of_applicant_id = ?').run(applicant.id);
   deletePolymorphicRefs('applicant', applicant.id);
   db.prepare('DELETE FROM applicants WHERE id = ?').run(applicant.id);
@@ -120,6 +134,9 @@ export function captureShulSnapshot(shul) {
     row: shul,
     contracts: db.prepare('SELECT * FROM contracts WHERE shul_id = ?').all(shul.id),
     notes: db.prepare('SELECT * FROM shul_notes WHERE shul_id = ?').all(shul.id),
+    shulAllocations: db.prepare('SELECT * FROM shul_allocations WHERE shul_id = ?').all(shul.id),
+    shulPayments: db.prepare('SELECT * FROM shul_payments WHERE shul_id = ?').all(shul.id),
+    shulPaymentMethodRequests: db.prepare('SELECT * FROM shul_payment_method_requests WHERE shul_id = ?').all(shul.id),
     unlinkedApplicantIds: db.prepare('SELECT id FROM applicants WHERE shul_id = ?').all(shul.id).map(r => r.id),
     duplicateOfShulIds: db.prepare('SELECT id FROM shuls WHERE duplicate_of_shul_id = ?').all(shul.id).map(r => r.id),
     portalUser: capturePortalUser(shul.portal_user_id),
@@ -130,6 +147,13 @@ export function restoreShulSnapshot(snap) {
   insertIfMissing('shuls', snap.row);
   snap.contracts.forEach(r => insertIfMissing('contracts', r));
   snap.notes.forEach(r => insertIfMissing('shul_notes', r));
+  // '|| []' — snapshots captured before these three tables were added here
+  // won't have the key at all; restoring one of those older snapshots
+  // should still work, just without money/request history that was never
+  // captured for it in the first place.
+  (snap.shulAllocations || []).forEach(r => insertIfMissing('shul_allocations', r));
+  (snap.shulPayments || []).forEach(r => insertIfMissing('shul_payments', r));
+  (snap.shulPaymentMethodRequests || []).forEach(r => insertIfMissing('shul_payment_method_requests', r));
   snap.unlinkedApplicantIds.forEach(id => db.prepare('UPDATE applicants SET shul_id = ? WHERE id = ? AND shul_id IS NULL').run(snap.row.id, id));
   snap.duplicateOfShulIds.forEach(id => db.prepare('UPDATE shuls SET duplicate_of_shul_id = ? WHERE id = ?').run(snap.row.id, id));
   restorePortalUser(snap.portalUser);
@@ -147,6 +171,7 @@ export function captureApplicantSnapshot(applicant) {
     row: applicant,
     cards, cardTransactions,
     notes: db.prepare('SELECT * FROM applicant_notes WHERE applicant_id = ?').all(applicant.id),
+    shulAllocations: db.prepare('SELECT * FROM shul_allocations WHERE applicant_id = ?').all(applicant.id),
     duplicateOfApplicantIds: db.prepare('SELECT id FROM applicants WHERE duplicate_of_applicant_id = ?').all(applicant.id).map(r => r.id),
     ...capturePolymorphicRefs('applicant', applicant.id),
   };
@@ -156,6 +181,10 @@ export function restoreApplicantSnapshot(snap) {
   snap.cards.forEach(r => insertIfMissing('cards', r));
   snap.cardTransactions.forEach(r => insertIfMissing('card_transactions', r));
   snap.notes.forEach(r => insertIfMissing('applicant_notes', r));
+  // '|| []' — snapshots captured before shul_allocations was added here
+  // won't have the key; restoring one of those still works, just without
+  // allocation history that was never captured for it.
+  (snap.shulAllocations || []).forEach(r => insertIfMissing('shul_allocations', r));
   snap.duplicateOfApplicantIds.forEach(id => db.prepare('UPDATE applicants SET duplicate_of_applicant_id = ? WHERE id = ?').run(snap.row.id, id));
   restorePolymorphicRefs(snap);
 }
