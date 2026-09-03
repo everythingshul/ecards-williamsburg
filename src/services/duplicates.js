@@ -279,7 +279,26 @@ export function mergeApplicants(orgId, userId, { primaryId, values, memberIds } 
     const fp = flagIds.map(() => '?').join(',');
     db.prepare(`UPDATE duplicate_flags SET status='resolved', resolved_by=?, resolved_at=datetime('now') WHERE id IN (${fp})`).run(userId, ...flagIds);
   }
-  return { primaryId, memberIds: groupIds };
+  // One real disccardpromos account for the whole group, from this moment
+  // on — routes/applicants.js's POST /:id/approve already does this
+  // propagation, but only reactively (whichever member happens to be
+  // approved next inherits whatever account exists at that time). Doing it
+  // here too means a group where one member was already approved (and so
+  // already has a real account) shows that same account on every member's
+  // profile immediately, not just after the next approval.
+  const distinctAccounts = [...new Set(members.map(m => m.provider_account_id).filter(Boolean))];
+  let accountConflict = false;
+  if (distinctAccounts.length === 1) {
+    db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id IN (${placeholders}) AND provider_account_id IS NULL`).run(distinctAccounts[0], ...groupIds);
+  } else if (distinctAccounts.length > 1) {
+    // More than one member was independently approved before being merged,
+    // so more than one real (and possibly funded) disccardpromos account
+    // already exists — there's no confirmed API to merge two live accounts
+    // (see services/giftcard.js's header), so this is surfaced for a human
+    // to reconcile manually rather than guessed at automatically.
+    accountConflict = true;
+  }
+  return { primaryId, memberIds: groupIds, accountConflict };
 }
 
 // Same idea as getMergeGroupIds above, but for shuls: chains through open

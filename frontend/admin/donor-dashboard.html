@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Donor's Dash · Kupes Hair Williamsburg</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+<style>
+  /* Reference palette, unmodified — see the dataviz skill's palette.md.
+     Status colors (approval_status/shul status are genuine state, not
+     identity) are the fixed good/warning/critical roles; the categorical
+     slots are used only where the field is a lifecycle stage, not a status
+     (card status, funds spent-vs-remaining). */
+  :root {
+    --viz-good: #0ca30c; --viz-warning: #fab219; --viz-critical: #d03b3b; --viz-muted: #898781;
+    --viz-1: #2a78d6; --viz-2: #eb6834; --viz-3: #1baf7a; --viz-4: #eda100;
+  }
+  .donut-wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  .donut-svg-box { position: relative; width: 160px; height: 160px; flex-shrink: 0; }
+  .donut-svg-box svg { transform: rotate(-90deg); }
+  .donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; }
+  .donut-center .n { font-size: 20px; font-weight: 600; line-height: 1.1; }
+  .donut-center .l { font-size: 11px; color: var(--text-muted); }
+  .donut-legend { flex: 1; min-width: 170px; }
+  .donut-legend-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+  .donut-legend-row:hover, .donut-legend-row:focus { background: var(--brand-panel-2); outline: none; }
+  .donut-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+  .donut-arc { cursor: pointer; }
+  .donut-arc:hover, .donut-arc:focus { opacity: .82; outline: none; }
+  .bar-chart-row { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding: 0 4px; }
+  .bar-chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; position: relative; }
+  .bar-chart-bar { width: 100%; max-width: 18px; border-radius: 3px 3px 0 0; cursor: pointer; }
+  .bar-chart-bar:hover, .bar-chart-bar:focus { opacity: .82; outline: none; }
+</style>
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+if (!Auth.can('donor_dashboard')) { location.href = '/admin/dashboard'; }
+renderShell('/admin/donor-dashboard', `
+  <div class="flex-between"><h2>Donor's Dash</h2><select id="f-season" style="max-width:240px"><option value="">All Seasons</option></select></div>
+  <p class="small-muted">A quick-read overview for donors and board members — hover any slice or bar for the exact number behind it.</p>
+  <div class="stat-grid" id="kpi-row"><div class="small-muted">Loading…</div></div>
+  <div class="grid-2" style="margin-top:16px;align-items:start">
+    <div class="card"><h4 style="margin:0 0 10px">Applicants by Status</h4><div id="donut-applicants"></div></div>
+    <div class="card"><h4 style="margin:0 0 10px">Shuls by Status</h4><div id="donut-shuls"></div></div>
+  </div>
+  <div class="grid-2" style="margin-top:16px;align-items:start">
+    <div class="card"><h4 style="margin:0 0 10px">Cards by Status</h4><div id="donut-cards"></div></div>
+    <div class="card"><h4 style="margin:0 0 10px">Funds — Spent vs. Remaining</h4><div id="donut-funds"></div></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="flex-between"><h4 style="margin:0">New Applicants, Last 30 Days</h4>
+      <select id="f-days" style="max-width:160px"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
+    </div>
+    <p class="small-muted" style="margin-top:4px">New submissions vs. how many of that day's cohort are approved so far.</p>
+    <div id="bar-daily" style="margin-top:10px">Loading…</div>
+  </div>
+`);
+
+// ---------- Donut chart: hand-rolled SVG (stroke-dasharray technique), no
+// charting library — consistent with this app's no-build-step, no-framework
+// approach. `segments` is [{label, value, color}]; hovering a slice OR its
+// legend row (mouse or keyboard focus) shows label/value/percent in the
+// donut's center. Legend is always present (2+ series) per the dataviz
+// skill; label/value text uses textContent, never innerHTML, since these
+// ultimately trace back to database content.
+function renderDonut(containerId, segments) {
+  const el = qs('#' + containerId);
+  const total = segments.reduce((s, x) => s + (x.value || 0), 0);
+  const R = 60, C = 2 * Math.PI * R, CX = 80, CY = 80;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 160 160'); svg.setAttribute('width', '160'); svg.setAttribute('height', '160');
+  let offset = 0;
+  const withValue = segments.filter(s => s.value > 0);
+  if (!withValue.length) {
+    const c = document.createElementNS(svgNS, 'circle');
+    c.setAttribute('cx', CX); c.setAttribute('cy', CY); c.setAttribute('r', R);
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke', 'var(--border)'); c.setAttribute('stroke-width', '26');
+    svg.appendChild(c);
+  }
+  const arcEls = [];
+  withValue.forEach(s => {
+    const frac = s.value / total;
+    const dash = frac * C;
+    const c = document.createElementNS(svgNS, 'circle');
+    c.setAttribute('cx', CX); c.setAttribute('cy', CY); c.setAttribute('r', R);
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke', s.color); c.setAttribute('stroke-width', '26');
+    c.setAttribute('stroke-dasharray', `${dash} ${C - dash}`);
+    c.setAttribute('stroke-dashoffset', String(-offset));
+    c.setAttribute('tabindex', '0');
+    c.setAttribute('role', 'img');
+    c.classList.add('donut-arc');
+    const titleEl = document.createElementNS(svgNS, 'title');
+    titleEl.textContent = `${s.label}: ${s.value} (${Math.round(frac * 100)}%)`;
+    c.appendChild(titleEl);
+    svg.appendChild(c);
+    arcEls.push({ el: c, s, frac });
+    offset += dash;
+  });
+  const box = document.createElement('div'); box.className = 'donut-svg-box';
+  box.appendChild(svg);
+  const center = document.createElement('div'); center.className = 'donut-center';
+  const defaultCenter = () => { center.innerHTML = ''; const n = document.createElement('div'); n.className = 'n'; n.textContent = String(total); const l = document.createElement('div'); l.className = 'l'; l.textContent = 'Total'; center.appendChild(n); center.appendChild(l); };
+  defaultCenter();
+  box.appendChild(center);
+
+  const legend = document.createElement('div'); legend.className = 'donut-legend';
+  const legendRows = [];
+  segments.forEach(s => {
+    const frac = total > 0 ? s.value / total : 0;
+    const row = document.createElement('div'); row.className = 'donut-legend-row'; row.tabIndex = 0;
+    const sw = document.createElement('span'); sw.className = 'donut-swatch'; sw.style.background = s.color;
+    const label = document.createElement('span'); label.style.flex = '1'; label.textContent = s.label;
+    const val = document.createElement('span'); val.className = 'small-muted'; val.textContent = `${s.value} (${Math.round(frac * 100)}%)`;
+    row.appendChild(sw); row.appendChild(label); row.appendChild(val);
+    legend.appendChild(row);
+    legendRows.push({ el: row, s, frac });
+  });
+
+  function showDetail(s, frac) {
+    center.innerHTML = '';
+    const l = document.createElement('div'); l.className = 'l'; l.textContent = s.label;
+    const n = document.createElement('div'); n.className = 'n'; n.textContent = String(s.value);
+    const p = document.createElement('div'); p.className = 'l'; p.textContent = `${Math.round(frac * 100)}%`;
+    center.appendChild(l); center.appendChild(n); center.appendChild(p);
+  }
+  [...arcEls, ...legendRows].forEach(({ el: node, s, frac }) => {
+    node.addEventListener('mouseenter', () => showDetail(s, frac));
+    node.addEventListener('focus', () => showDetail(s, frac));
+    node.addEventListener('mouseleave', defaultCenter);
+    node.addEventListener('blur', defaultCenter);
+  });
+
+  const wrap = document.createElement('div'); wrap.className = 'donut-wrap';
+  wrap.appendChild(box); wrap.appendChild(legend);
+  el.innerHTML = ''; el.appendChild(wrap);
+}
+
+// ---------- Simple bar chart for the daily trend — two series (new vs
+// approved), same count axis (never dual-axis), each day's pair of bars
+// sharing one hit target group. Hover/focus shows the exact date + both
+// values in a native <title> tooltip on each bar; the day's date label only
+// appears on hover (labeling every single day inline would be unreadable
+// across 30-90 columns) — same "label selectively" rule as the donuts.
+function renderDailyBars(containerId, daily) {
+  const el = qs('#' + containerId);
+  const max = Math.max(1, ...daily.map(d => Math.max(d.newApplicants, d.approved)));
+  const row = document.createElement('div'); row.className = 'bar-chart-row';
+  daily.forEach(d => {
+    const col = document.createElement('div'); col.className = 'bar-chart-col';
+    const inner = document.createElement('div'); inner.style.cssText = 'display:flex;gap:2px;align-items:flex-end;height:100%;width:100%;justify-content:center';
+    const bar1 = document.createElement('div'); bar1.className = 'bar-chart-bar'; bar1.tabIndex = 0;
+    bar1.style.cssText = `height:${Math.round((d.newApplicants / max) * 100)}%;background:var(--viz-1);min-height:${d.newApplicants ? '2px' : '0'}`;
+    bar1.title = `${d.date} — New: ${d.newApplicants}`;
+    const bar2 = document.createElement('div'); bar2.className = 'bar-chart-bar'; bar2.tabIndex = 0;
+    bar2.style.cssText = `height:${Math.round((d.approved / max) * 100)}%;background:var(--viz-3);min-height:${d.approved ? '2px' : '0'}`;
+    bar2.title = `${d.date} — Approved: ${d.approved}`;
+    inner.appendChild(bar1); inner.appendChild(bar2);
+    col.appendChild(inner);
+    row.appendChild(col);
+  });
+  el.innerHTML = '';
+  const legendRow = document.createElement('div');
+  legendRow.style.cssText = 'display:flex;gap:16px;margin-bottom:8px;font-size:12px';
+  legendRow.innerHTML = `<span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:var(--viz-1);display:inline-block"></span>New Submissions</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:var(--viz-3);display:inline-block"></span>Approved</span>`;
+  el.appendChild(legendRow);
+  el.appendChild(row);
+}
+
+async function loadDonorDashboard() {
+  const season_id = qs('#f-season').value;
+  const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
+  const { applicants, shuls, cards, funds, duplicatesOpen } = await api('/donor-dashboard/stats' + qp);
+
+  qs('#kpi-row').innerHTML = [
+    ['Total Applicants', applicants.total],
+    ['Approved Applicants', applicants.approved],
+    ['Cards Activated', cards.activated],
+    ['Money Loaded', fmtMoney(funds.loaded)],
+    ['Money Spent', fmtMoney(funds.spent)],
+    ['Open Duplicate Flags', duplicatesOpen],
+  ].map(([label, num]) => `<div class="stat-tile"><div class="num">${typeof num === 'string' ? esc(num) : num}</div><div class="label">${esc(label)}</div></div>`).join('');
+
+  // approval_status/shul status are genuine STATE (not identity), so this
+  // uses the fixed status palette (good/warning/critical), not the
+  // categorical series slots — see the dataviz skill's color-formula.md.
+  renderDonut('donut-applicants', [
+    { label: 'Approved', value: applicants.approved, color: 'var(--viz-good)' },
+    { label: 'Pending', value: applicants.pending, color: 'var(--viz-warning)' },
+    { label: 'Rejected', value: applicants.rejected, color: 'var(--viz-critical)' },
+    { label: 'Other (draft/incomplete)', value: applicants.other, color: 'var(--viz-muted)' },
+  ]);
+  renderDonut('donut-shuls', [
+    { label: 'Approved', value: shuls.approved, color: 'var(--viz-good)' },
+    { label: 'Pending', value: shuls.pending, color: 'var(--viz-warning)' },
+    { label: 'Rejected', value: shuls.rejected, color: 'var(--viz-critical)' },
+  ]);
+  // Card status is a lifecycle stage, not a good/bad state — categorical
+  // slots in fixed order.
+  renderDonut('donut-cards', [
+    { label: 'Unassigned', value: cards.unassigned, color: 'var(--viz-1)' },
+    { label: 'Assigned', value: cards.assigned, color: 'var(--viz-2)' },
+    { label: 'Activated', value: cards.activated, color: 'var(--viz-3)' },
+    { label: 'Deactivated', value: cards.deactivated, color: 'var(--viz-4)' },
+  ]);
+  renderDonut('donut-funds', [
+    { label: 'Spent', value: funds.spent, color: 'var(--viz-2)' },
+    { label: 'Remaining', value: Math.max(0, funds.remaining), color: 'var(--viz-1)' },
+  ]);
+}
+async function loadDailyTrend() {
+  const season_id = qs('#f-season').value;
+  const days = qs('#f-days').value;
+  const params = new URLSearchParams({ days }); if (season_id) params.set('season_id', season_id);
+  const { daily } = await api('/donor-dashboard/daily?' + params.toString());
+  renderDailyBars('bar-daily', daily);
+}
+qs('#f-season').addEventListener('change', () => { loadDonorDashboard(); loadDailyTrend(); });
+qs('#f-days').addEventListener('change', loadDailyTrend);
+populateSeasonFilter('f-season').then(() => { loadDonorDashboard(); loadDailyTrend(); });
+</script>
+</body>
+</html>

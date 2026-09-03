@@ -30,3 +30,23 @@ export function approvedBalance(shulId) {
 export function shulBalances(shulId) {
   return { pending: pendingBalance(shulId), approved: approvedBalance(shulId) };
 }
+
+// Bulk version of shulBalances for a list page (Admin > Shuls) — two GROUP
+// BY queries instead of N per-shul round trips. Same unconditional-SUM
+// reasoning as approvedBalance above applies to both queries here.
+export function shulBalancesForIds(shulIds) {
+  const result = new Map();
+  if (!shulIds.length) return result;
+  const placeholders = shulIds.map(() => '?').join(',');
+  const pendingRows = db.prepare(`SELECT shul_id, COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id IN (${placeholders}) AND status = 'pending_approval' GROUP BY shul_id`).all(...shulIds);
+  const paidRows = db.prepare(`SELECT shul_id, COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id IN (${placeholders}) AND status = 'approved' GROUP BY shul_id`).all(...shulIds);
+  const givenRows = db.prepare(`SELECT shul_id, COALESCE(SUM(base_amount),0) t FROM shul_allocations WHERE shul_id IN (${placeholders}) GROUP BY shul_id`).all(...shulIds);
+  const pendingById = new Map(pendingRows.map(r => [r.shul_id, r.t]));
+  const paidById = new Map(paidRows.map(r => [r.shul_id, r.t]));
+  const givenById = new Map(givenRows.map(r => [r.shul_id, r.t]));
+  for (const id of shulIds) {
+    const paid = paidById.get(id) || 0, given = givenById.get(id) || 0;
+    result.set(id, { pending: pendingById.get(id) || 0, approved: Math.round((paid - given) * 100) / 100 });
+  }
+  return result;
+}

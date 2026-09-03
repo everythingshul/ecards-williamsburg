@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shul Transactions · Kupes Hair Williamsburg</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+</head>
+<body>
+<script src="/js/app.js"></script>
+<script>
+Auth.requireAdmin();
+if (!Auth.can('shul_payments')) { location.href = '/admin/dashboard'; }
+renderShell('/admin/shul-transactions', `
+  <h2>Shul Transactions</h2>
+  <p class="small-muted">Every shul's payments and money given to applicants, in one place — the same actions available from a shul's own Payments tab, across every shul at once.</p>
+  <div class="toolbar">
+    <select id="f-shul"><option value="">All Shuls</option></select>
+    <select id="f-season"><option value="">All Seasons</option></select>
+    <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+  </div>
+  <div class="tabs">
+    <button class="active" id="tab-payments-btn">Payments</button>
+    <button id="tab-allocations-btn">Allocations</button>
+    <button id="tab-requests-btn">Payment Method Requests</button>
+  </div>
+  <div id="panel-payments">
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-top:0">Add Manual Payment</h3>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Shul</label><select id="mp-shul"><option value="">Select a shul…</option></select></div>
+        <div><label style="margin-top:0">Season</label><select id="mp-season"><option value="">Select a season…</option></select></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Method</label><select id="mp-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+        <div><label style="margin-top:0">Amount ($)</label><input id="mp-amount" type="number" min="0.01" step="0.01"></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Date</label><input id="mp-date" type="date"></div>
+        <div><label style="margin-top:0">Time</label><input id="mp-time" type="time"></div>
+      </div>
+      <label style="margin-top:10px">Ref# / Check#</label><input id="mp-ref">
+      <label style="margin-top:10px">Notes</label><textarea id="mp-notes" rows="2"></textarea>
+      <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitManualPayment()">Add Payment</button>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Shul</th><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Ref#</th><th>Entered By</th><th>Date</th><th></th></tr></thead>
+      <tbody id="tbody-payments"><tr><td colspan="10" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div id="panel-allocations" style="display:none">
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-top:0">Give to an Applicant</h3>
+      <p class="small-muted">Draws down the shul's Approved Balance, same as the shul giving it themselves. Check "Admin override" to give money regardless of that shul's current balance (e.g. a special case approved outside the normal flow).</p>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Shul</label><select id="al-shul"><option value="">Select a shul…</option></select></div>
+        <div><label style="margin-top:0">Applicant</label><select id="al-applicant"><option value="">Select a shul first…</option></select></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Amount ($)</label><input id="al-amount" type="number" min="0.01" step="0.01"></div>
+        <div style="display:flex;align-items:flex-end"><div class="checkbox-row"><input type="checkbox" id="al-override"><label style="margin:0">Admin override (ignore balance)</label></div></div>
+      </div>
+      <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitAdminAllocation()">Give</button>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Shul</th><th>Applicant</th><th>Given</th><th>Match</th><th>Total</th><th>By</th><th>Date</th><th></th></tr></thead>
+      <tbody id="tbody-allocations"><tr><td colspan="8" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div id="panel-requests" style="display:none">
+    <p class="small-muted">A shul asking for a payment method other than online card payment (Settings > Notify on Payment Method Requests controls who gets emailed when one comes in).</p>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Shul</th><th>Requested Method</th><th>Message</th><th>Date</th></tr></thead>
+      <tbody id="tbody-requests"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+`);
+
+const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other', stripe_card: 'Card' };
+const state = { shul_id: '', season_id: '', status: '' };
+let activeTab = 'payments';
+
+function currentFilterParams() {
+  const p = {};
+  if (state.shul_id) p.shul_id = state.shul_id;
+  if (state.season_id) p.season_id = state.season_id;
+  if (activeTab === 'payments' && state.status) p.status = state.status;
+  return new URLSearchParams(p).toString();
+}
+
+async function loadPayments() {
+  const { payments } = await api('/shul-payments?' + currentFilterParams());
+  qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => `<tr>
+      <td>${esc(p.shul_name||'')}</td>
+      <td>${MANUAL_METHOD_LABEL[p.method] || p.method}</td>
+      <td>${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${fmtMoney(p.net_amount)}</td>
+      <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
+      <td>${esc(p.manual_ref||'')}</td>
+      <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
+      <td>${fmtDateTime(p.created_at)}</td>
+      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button>` : ''}</td>
+    </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No payments match these filters.</td></tr>';
+}
+window.approvePayment = async (id) => {
+  try { await api(`/shul-payments/${id}/approve`, { method: 'POST' }); toast('Approved'); loadPayments(); } catch (err) { toast(err.message, true); }
+};
+window.rejectPayment = async (id) => {
+  const reason = prompt('Reason for rejecting this payment (optional):') || '';
+  try { await api(`/shul-payments/${id}/reject`, { method: 'POST', body: { reason } }); toast('Rejected'); loadPayments(); } catch (err) { toast(err.message, true); }
+};
+window.submitManualPayment = async () => {
+  const shul_id = qs('#mp-shul').value, season_id = qs('#mp-season').value;
+  if (!shul_id) return toast('Select a shul', true);
+  if (!season_id) return toast('Select a season', true);
+  const body = {
+    shul_id, season_id, method: qs('#mp-method').value, amount: +qs('#mp-amount').value,
+    manual_date: qs('#mp-date').value, manual_time: qs('#mp-time').value, manual_ref: qs('#mp-ref').value, notes: qs('#mp-notes').value,
+  };
+  try {
+    await api('/shul-payments/manual', { method: 'POST', body });
+    toast('Payment added');
+    qs('#mp-amount').value = ''; qs('#mp-date').value = ''; qs('#mp-time').value = ''; qs('#mp-ref').value = ''; qs('#mp-notes').value = '';
+    loadPayments();
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadAllocations() {
+  const { allocations } = await api('/shul-payments/allocations?' + currentFilterParams());
+  const active = allocations.filter(a => !a.reversed_at);
+  qs('#tbody-allocations').innerHTML = active.length ? active.map(a => `<tr>
+      <td>${esc(a.shul_name||'')}</td>
+      <td>${esc(a.first_name||'')} ${esc(a.last_name||'')}${a.is_admin_override ? ' ' + badge('override','pending') : ''}</td>
+      <td>${fmtMoney(a.base_amount)}</td><td>${fmtMoney(a.match_amount)}</td><td>${fmtMoney(a.total_amount)}</td>
+      <td>${esc(a.created_by_first||'')} ${esc(a.created_by_last||'')}</td>
+      <td>${fmtDateTime(a.created_at)}</td>
+      <td><button class="btn btn-outline btn-sm" onclick="undoAllocation('${a.id}')">Undo</button></td>
+    </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No allocations match these filters.</td></tr>';
+}
+window.undoAllocation = async (id) => {
+  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance.')) return;
+  try { await api(`/shul-payments/allocations/${id}/reverse`, { method: 'POST' }); toast('Reversed'); loadAllocations(); } catch (err) { toast(err.message, true); }
+};
+async function loadApplicantsForShul(shulId) {
+  const sel = qs('#al-applicant');
+  if (!shulId) { sel.innerHTML = '<option value="">Select a shul first…</option>'; return; }
+  sel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const { applicants } = await api(`/applicants?shul_id=${encodeURIComponent(shulId)}&status=approved&pageSize=500`);
+    const approved = applicants.filter(a => a.approval_status === 'approved');
+    sel.innerHTML = approved.length
+      ? '<option value="">Select an applicant…</option>' + approved.map(a => `<option value="${a.id}">${esc(a.first_name)} ${esc(a.last_name)}</option>`).join('')
+      : '<option value="">No approved applicants for this shul</option>';
+  } catch { sel.innerHTML = '<option value="">Could not load applicants</option>'; }
+}
+qs('#al-shul').addEventListener('change', () => loadApplicantsForShul(qs('#al-shul').value));
+window.submitAdminAllocation = async () => {
+  const shul_id = qs('#al-shul').value, applicant_id = qs('#al-applicant').value, amount = +qs('#al-amount').value;
+  if (!shul_id) return toast('Select a shul', true);
+  if (!applicant_id) return toast('Select an applicant', true);
+  if (!(amount > 0)) return toast('Enter a valid amount', true);
+  try {
+    await api('/shul-payments/allocate', { method: 'POST', body: { shul_id, applicant_id, amount, is_admin_override: qs('#al-override').checked } });
+    toast('Given');
+    qs('#al-amount').value = ''; qs('#al-override').checked = false;
+    loadAllocations();
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadRequests() {
+  const { requests } = await api('/shul-payments/method-requests');
+  qs('#tbody-requests').innerHTML = requests.length ? requests.map(r => `<tr>
+      <td>${esc(r.shul_name||'')}</td><td>${esc(r.requested_method||'')}</td><td>${esc(r.message||'')}</td><td>${fmtDateTime(r.created_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty-state">No requests yet.</td></tr>';
+}
+
+const TABS = ['payments', 'allocations', 'requests'];
+const TAB_LOADERS = { payments: loadPayments, allocations: loadAllocations, requests: loadRequests };
+function switchTab(t) {
+  activeTab = t;
+  TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
+  qs('#f-status').style.display = t === 'payments' ? '' : 'none';
+  TAB_LOADERS[t]();
+}
+TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switchTab(t)));
+
+qs('#f-shul').addEventListener('change', () => { state.shul_id = qs('#f-shul').value; TAB_LOADERS[activeTab](); });
+qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; populateShulFilter('f-shul', state.season_id); TAB_LOADERS[activeTab](); });
+qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; TAB_LOADERS[activeTab](); });
+
+populateSeasonFilter('f-season').then(activeId => {
+  state.season_id = activeId;
+  populateShulFilter('f-shul', activeId);
+  loadPayments();
+});
+// The manual-payment / allocate forms' own shul dropdowns are deliberately
+// NOT scoped to the season filter above (an admin might be entering a
+// payment for a season other than whatever's currently being browsed), so
+// they get their own unscoped shul list plus a season picker of their own.
+// populateShulFilter() labels its blank option "All Shuls" (right for a list
+// filter, wrong for a required single pick here), so these two are filled
+// directly instead.
+async function populateShulPicker(selectId) {
+  try {
+    const { shuls } = await api('/shuls/all-list');
+    qs('#' + selectId).innerHTML = '<option value="">Select a shul…</option>' + shuls.map(s => `<option value="${s.id}">${esc(s.name_en)}</option>`).join('');
+  } catch { /* leave the placeholder if this fails to load */ }
+}
+populateShulPicker('mp-shul');
+populateSeasonFilter('mp-season');
+populateShulPicker('al-shul');
+loadRequests();
+</script>
+</body>
+</html>

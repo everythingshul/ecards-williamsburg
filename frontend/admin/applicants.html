@@ -80,10 +80,18 @@ const APPLICANT_COLUMNS = [
   { key: 'home_for_yomtov', label: 'Home Yom Tov', render: a => a.home_for_yomtov ? 'Yes' : 'No' },
   { key: 'approval_status', label: 'Status', sort: 'approval_status', render: a => badge(a.approval_status, a.approval_status) },
   { key: 'card_amount', label: 'Card $', sort: 'card_amount', render: a => a.card_amount != null ? fmtMoney(a.card_amount) : '' },
+  // loaded/spent/remaining are the REAL gift-card balance (see
+  // services/applicantBalance.js), merge-group aware — distinct from
+  // card_amount above, which is just the intended/approved load amount.
+  // Absent entirely for a shul-portal viewer (never sent by the API), so
+  // these render blank rather than a misleading $0 in that case.
+  { key: 'loaded', label: 'Loaded', render: a => a.loaded != null ? fmtMoney(a.loaded) : '' },
+  { key: 'spent', label: 'Spent', render: a => a.spent != null ? fmtMoney(a.spent) : '' },
+  { key: 'remaining', label: 'Remaining', render: a => a.remaining != null ? fmtMoney(a.remaining) : '' },
   { key: 'comments', label: 'Comments', render: a => esc(a.comments||'') },
   { key: 'created_at', label: 'Submitted', sort: 'created_at', render: a => fmtDate(a.created_at) },
 ];
-const DEFAULT_APPLICANT_COLUMNS = ['external_id','name','shul','marital_status','contact','num_children','home_for_yomtov','approval_status','card_amount','created_at'];
+const DEFAULT_APPLICANT_COLUMNS = ['external_id','name','shul','marital_status','contact','num_children','home_for_yomtov','approval_status','card_amount','loaded','spent','remaining','created_at'];
 let activeColumns = DEFAULT_APPLICANT_COLUMNS;
 
 function renderThead() {
@@ -226,7 +234,7 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openApplicant(id) {
   try {
-    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution } = await api(`/applicants/${id}`);
+    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution, balance } = await api(`/applicants/${id}`);
     const body = `
       <div class="tabs" id="atabs"><button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button><button data-t="cards">Card (${cards.length})</button><button data-t="documents">Documents</button><button data-t="messages">Messages</button><button data-t="history">History</button></div>
       <div id="atab-info">
@@ -288,6 +296,11 @@ async function openApplicant(id) {
         <div style="margin-top:14px">${notes.map(n => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div>${esc(n.note)}</div><div class="small-muted">${esc(n.first_name||'')} ${esc(n.last_name||'')} · ${fmtDateTime(n.created_at)}</div></div>`).join('') || '<p class="small-muted">No notes yet.</p>'}</div>
       </div>
       <div id="atab-cards" style="display:none">
+        ${balance ? `<div class="stat-grid" style="margin-bottom:14px">
+          <div class="stat-tile"><div class="num">${fmtMoney(balance.loaded)}</div><div class="label">Loaded</div></div>
+          <div class="stat-tile"><div class="num">${fmtMoney(balance.spent)}</div><div class="label">Spent</div></div>
+          <div class="stat-tile"><div class="num">${fmtMoney(balance.remaining)}</div><div class="label">Remaining</div></div>
+        </div>${mergeGroup && mergeGroup.length ? `<p class="small-muted" style="margin:-8px 0 14px">Combined balance across every merged record — one shared gift card account.</p>` : ''}` : ''}
         ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code></p>` : ''}
         ${cards.length ? cards.map(c => `<div class="card" style="margin-bottom:10px"><div class="flex-between"><strong>${esc(c.card_number_masked||'Unassigned')}</strong>${badge(c.status,c.status)}</div><div class="small-muted">Amount: ${fmtMoney(c.amount)} · Activated: ${c.activated_at?fmtDateTime(c.activated_at):'not yet'}</div><a class="small-muted" href="/admin/cards?card=${c.id}">View transactions</a></div>`).join('') : `<p class="small-muted">No card assigned yet.</p>${a.approval_status==='approved' ? `<button class="btn btn-sm btn-primary" onclick="assignCard('${id}')">Assign Gift Card</button>` : '<p class="small-muted">Applicant must be approved first.</p>'}`}
       </div>
@@ -645,8 +658,14 @@ window.submitMerge = async (flagId) => {
   // backend leaves everyone else, and their flags, exactly as they are.
   const memberIds = mergeGroupCache.members.filter(m => !dismissedMemberIds.has(m.id)).map(m => m.id);
   try {
-    await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds } });
-    toast('Merged'); afterDuplicateResolved();
+    const r = await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds } });
+    // More than one member already had its own real disccardpromos account
+    // (each was approved separately before turning out to be the same
+    // person) — there's no confirmed API to merge two live gift-card
+    // accounts, so this needs a human to reconcile manually rather than
+    // silently picking one and orphaning the other's balance.
+    toast(r.accountConflict ? 'Merged — but more than one of these records already had its own gift card account. Reconcile those manually; neither was changed.' : 'Merged', !!r.accountConflict);
+    afterDuplicateResolved();
   } catch (err) { toast(err.message, true); }
 };
 

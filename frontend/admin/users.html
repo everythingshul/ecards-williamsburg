@@ -14,9 +14,10 @@
 Auth.requireAdmin();
 // Kept in sync with PERMISSION_RESOURCES (src/middleware/permissions.js) —
 // every resource that can be gated at all gets a row here.
-const RESOURCES = ['dashboard','shuls','applicants','cards','stores','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit'];
+const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit'];
 const RESOURCE_LABELS = {
-  dashboard: 'Dashboard', shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
+  dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
+  shul_payments: 'Shul Transactions & Allocations',
   seasons: 'Seasons', forms: 'Form Builder', tasks: 'Tasks', emails: 'Email Center', sms: 'SMS Center',
   updates: 'Updates', documents: 'E-Signatures', site_content: 'Site Content', contract_settings: 'Documents',
   users: 'Users & Permissions', settings: 'Settings', audit: 'Recent Actions',

@@ -24,7 +24,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // server-side gate — a resource missing from this list, or a route that
 // only checks requireAdmin instead of requirePermission(), is a section no
 // per-user permission can ever actually restrict, no matter what the UI shows.
-export const PERMISSION_RESOURCES = ['dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit', 'shul_payments'];
+export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit', 'shul_payments'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource. Recent Actions is a full

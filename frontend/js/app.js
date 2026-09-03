@@ -237,10 +237,12 @@ function applyOrgTheme(org) {
 
 const NAV_ITEMS = [
   { href: '/admin/dashboard', label: 'Dashboard', icon: '&#9670;', resource: 'dashboard' },
+  { href: '/admin/donor-dashboard', label: "Donor's Dash", icon: '&#9670;', resource: 'donor_dashboard' },
   { href: '/admin/analytics', label: 'Analytics', icon: '&#9670;', resource: 'dashboard' },
   { href: '/admin/shuls', label: 'Shuls', icon: '&#9670;', resource: 'shuls' },
   { href: '/admin/applicants', label: 'Applicants', icon: '&#9670;', resource: 'applicants' },
   { href: '/admin/cards', label: 'Cards & Transactions', icon: '&#9670;', resource: 'cards' },
+  { href: '/admin/shul-transactions', label: 'Shul Transactions', icon: '&#9670;', resource: 'shul_payments' },
   { href: '/admin/stores', label: 'Stores', icon: '&#9670;', resource: 'stores' },
   { href: '/admin/tasks', label: 'Tasks', icon: '&#9670;', resource: 'tasks' },
   { href: '/admin/forms', label: 'Form Builder', icon: '&#9670;', resource: 'forms' },

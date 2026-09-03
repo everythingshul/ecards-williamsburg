@@ -2,7 +2,8 @@ import { Router } from 'express';
 import multer from 'multer';
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth, requireAdmin } from '../middleware/auth.js';
-import { requirePermission, redact } from '../middleware/permissions.js';
+import { requirePermission, redact, getPermission } from '../middleware/permissions.js';
+import { shulBalancesForIds } from '../services/shulBalance.js';
 import { detectAndFlag, resolveFlag, getShulMergeGroupIds, mergeShuls } from '../services/duplicates.js';
 import { generateContractPdf, stampSignatureFields, getSignatureFields, resolveSignatureValues } from '../services/pdf.js';
 import { sendMailChecked, renderSystemTemplate, notifyNewSignup, notifyDocSigned, renderSignupDetails } from '../services/mail.js';
@@ -265,6 +266,12 @@ router.get('/', (req, res) => {
   const total = db.prepare(`SELECT COUNT(*) c FROM shuls ${where}`).get(...params).c;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
   const rows = db.prepare(`SELECT * FROM shuls ${where} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...params, +pageSize, offset);
+  // Balance columns are a distinct financial resource (shul_payments) from
+  // 'shuls' itself — only attached when this viewer can actually see them,
+  // so a staff user with shuls-view but no shul_payments-view never gets
+  // money figures added to a list they're otherwise allowed to browse.
+  const canViewPayments = getPermission(req.user, 'shul_payments').can_view;
+  const balances = canViewPayments ? shulBalancesForIds(rows.map(s => s.id)) : null;
   const withCounts = rows.map(s => ({
     ...s,
     // 'incomplete' (carried forward from last season, not yet re-enrolled)
@@ -272,6 +279,7 @@ router.get('/', (req, res) => {
     // shul's applicant count — every other status (including 'draft',
     // uploaded-but-not-yet-submitted) still counts.
     applicant_count: db.prepare(`SELECT COUNT(*) c FROM applicants WHERE shul_id = ? AND approval_status != 'incomplete'`).get(s.id).c,
+    ...(canViewPayments ? (balances.get(s.id) || { pending: 0, approved: 0 }) : {}),
   }));
   res.json({ shuls: redact(withCounts, req.permission.hidden_fields), total, page: +page, pageSize: +pageSize });
 });
@@ -312,11 +320,14 @@ router.get('/export', requirePermission('shuls', 'can_export'), (req, res) => {
     db.prepare(`SELECT shul_id, approval_status, COUNT(*) c FROM applicants WHERE shul_id IN (${placeholders}) AND approval_status IN ('approved','pending','rejected') GROUP BY shul_id, approval_status`)
       .all(...ids).forEach(r => { (counts[r.shul_id] ||= {})[r.approval_status] = r.c; });
   }
+  const canViewPayments = getPermission(req.user, 'shul_payments').can_view;
+  const balances = canViewPayments ? shulBalancesForIds(rows.map(r => r.id)) : null;
   const withCounts = rows.map(r => ({
     ...r,
     applicants_approved: counts[r.id]?.approved || 0,
     applicants_pending: counts[r.id]?.pending || 0,
     applicants_rejected: counts[r.id]?.rejected || 0,
+    ...(canViewPayments ? (balances.get(r.id) || { pending: 0, approved: 0 }) : {}),
   }));
   sendXlsx(res, `shuls-${Date.now()}.xlsx`, redact(withCounts, req.permission.hidden_fields));
 });

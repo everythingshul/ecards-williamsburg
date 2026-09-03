@@ -93,9 +93,16 @@ const SHUL_COLUMNS = [
   { key: 'gabai_email', label: 'Gabai Email', render: s => esc(s.gabai_email||'') },
   { key: 'status', label: 'Status', sort: 'status', render: statusCell },
   { key: 'applicant_count', label: 'Applicants', render: s => s.applicant_count },
+  // Pending/Approved balance (see services/shulBalance.js) — money this shul
+  // has paid in that isn't yet approved, and money that's approved and
+  // available to give, minus whatever they've already allocated. Absent
+  // entirely for a viewer without shul_payments view access, so these
+  // render blank rather than a misleading $0 in that case.
+  { key: 'pending_balance', label: 'Pending Balance', render: s => s.pending != null ? fmtMoney(s.pending) : '' },
+  { key: 'approved_balance', label: 'Approved Balance', render: s => s.approved != null ? fmtMoney(s.approved) : '' },
   { key: 'created_at', label: 'Submitted', sort: 'created_at', render: s => fmtDate(s.created_at) },
 ];
-const DEFAULT_SHUL_COLUMNS = ['shul_number','name','state_city','rav','gabai','status','applicant_count','created_at'];
+const DEFAULT_SHUL_COLUMNS = ['shul_number','name','state_city','rav','gabai','status','applicant_count','pending_balance','approved_balance','created_at'];
 let activeColumns = DEFAULT_SHUL_COLUMNS;
 
 function renderThead() {

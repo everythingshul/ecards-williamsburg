@@ -17,6 +17,7 @@ import { validateBySchema, validateRowsBySchema, shulInfoErrors, getEffectiveSch
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteApplicant, captureApplicantSnapshot } from '../utils/entityDelete.js';
 import { lockApplicantCards } from '../services/cardSync.js';
+import { getApplicantBalances } from '../services/applicantBalance.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -256,7 +257,14 @@ router.get('/', (req, res) => {
   const total = db.prepare(`SELECT COUNT(*) c FROM applicants a ${where}`).get(...params).c;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
   const rows = db.prepare(`SELECT a.*, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a LEFT JOIN shuls s ON s.id = a.shul_id LEFT JOIN shuls ps ON ps.id = a.previous_shul_id ${where} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...params, +pageSize, offset);
-  res.json({ applicants: maskForShul(redact(rows, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
+  // Real gift-card balance (loaded/spent/remaining), merge-group aware —
+  // admin-only (see services/applicantBalance.js); a shul-portal viewer
+  // never gets these fields at all, not even zeroed out.
+  const withBalance = req.user.role === 'shul' ? rows : (() => {
+    const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
+    return rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
+  })();
+  res.json({ applicants: maskForShul(redact(withBalance, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
 });
 
 // Full-detail CSV export — every field, no pagination, respects the same
@@ -283,7 +291,9 @@ router.get('/export', requirePermission('applicants', 'can_export'), (req, res) 
     params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, likeDigits, likeDigits, likeDigits);
   }
   const rows = db.prepare(`SELECT a.*, s.name_en as shul_name FROM applicants a LEFT JOIN shuls s ON s.id = a.shul_id ${where} ORDER BY a.created_at DESC`).all(...params);
-  sendXlsx(res, `applicants-${Date.now()}.xlsx`, redact(rows, req.permission.hidden_fields));
+  const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
+  const withBalance = rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
+  sendXlsx(res, `applicants-${Date.now()}.xlsx`, redact(withBalance, req.permission.hidden_fields));
 });
 
 // Shul-portal export: the shul's own pending/approved applicants, in the
@@ -320,7 +330,17 @@ router.get('/:id', (req, res) => {
   // reasons directly, so a shul-portal viewer gets neither, on top of the
   // approval_status/duplicate_status masking below.
   const notes = req.user.role === 'shul' ? [] : db.prepare('SELECT n.*, u.first_name, u.last_name FROM applicant_notes n LEFT JOIN users u ON u.id=n.user_id WHERE applicant_id = ? ORDER BY n.created_at DESC').all(applicant.id);
-  const cards = db.prepare('SELECT * FROM cards WHERE applicant_id = ? ORDER BY created_at DESC').all(applicant.id);
+  const isAdminViewer = req.user.role !== 'shul';
+  // Merge-group aware for an admin (see services/applicantBalance.js and
+  // duplicates.js's mergeApplicants) — every member of a merge group shares
+  // exactly one real disccardpromos account/card, so an admin should see
+  // every card the group actually has, not just whatever's attached to this
+  // one row's own applicant_id. A shul-role viewer must only ever see their
+  // own shul's own applicant record (never learn about other members at
+  // all), so their query stays exactly as narrowly scoped as before.
+  const cardApplicantIds = isAdminViewer ? getMergeGroupIds(req.user.org_id, [applicant.id]) : [applicant.id];
+  const cards = db.prepare(`SELECT * FROM cards WHERE applicant_id IN (${cardApplicantIds.map(() => '?').join(',')}) ORDER BY created_at DESC`).all(...cardApplicantIds);
+  const balance = isAdminViewer ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 }) : null;
   const flags = req.user.role === 'shul' ? [] : db.prepare(`SELECT * FROM duplicate_flags WHERE entity_type='applicant' AND (entity_id=? OR matched_entity_id=?) AND status='open'`).all(applicant.id, applicant.id);
   // Every other record that's this same real person — confirmed (already
   // merged, see services/duplicates.js's mergeApplicants) OR still just an
@@ -340,7 +360,7 @@ router.get('/:id', (req, res) => {
     }
   }
   const requiresShulContribution = !!db.prepare('SELECT require_shul_contribution FROM seasons WHERE id = ?').get(applicant.season_id)?.require_shul_contribution;
-  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, requiresShulContribution });
+  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, requiresShulContribution, balance });
 });
 
 // Who edited this record and when — a shul viewing their own applicant
