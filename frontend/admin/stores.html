@@ -23,6 +23,7 @@ renderShell('/admin/stores', `
       <option value="status-inactive">Set to Inactive</option>
       <option value="status-rejected">Reject</option>
       <option value="invite">Invite to Portal</option>
+      <option value="approve">Approve</option>
       <option value="carry-forward">Carry Forward to Season…</option>
       <option value="email">Email</option>
       <option value="sms">SMS</option>
@@ -31,8 +32,8 @@ renderShell('/admin/stores', `
     <button class="btn btn-sm btn-primary" id="btn-mass-apply" disabled>Apply to Selected (0)</button>
   </div>
   <div class="card" style="padding:0;overflow-x:auto">
-    <table><thead><tr><th style="width:34px"><input type="checkbox" id="chk-all"></th><th>Store</th><th>POS System</th><th>Discount</th><th>Manager</th><th>Owner</th><th>Setup Status</th><th>Onboarding</th><th>Live Spend</th><th></th></tr></thead>
-    <tbody id="tbody"><tr><td colspan="10" class="empty-state">Loading…</td></tr></tbody></table>
+    <table><thead><tr><th style="width:34px"><input type="checkbox" id="chk-all"></th><th>Store</th><th>POS System</th><th>Discount</th><th>Manager</th><th>Owner</th><th>Setup Status</th><th>Onboarding</th><th>Live Spend</th><th>Disccard Setup Comments</th><th>Disccard Complete</th><th></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="12" class="empty-state">Loading…</td></tr></tbody></table>
   </div>
 `);
 
@@ -53,8 +54,10 @@ async function load() {
         <td>${badge(s.setup_status,s.setup_status)}${s.has_provider_account ? ' <span class="small-muted">(existing account)</span>' : ''}</td>
         <td>${(s.onboarding_step||0) >= 3 ? badge('complete','active') : (s.portal_user_id ? `Step ${s.onboarding_step||0} of 3` : 'Not invited')}</td>
         <td><strong>${fmtMoney(s.total_purchases)}</strong>${s.total_refunds ? `<br><span class="small-muted">Refunds: ${fmtMoney(s.total_refunds)}</span>` : ''}<br><span class="small-muted">${s.txn_count} txn${s.txn_count===1?'':'s'}</span></td>
+        <td onclick="event.stopPropagation()"><input type="text" class="inline-comments" value="${esc(s.disccard_setup_comments||'')}" data-orig="${esc(s.disccard_setup_comments||'')}" placeholder="—" onblur="saveStoreDisccardComments('${s.id}', this)" onkeydown="if(event.key==='Enter') this.blur()"></td>
+        <td onclick="event.stopPropagation()"><input type="checkbox" ${s.disccard_setup_complete ? 'checked' : ''} onchange="saveStoreDisccardComplete('${s.id}', this.checked)"></td>
         <td><button class="btn btn-sm btn-outline" onclick="openStore('${s.id}')">Manage</button></td>
-      </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No stores yet.</td></tr>';
+      </tr>`).join('') : '<tr><td colspan="12" class="empty-state">No stores yet.</td></tr>';
     qsa('.row-chk').forEach(c => c.addEventListener('change', onCheck));
   } catch (err) { toast(err.message, true); }
 }
@@ -65,6 +68,21 @@ function onCheck(e) {
   qs('#btn-mass-apply').textContent = `Apply to Selected (${selected.size})`;
   qs('#btn-mass-apply').disabled = selected.size === 0;
 }
+
+// Inline save for the Disccard Setup Comments column — same pattern as the
+// Shuls list's Seasonal Comments (skip the round-trip if unchanged, revert
+// on error).
+window.saveStoreDisccardComments = async (id, input) => {
+  if (input.value === input.dataset.orig) return;
+  try {
+    await api(`/stores/${id}`, { method: 'PUT', body: { disccard_setup_comments: input.value } });
+    input.dataset.orig = input.value;
+  } catch (err) { toast(err.message, true); input.value = input.dataset.orig; }
+};
+window.saveStoreDisccardComplete = async (id, checked) => {
+  try { await api(`/stores/${id}`, { method: 'PUT', body: { disccard_setup_complete: checked ? 1 : 0 } }); }
+  catch (err) { toast(err.message, true); }
+};
 qs('#f-source').addEventListener('change', () => { state.source = qs('#f-source').value; load(); });
 qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; load(); }, 350));
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; load(); });
@@ -85,6 +103,11 @@ const MASS_ACTIONS = {
     confirm: n => `Invite ${n} selected store(s) to their portal? Each uses their owner or manager email on file.`,
     run: (ids) => api('/stores/mass-invite', { method: 'POST', body: { ids } }),
     summarize: r => { let msg = `Invited ${r.invited}, skipped ${r.skipped} (no email on file, or agreement not yet sent)`; if (r.emailErrors) msg += ` — ${r.emailErrors} invite email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
+  },
+  approve: {
+    confirm: n => `Approve ${n} selected store(s)? Each is invited to their portal (same as Invite) and moved to Active status.`,
+    run: (ids) => api('/stores/mass-approve', { method: 'POST', body: { ids } }),
+    summarize: r => { let msg = `Approved ${r.approved}, skipped ${r.skipped} (no email on file, or agreement not yet sent)`; if (r.emailErrors) msg += ` — ${r.emailErrors} welcome email(s) failed to send`; return { msg, isError: !!r.emailErrors }; },
   },
   'carry-forward': {
     confirm: null,
@@ -122,9 +145,19 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openStore(id) {
   try {
-    const [{ store: s, transactionTotals }, { bills: submittedBills }] = await Promise.all([
+    const [{ store: s, transactionTotals, latestAgreement }, { bills: submittedBills }] = await Promise.all([
       api(`/stores/${id}`), api(`/stores/${id}/bill-submissions`),
     ]);
+    // At-a-glance signed/not-signed status, same info the Documents tab
+    // shows per-row but surfaced right here so it doesn't require switching
+    // tabs — mirrors shuls' dedicated Contract tab summary line. The
+    // Documents tab (with Resend/View/Retract) is still the place for
+    // anything beyond a first send.
+    const agreementLine = !latestAgreement
+      ? `<p class="small-muted"><strong>Agreement:</strong> Not sent yet — <button type="button" class="btn btn-sm btn-outline" onclick="sendStoreContractQuick('${id}')">Send Contract</button></p>`
+      : latestAgreement.status === 'signed'
+        ? `<p class="small-muted"><strong>Agreement:</strong> ${badge('signed','active')} Signed ${fmtDateTime(latestAgreement.signed_at)} by ${esc(latestAgreement.signer_name||'')}</p>`
+        : `<p class="small-muted"><strong>Agreement:</strong> ${badge(latestAgreement.status,'pending')} Sent ${fmtDateTime(latestAgreement.sent_at)}, awaiting signature — <button type="button" class="btn btn-sm btn-outline" onclick="sendStoreContractQuick('${id}')">Resend</button></p>`;
     const body = `
       <div class="tabs" id="stabs"><button class="active" data-t="info">Info</button><button data-t="billing">Billing (${submittedBills.length})</button><button data-t="documents">Documents</button><button data-t="history">History</button></div>
       <div id="stab-info">
@@ -133,6 +166,7 @@ async function openStore(id) {
           <div><label>Setup Status</label><select id="e-status"><option ${s.setup_status==='pending'?'selected':''}>pending</option><option ${s.setup_status==='in_progress'?'selected':''}>in_progress</option><option ${s.setup_status==='active'?'selected':''}>active</option><option ${s.setup_status==='inactive'?'selected':''}>inactive</option><option ${s.setup_status==='rejected'?'selected':''}>rejected</option></select></div>
         </div>
         <p class="small-muted">Source: ${s.source === 'application' ? 'Self-applied' : 'Added by admin'} · Onboarding: ${(s.onboarding_step||0) >= 3 ? 'Complete' : (s.portal_user_id ? `Step ${s.onboarding_step||0} of 3` : 'Not yet invited to portal')}</p>
+        ${agreementLine}
         <label>Address</label><input id="e-address" value="${esc(s.address||'')}">
         <div class="grid-2"><div><label>City</label><input id="e-city" value="${esc(s.city||'')}"></div><div><label>State</label><input id="e-state" value="${esc(s.state||'')}"></div></div>
         <label>Zip</label><input id="e-zip" value="${esc(s.zip||'')}" style="max-width:160px">
@@ -178,7 +212,7 @@ async function openStore(id) {
       <div id="stab-history" style="display:none">
         <div id="stab-history-list"><p class="small-muted">Loading…</p></div>
       </div>`;
-    const footer = `<button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Store', '/stores/${id}/other-seasons', 'openStore')">View Other Seasons</button><button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button><button class="btn btn-outline btn-sm" onclick="inviteStore('${id}')">Invite to Portal</button>${s.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${s.portal_user_id}','${esc(s.name).replace(/'/g,"\\'")}')">Set Password</button>` : ''}${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStore('${id}')">Delete Permanently</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveStore('${id}')">Save</button>`;
+    const footer = `<button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Store', '/stores/${id}/other-seasons', 'openStore')">View Other Seasons</button><button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button><button class="btn btn-outline btn-sm" onclick="inviteStore('${id}')">Invite to Portal</button>${s.setup_status !== 'active' ? `<button class="btn btn-primary btn-sm" onclick="approveStore('${id}')">Approve</button>` : ''}${s.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${s.portal_user_id}','${esc(s.name).replace(/'/g,"\\'")}')">Set Password</button>` : ''}${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStore('${id}')">Delete Permanently</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveStore('${id}')">Save</button>`;
     carryForwardContext = { id, name: s.name };
     openModal(s.name, body, footer);
     qsa('#stabs button').forEach(b => b.addEventListener('click', () => {
@@ -213,6 +247,37 @@ window.inviteStore = async (id) => {
     }
     toast(err.message, true);
   }
+};
+// Approve: same one-click "yes, accepted" action shuls have — creates/
+// reuses the portal login (same welcome email Invite sends) and moves
+// setup_status to active in one step. Same contract-not-sent bypass
+// confirm flow as inviteStore above, since it's gated the same way.
+window.approveStore = async (id) => {
+  try {
+    const r = await api(`/stores/${id}/approve`, { method: 'POST' });
+    toast(r.emailError ? `Approved, but welcome email failed: ${r.emailError}` : 'Approved', !!r.emailError);
+    closeModal(); load();
+  } catch (err) {
+    if (err.data?.code === 'CONTRACT_NOT_SENT' && confirm(`${err.message}\n\nClick OK to approve anyway without an agreement on file (bypass).`)) {
+      try {
+        const r = await api(`/stores/${id}/approve`, { method: 'POST', body: { bypass_contract: true } });
+        toast(r.emailError ? `Approved, but welcome email failed: ${r.emailError}` : 'Approved', !!r.emailError);
+        closeModal(); load();
+      } catch (err2) { toast(err2.message, true); }
+      return;
+    }
+    toast(err.message, true);
+  }
+};
+// One-click "Send Contract" from the Info tab's agreement status line —
+// same underlying route the Documents tab's per-document Send button
+// hits, just without needing to first type a title and click Generate.
+window.sendStoreContractQuick = async (id) => {
+  try {
+    const r = await api(`/stores/${id}/send-contract`, { method: 'POST' });
+    toast(r.emailError ? `Sent, but email failed: ${r.emailError}` : 'Contract sent', !!r.emailError);
+    openStore(id);
+  } catch (err) { toast(err.message, true); }
 };
 window.deleteStore = async (id) => {
   if (!confirm('Permanently delete this store? This removes the store and its billing records completely and cannot be undone.')) return;

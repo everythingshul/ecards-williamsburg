@@ -5,14 +5,14 @@ import { auth, requireAdmin } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
 import { detectAndFlag, resolveFlag, getShulMergeGroupIds, mergeShuls } from '../services/duplicates.js';
 import { generateContractPdf, stampSignatureFields, getSignatureFields, resolveSignatureValues } from '../services/pdf.js';
-import { sendMailChecked, renderSystemTemplate, notifyNewSignup, renderSignupDetails } from '../services/mail.js';
+import { sendMailChecked, renderSystemTemplate, notifyNewSignup, notifyDocSigned, renderSignupDetails } from '../services/mail.js';
 import { sendSmsChecked } from '../services/sms.js';
 import { parseSpreadsheet, buildXlsxTemplate, SHUL_IMPORT_COLUMNS } from '../services/importer.js';
 import { sendXlsx } from '../services/xlsx.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { normalizeEmail } from '../utils/email.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { validateBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/formValidation.js';
+import { validateBySchema, shulInfoErrors, getEffectiveSchema, getEffectiveImportSchema, getTemplateExclusions } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteShul, captureShulSnapshot } from '../utils/entityDelete.js';
 import { generateApplicantExternalId, generateShulNumber } from '../utils/externalId.js';
@@ -209,7 +209,7 @@ router.post('/contract/:token/sign', async (req, res) => {
   db.prepare(`UPDATE shuls SET status='contract_signed', updated_at=datetime('now') WHERE id=?`).run(contract.shul_id);
   const shul = db.prepare('SELECT * FROM shuls WHERE id = ?').get(contract.shul_id);
   logAudit(shul.org_id, null, 'esign', 'contract', contract.id, null, { signer_name, signedAt }, req.ip);
-  await notifyNewSignup(shul.org_id, 'notify_doc_signed_email', 'docSigned', {
+  await notifyDocSigned(shul.org_id, 'shul', {
     docTitle: 'Shul Contract', entityName: shul.name_en || '', signerName: signer_name, signedAt,
     entityUrl: `${process.env.APP_URL || ''}/admin/shuls?id=${shul.id}`,
   });
@@ -1204,9 +1204,11 @@ router.post('/duplicates/:flagId/merge', requirePermission('shuls', 'can_edit'),
 // should be able to receive the contract if signed up, always email when
 // there's a doc to sign (handled by calling /send-contract per row, or in bulk below).
 router.get('/import/template', requireAdmin, (req, res) => {
+  const excluded = getTemplateExclusions('shul_application');
+  const columns = SHUL_IMPORT_COLUMNS.filter(c => !excluded.has(c));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="shul_import_template.xlsx"');
-  res.send(buildXlsxTemplate(['id', ...SHUL_IMPORT_COLUMNS]));
+  res.send(buildXlsxTemplate(['id', ...columns]));
 });
 
 // Every column this route will write on an UPDATE row, and how to read it
@@ -1261,7 +1263,7 @@ router.post('/import', requirePermission('shuls', 'can_edit'), upload.single('fi
   // shul record is meaningless without at least those.
   const bypassRequired = req.body.bypass_required === 'true' || req.body.bypass_required === true;
   const requiredErrors = bypassRequired ? [] : rows
-    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveSchema('shul_application'), r, { isAdmin: true }) }))
+    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveImportSchema('shul_application'), r, { isAdmin: true }) }))
     .filter(x => x && x.errors.length)
     .map(x => ({ row: x.row, error: x.errors.join('; ') }));
   // A row that named an id but it didn't match anything is a mistake worth

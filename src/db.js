@@ -681,6 +681,13 @@ safeAlter(`ALTER TABLE stores ADD COLUMN discount TEXT`);
 // admin-only `discount` note above: this is what the applying store says
 // they're offering, visible to the store like any other application field.
 safeAlter(`ALTER TABLE stores ADD COLUMN discount_details TEXT`);
+// Disccardpromos account setup — internal, admin-only tracking of getting a
+// store's own disccardpromos merchant account working (separate from
+// has_provider_account, which just records whether they already had one
+// coming in). Not season-specific — a store's disccardpromos setup is a
+// one-time, real-world account that doesn't reset each season.
+safeAlter(`ALTER TABLE stores ADD COLUMN disccard_setup_comments TEXT`);
+safeAlter(`ALTER TABLE stores ADD COLUMN disccard_setup_complete INTEGER DEFAULT 0`);
 // Human-readable 4-digit "Shul ID" (see utils/externalId.js's
 // generateShulNumber) — assigned on every new shul, visible in the admin
 // Shuls list/detail and the shul portal, and what an admin's applicant

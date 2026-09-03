@@ -294,3 +294,20 @@ export async function notifyNewSignup(orgId, settingKey, templateKey, vars) {
     if (emailError) console.error(`[mail] new-signup notification (${templateKey}) to ${to} failed:`, emailError);
   }
 }
+
+// "Notify on Document Signed" is routable per entity type — a shul
+// contract signing and a store agreement signing can go to two different
+// inboxes (same idea as notifyNewSignup's separate shul/store keys above),
+// instead of every signed document in the system funneling into one
+// undifferentiated list. entityType is 'shul' | 'store' | 'applicant' |
+// 'standalone' (see routes/documents.js and routes/shuls.js's own sign
+// routes, the only two callers). Falls back to the generic
+// notify_doc_signed_email when a type-specific key isn't set — an org that
+// only ever configured the single original field keeps working exactly as
+// before, no migration needed.
+export async function notifyDocSigned(orgId, entityType, vars) {
+  const typedKey = `notify_doc_signed_${entityType}_email`;
+  const typedRaw = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = ?`).get(orgId || DEFAULT_ORG_ID, typedKey)?.value;
+  const settingKey = (typedRaw || '').trim() ? typedKey : 'notify_doc_signed_email';
+  await notifyNewSignup(orgId, settingKey, 'docSigned', vars);
+}

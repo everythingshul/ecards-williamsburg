@@ -19,6 +19,48 @@ export function getEffectiveSchema(type) {
   return applyRequiredOverrides(schema, overrides[type]);
 }
 
+// Settings > Import Templates: which built-in fields the admin has chosen to
+// leave OFF the downloadable mass-upload template entirely, per form type —
+// a single JSON blob under settings key 'import_template_overrides', same
+// shape/spirit as 'required_field_overrides' above:
+// { shul_application: ['gabai_email', ...], store_application: [...], applicant_application: [...] }
+// Only fields that are both part of a built-in schema AND actually appear on
+// that type's import sheet (see routes/settings.js GET /template-fields,
+// which is what the admin UI's checkboxes are built from) are meaningful
+// keys here — anything else is simply ignored by the two functions below.
+// A record is meaningless without these — every mass-import route's row
+// loop hard-checks them itself (a second, unconditional floor beneath
+// validateBySchema; see shuls.js/applicants.js/stores.js's
+// "Missing name_en or gabai_email"/"Missing first_name or last_name"/
+// "Missing name or owner_email" row errors), so excluding one from the
+// template would strand new-row creation with no way to satisfy a check
+// that still runs — never honor an exclusion for these, regardless of what
+// got saved.
+export const TEMPLATE_FLOOR_FIELDS = {
+  shul_application: ['name_en', 'gabai_email'],
+  store_application: ['name', 'owner_email'],
+  applicant_application: ['first_name', 'last_name'],
+};
+export function getTemplateExclusions(type) {
+  const row = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'import_template_overrides'`).get(DEFAULT_ORG_ID);
+  let overrides = {};
+  try { overrides = JSON.parse(row?.value || '{}') || {}; } catch { overrides = {}; }
+  const floor = new Set(TEMPLATE_FLOOR_FIELDS[type] || []);
+  return new Set((overrides[type] || []).filter(k => !floor.has(k)));
+}
+
+// getEffectiveSchema(), further stripped of any field the admin excluded
+// from the import template — a field that isn't on the sheet can't be
+// filled in, so it must not still be enforced as required when validating a
+// mass-upload row. Only ever used by the three mass-import POST /import
+// routes (shuls/applicants/stores) — public-form and single-record
+// validation keep using plain getEffectiveSchema, since those pages still
+// show every field regardless of the import-template setting.
+export function getEffectiveImportSchema(type) {
+  const excluded = getTemplateExclusions(type);
+  return getEffectiveSchema(type).filter(f => !excluded.has(f.key));
+}
+
 // 'header'/'image' are presentational blocks in a form's schema, not real
 // inputs — never required, never validated.
 const BLOCK_TYPES = ['header', 'image'];

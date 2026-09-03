@@ -13,7 +13,7 @@ import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { generateApplicantExternalId } from '../utils/externalId.js';
 import { getOrCreateEzrasHabayisShul } from '../utils/ezrasHabayis.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { validateBySchema, validateRowsBySchema, shulInfoErrors, getEffectiveSchema } from '../utils/formValidation.js';
+import { validateBySchema, validateRowsBySchema, shulInfoErrors, getEffectiveSchema, getTemplateExclusions } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteApplicant, captureApplicantSnapshot } from '../utils/entityDelete.js';
 import { lockApplicantCards } from '../services/cardSync.js';
@@ -1194,7 +1194,9 @@ router.post('/:id/notes', (req, res) => {
 // UPDATE flow, same as the single-applicant edit form.)
 const SHUL_EXCLUDED_IMPORT_COLUMNS = ['shul_id', 'preferred_number'];
 router.get('/import/template', (req, res) => {
-  const columns = req.user.role === 'shul' ? APPLICANT_IMPORT_COLUMNS.filter(c => !SHUL_EXCLUDED_IMPORT_COLUMNS.includes(c)) : APPLICANT_IMPORT_COLUMNS;
+  const excluded = getTemplateExclusions('applicant_application');
+  let columns = APPLICANT_IMPORT_COLUMNS.filter(c => !excluded.has(c));
+  if (req.user.role === 'shul') columns = columns.filter(c => !SHUL_EXCLUDED_IMPORT_COLUMNS.includes(c));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="applicant_import_template.xlsx"');
   res.send(buildXlsxTemplate(['id', ...columns]));
@@ -1285,7 +1287,8 @@ router.post('/import', requirePermission('applicants', 'can_edit'), upload.singl
   // is that one wrong/typo'd ID shouldn't cost the whole batch.
   const isAdminSubmitter = req.user.role !== 'shul';
   const bypassRequired = isAdminSubmitter && (req.body.bypass_required === 'true' || req.body.bypass_required === true);
-  const schemaErrors = bypassRequired ? [] : validateRowsBySchema(getEffectiveSchema('applicant_application'), rows, { isAdmin: isAdminSubmitter, skipKeys: ['shul_id'] })
+  const templateExcluded = getTemplateExclusions('applicant_application');
+  const schemaErrors = bypassRequired ? [] : validateRowsBySchema(getEffectiveSchema('applicant_application'), rows, { isAdmin: isAdminSubmitter, skipKeys: ['shul_id', ...templateExcluded] })
     .filter(e => !rowExisting[e.row - 2]);
   const idNotFoundErrors = rows.map((r, i) => (r.id && String(r.id).trim() && !rowExisting[i]) ? { row: i + 2, error: `No existing applicant found with id "${r.id}"` } : null).filter(Boolean);
   // Update rows (matched by id) skip validateRowsBySchema entirely (see

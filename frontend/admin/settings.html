@@ -55,8 +55,10 @@ renderShell('/admin/settings', `
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Notify on Document Signed</h3>
-      <p class="small-muted">Optional — when set, an internal email is sent every time any contract or document is e-signed (shul contracts, store agreements, standalone documents). Multiple addresses can be listed, comma-separated. Leave blank to turn off.</p>
-      <label>Notify Emails</label><input id="org-notify_doc_signed_email" placeholder="e.g. office@yourorg.org">
+      <p class="small-muted">Optional — when set, an internal email is sent every time a contract or document is e-signed. Shuls and stores can be routed to different addresses; anything else (applicant/standalone documents) uses the Default field. Each field can list multiple addresses, comma-separated. Leave a field blank to fall back to Default, or leave Default blank too to turn that category off.</p>
+      <label>Notify on Shul Contracts Signed</label><input id="org-notify_doc_signed_shul_email" placeholder="e.g. office@yourorg.org">
+      <label style="margin-top:10px">Notify on Store Agreements Signed</label><input id="org-notify_doc_signed_store_email" placeholder="e.g. stores-team@yourorg.org">
+      <label style="margin-top:10px">Default (applicant/standalone documents, and fallback for the above)</label><input id="org-notify_doc_signed_email" placeholder="e.g. office@yourorg.org">
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveDocSignedNotifyEmail()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
@@ -119,6 +121,12 @@ renderShell('/admin/settings', `
       <p class="small-muted">Uncheck a field to make it optional on that application form — the field still shows, it just won't block submission when left blank. To require a field that's normally optional here, edit it directly in the Form Builder instead.</p>
       <div id="required-fields-lists"></div>
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveRequiredFields()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Import Templates</h3>
+      <p class="small-muted">Per mass-upload template (Shuls, Stores, Applicants), choose which fields appear as columns and, for the ones that are normally required, whether a missing value should still block the upload. Uncheck "On Template" to drop a field's column entirely — an excluded field can't be filled in, so it's never enforced as required either, no matter what "Required" says. A few core fields (name, primary contact email) are locked on and required for every upload since a record can't be created without them.</p>
+      <div id="import-template-lists"></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveImportTemplates()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Shul Payments</h3>
@@ -209,6 +217,8 @@ window.saveNewSignupNotifyEmails = async () => {
 async function loadDocSignedNotifyEmail() {
   const { settings } = await api('/settings');
   qs('#org-notify_doc_signed_email').value = settings.notify_doc_signed_email || '';
+  qs('#org-notify_doc_signed_shul_email').value = settings.notify_doc_signed_shul_email || '';
+  qs('#org-notify_doc_signed_store_email').value = settings.notify_doc_signed_store_email || '';
 }
 async function loadPaymentMethodRequestNotifyEmail() {
   const { settings } = await api('/settings');
@@ -219,7 +229,11 @@ window.savePaymentMethodRequestNotifyEmail = async () => {
 };
 window.saveDocSignedNotifyEmail = async () => {
   try {
-    await api('/settings', { method: 'PUT', body: { notify_doc_signed_email: qs('#org-notify_doc_signed_email').value } });
+    await api('/settings', { method: 'PUT', body: {
+      notify_doc_signed_email: qs('#org-notify_doc_signed_email').value,
+      notify_doc_signed_shul_email: qs('#org-notify_doc_signed_shul_email').value,
+      notify_doc_signed_store_email: qs('#org-notify_doc_signed_store_email').value,
+    } });
     toast('Saved');
   } catch (err) { toast(err.message, true); }
 };
@@ -331,6 +345,70 @@ window.saveRequiredFields = async () => {
   });
   try { await api('/settings', { method: 'PUT', body: { required_field_overrides: JSON.stringify(overrides) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
+const IMPORT_TEMPLATE_FORM_TYPES = [
+  ['shul_application', 'Shul Import Template'],
+  ['store_application', 'Store Import Template'],
+  ['applicant_application', 'Applicant Import Template'],
+];
+async function loadImportTemplates() {
+  const [{ fields }, { settings }] = await Promise.all([api('/settings/template-fields'), api('/settings')]);
+  let templateOverrides = {}, requiredOverrides = {};
+  try { templateOverrides = JSON.parse(settings.import_template_overrides) || {}; } catch { templateOverrides = {}; }
+  try { requiredOverrides = JSON.parse(settings.required_field_overrides) || {}; } catch { requiredOverrides = {}; }
+  qs('#import-template-lists').innerHTML = IMPORT_TEMPLATE_FORM_TYPES.map(([type, label]) => {
+    const typeFields = fields[type] || [];
+    if (!typeFields.length) return '';
+    const excluded = new Set(templateOverrides[type] || []);
+    const notRequired = new Set(requiredOverrides[type] || []);
+    return `<h4 style="margin-bottom:4px">${esc(label)}</h4>
+      <div class="import-template-group" data-type="${esc(type)}" style="margin:0 0 14px">
+        <div style="display:grid;grid-template-columns:auto auto 1fr;gap:6px 16px;align-items:center">
+          <div class="small-muted" style="font-weight:600">On Template</div>
+          <div class="small-muted" style="font-weight:600">Required</div>
+          <div class="small-muted" style="font-weight:600">Field</div>
+          ${typeFields.map(f => {
+            if (f.locked) {
+              return `<input type="checkbox" checked disabled>
+                <input type="checkbox" checked disabled>
+                <span>${esc(f.label || f.key)} <span class="small-muted">(always included)</span></span>`;
+            }
+            const included = !excluded.has(f.key);
+            const required = f.required && !notRequired.has(f.key);
+            return `<input type="checkbox" class="import-template-include" data-key="${esc(f.key)}" data-type="${esc(type)}" ${included ? 'checked' : ''}>
+              ${f.required
+                ? `<input type="checkbox" class="import-template-required" data-key="${esc(f.key)}" ${required ? 'checked' : ''} ${included ? '' : 'disabled'}>`
+                : '<span class="small-muted" style="text-align:center">—</span>'}
+              <span>${esc(f.label || f.key)}${f.required ? '' : ' <span class="small-muted">(optional)</span>'}</span>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }).join('');
+  qsa('.import-template-include').forEach(cb => cb.addEventListener('change', () => {
+    const reqCb = cb.closest('.import-template-group').querySelector(`.import-template-required[data-key="${cb.dataset.key}"]`);
+    if (reqCb) { reqCb.disabled = !cb.checked; if (!cb.checked) reqCb.checked = false; }
+  }));
+}
+window.saveImportTemplates = async () => {
+  const { settings } = await api('/settings');
+  let requiredOverrides = {};
+  try { requiredOverrides = JSON.parse(settings.required_field_overrides) || {}; } catch { requiredOverrides = {}; }
+  const templateOverrides = {};
+  qsa('.import-template-group').forEach(group => {
+    const type = group.dataset.type;
+    const excludedKeys = Array.from(group.querySelectorAll('.import-template-include')).filter(c => !c.checked).map(c => c.dataset.key);
+    if (excludedKeys.length) templateOverrides[type] = excludedKeys;
+    const typeNotRequired = new Set(requiredOverrides[type] || []);
+    group.querySelectorAll('.import-template-required').forEach(c => {
+      if (c.checked) typeNotRequired.delete(c.dataset.key); else typeNotRequired.add(c.dataset.key);
+    });
+    if (typeNotRequired.size) requiredOverrides[type] = Array.from(typeNotRequired); else delete requiredOverrides[type];
+  });
+  try {
+    await api('/settings', { method: 'PUT', body: { import_template_overrides: JSON.stringify(templateOverrides), required_field_overrides: JSON.stringify(requiredOverrides) } });
+    toast('Saved');
+    loadRequiredFields();
+  } catch (err) { toast(err.message, true); }
+};
 async function loadShulCardAmountVisible() {
   const { settings } = await api('/settings');
   // Defaults to visible (matches pre-toggle behavior) unless explicitly turned off.
@@ -426,7 +504,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanner(); loadRequiredFields(); loadStripeEnabledDefault();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanner(); loadRequiredFields(); loadImportTemplates(); loadStripeEnabledDefault();
 </script>
 </body>
 </html>

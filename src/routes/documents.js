@@ -7,7 +7,7 @@ import { db, uuid } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { generateGenericDocumentPdf, buildSimplePdf, stampSignatureFields, getSignatureFields, resolveSignatureValues } from '../services/pdf.js';
-import { sendMailChecked, renderSystemTemplate, notifyNewSignup } from '../services/mail.js';
+import { sendMailChecked, renderSystemTemplate, notifyDocSigned } from '../services/mail.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -324,7 +324,7 @@ router.post('/sign/:token/sign', async (req, res) => {
   const entityUrlPath = document.entity_type === 'applicant' ? `/admin/applicants?id=${document.entity_id}`
     : document.entity_type === 'store' ? `/admin/stores?id=${document.entity_id}`
     : '/admin/esignatures';
-  await notifyNewSignup(document.org_id, 'notify_doc_signed_email', 'docSigned', {
+  await notifyDocSigned(document.org_id, document.entity_type, {
     docTitle: document.title || 'Document', entityName: entityName || '', signerName: signer_name, signedAt,
     entityUrl: `${process.env.APP_URL || ''}${entityUrlPath}`,
   });

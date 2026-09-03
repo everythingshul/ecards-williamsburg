@@ -6,6 +6,8 @@ import { isMockMode, getCustomerByExternalId } from '../services/giftcard.js';
 import { SYSTEM_EMAIL_TEMPLATES } from '../services/mail.js';
 import { runBackup, listBackups, backupPath } from '../services/backup.js';
 import { BUILTIN_SCHEMAS } from '../utils/builtinSchemas.js';
+import { SHUL_IMPORT_COLUMNS, APPLICANT_IMPORT_COLUMNS, STORE_IMPORT_COLUMNS } from '../services/importer.js';
+import { TEMPLATE_FLOOR_FIELDS } from '../utils/formValidation.js';
 
 const router = Router();
 // Every route in this file is only ever called from the admin Settings page
@@ -39,6 +41,29 @@ router.put('/', requirePermission('settings', 'can_edit'), (req, res) => {
 // relax them without ever needing to know about fields that already aren't.
 router.get('/builtin-schemas', (req, res) => {
   res.json({ schemas: BUILTIN_SCHEMAS });
+});
+
+// Settings > Import Templates: for each built-in mass-upload sheet, the
+// subset of that form's schema fields that actually appear as a column on
+// the sheet (importer.js's SHUL/APPLICANT/STORE_IMPORT_COLUMNS lists aren't
+// identical to the schema's field list — e.g. checkboxes like
+// store_application's same_person never had a sheet column, and shul_id/
+// slots_allocated are sheet-only columns with no schema field) — only this
+// overlap is safe to offer a checkbox for, since only these fields have both
+// a real template column to add/remove AND a schema required-ness to toggle.
+const IMPORT_COLUMNS_BY_TYPE = {
+  shul_application: SHUL_IMPORT_COLUMNS,
+  store_application: STORE_IMPORT_COLUMNS,
+  applicant_application: APPLICANT_IMPORT_COLUMNS,
+};
+router.get('/template-fields', (req, res) => {
+  const fields = {};
+  for (const [type, schema] of Object.entries(BUILTIN_SCHEMAS)) {
+    const importCols = new Set(IMPORT_COLUMNS_BY_TYPE[type] || []);
+    const floor = new Set(TEMPLATE_FLOOR_FIELDS[type] || []);
+    fields[type] = schema.filter(f => importCols.has(f.key)).map(f => ({ key: f.key, label: f.label, required: !!f.required, locked: floor.has(f.key) }));
+  }
+  res.json({ fields });
 });
 
 // Surfaces whether disccardpromos is actually live or silently running in

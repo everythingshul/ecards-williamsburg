@@ -9,7 +9,7 @@ import { sendMailChecked, renderSystemTemplate, notifyNewSignup, renderSignupDet
 import { sendXlsx } from '../services/xlsx.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { normalizeEmail } from '../utils/email.js';
-import { validateBySchema, getEffectiveSchema } from '../utils/formValidation.js';
+import { validateBySchema, getEffectiveSchema, getEffectiveImportSchema, getTemplateExclusions } from '../utils/formValidation.js';
 import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteStore, captureStoreSnapshot } from '../utils/entityDelete.js';
 import { generateGenericDocumentPdf } from '../services/pdf.js';
@@ -180,7 +180,13 @@ router.get('/:id', (req, res) => {
   // numbers a store shouldn't be able to reconstruct their transaction
   // history's shape from.
   if (req.user.role === 'store') { delete transactionTotals.count; delete transactionTotals.total_refunds; delete store.discount; }
-  res.json({ store: redact(store, req.permission.hidden_fields), transactionTotals });
+  // Latest participation agreement, if any — same "just the newest one"
+  // rule as shuls.js's GET /:id contract field, so the profile can show an
+  // at-a-glance signed/not-signed status without a second round trip to the
+  // full Documents tab list.
+  const latestAgreement = db.prepare(`SELECT status, sent_at, signed_at, signer_name FROM documents
+    WHERE org_id = ? AND entity_type = 'store' AND entity_id = ? ORDER BY created_at DESC LIMIT 1`).get(req.user.org_id, store.id) || null;
+  res.json({ store: redact(store, req.permission.hidden_fields), transactionTotals, latestAgreement });
 });
 
 // Who edited this record and when — not shown to the store viewing their own record.
@@ -227,7 +233,7 @@ router.post('/', requirePermission('stores', 'can_edit'), (req, res) => {
 router.put('/:id', requirePermission('stores', 'can_edit'), (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
-  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments','setup_status','has_provider_account','provider_store_id','discount'];
+  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments','setup_status','has_provider_account','provider_store_id','discount','disccard_setup_comments','disccard_setup_complete'];
   const b = req.body || {};
   if (b.phone !== undefined) b.phone = normalizePhone(b.phone);
   if (b.manager_phone !== undefined) b.manager_phone = normalizePhone(b.manager_phone);
@@ -237,7 +243,7 @@ router.put('/:id', requirePermission('stores', 'can_edit'), (req, res) => {
   }
   const sets = fields.filter(f => b[f] !== undefined);
   if (sets.length) {
-    const vals = sets.map(f => (f === 'has_provider_account' || f === 'same_person') ? (b[f] ? 1 : 0) : b[f]);
+    const vals = sets.map(f => (f === 'has_provider_account' || f === 'same_person' || f === 'disccard_setup_complete') ? (b[f] ? 1 : 0) : b[f]);
     db.prepare(`UPDATE stores SET ${sets.map(f=>`${f}=?`).join(',')} WHERE id=?`).run(...vals, store.id);
     logAudit(req.user.org_id, req.user.id, 'update', 'store', store.id, Object.fromEntries(sets.map(f => [f, store[f]])), Object.fromEntries(sets.map((f,i) => [f, vals[i]])), req.ip);
   }
@@ -394,6 +400,60 @@ router.post('/mass-invite', requirePermission('stores', 'can_edit'), async (req,
   res.json({ invited, skipped, emailErrors });
 });
 
+// One-click "Send Contract" — same gate/mechanism as the public self-service
+// flow and carry-forward, just an explicit admin action for a store that
+// already exists and needs (or needs to redo) its agreement, mirroring
+// shuls.js's POST /:id/send-contract.
+router.post('/:id/send-contract', requirePermission('stores', 'can_edit'), async (req, res) => {
+  const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  const to = req.body?.email || store.owner_email || store.manager_email;
+  const result = await sendStoreAgreement(req.user.org_id, store, to, req.user.id);
+  if (result.error) return res.status(409).json({ error: result.error });
+  logAudit(req.user.org_id, req.user.id, 'send_contract', 'store', store.id, null, { to }, req.ip);
+  res.json({ ok: true, document: result.document, emailError: result.emailError });
+});
+
+// Approve: the single "yes, this store is accepted" action, mirroring
+// shuls.js's POST /:id/approve — creates/ensures the portal login (same
+// welcome email invite already sends) and moves setup_status to 'active' in
+// one step, gated on the same agreement-on-file requirement invite already
+// enforces (bypassable the same way). "Invite to Portal" still exists
+// separately for a store that's already been approved some other way (e.g.
+// carried forward) and just needs its login (re)sent.
+router.post('/:id/approve', requirePermission('stores', 'can_edit'), async (req, res) => {
+  const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  if (!req.body?.bypass_contract && storeNeedsAgreementBeforeInvite(req.user.org_id, store)) {
+    return res.status(400).json({ error: "This store's agreement isn't required at signup and hasn't been sent yet. Send it from the Documents tab before approving, or bypass to skip the requirement.", code: 'CONTRACT_NOT_SENT' });
+  }
+  const result = await inviteStoreToPortal(req.user.org_id, store, req.body?.email, req.user.id);
+  if (result.error) return res.status(400).json({ error: result.error });
+  db.prepare(`UPDATE stores SET setup_status = 'active' WHERE id = ?`).run(store.id);
+  logAudit(req.user.org_id, req.user.id, 'approve', 'store', store.id, { setup_status: store.setup_status }, { setup_status: 'active' }, req.ip);
+  res.json({ ok: true, store: db.prepare('SELECT * FROM stores WHERE id = ?').get(store.id), emailError: result.emailError });
+});
+
+router.post('/mass-approve', requirePermission('stores', 'can_edit'), async (req, res) => {
+  const { ids, bypass_contract } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
+  let approved = 0, skipped = 0, emailErrors = 0;
+  const affectedIds = [], names = [];
+  for (const id of ids) {
+    const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(id, req.user.org_id);
+    if (!store) { skipped++; continue; }
+    if (!bypass_contract && storeNeedsAgreementBeforeInvite(req.user.org_id, store)) { skipped++; continue; }
+    const result = await inviteStoreToPortal(req.user.org_id, store, null, req.user.id);
+    if (result.error) { skipped++; continue; }
+    if (result.emailError) emailErrors++;
+    db.prepare(`UPDATE stores SET setup_status = 'active' WHERE id = ?`).run(store.id);
+    affectedIds.push(store.id); names.push(store.name);
+    approved++;
+  }
+  logMassAudit(req.user.org_id, req.user.id, 'mass-approve', 'store', affectedIds, { skipped, emailErrors, names }, req.ip);
+  res.json({ approved, skipped, emailErrors });
+});
+
 // Reuses an already-active portal login for a returning store (same
 // owner/manager email) by repointing its store_id at the new season's row,
 // instead of colliding with users.email's UNIQUE constraint — same pattern
@@ -427,9 +487,19 @@ function storeLoginUrl(user) {
 // Generates + emails a fresh participation agreement for a store — same
 // generic-documents mechanism as the public self-service flow (POST
 // /:id/generate-contract), just admin-triggered with an email step,
-// mirroring shuls.js's sendContractForShul. Shared by carry-forward below.
+// mirroring shuls.js's sendContractForShul. Shared by carry-forward and the
+// single-store "Send Contract" route below.
 async function sendStoreAgreement(orgId, store, toEmail, sentBy = null) {
   if (!toEmail) return { error: 'No email on file for this store' };
+  // Same guard as shuls.js's sendContractForShul — the store detail view
+  // always shows the *latest* document row, so generating a new one here
+  // unconditionally would shadow an already-executed, legally-signed
+  // agreement behind a fresh unsigned one. Retracting the signature first
+  // (a separate, explicit, audited action) is the real way to redo one.
+  const existing = db.prepare(`SELECT status FROM documents WHERE org_id = ? AND entity_type = 'store' AND entity_id = ? ORDER BY created_at DESC LIMIT 1`).get(orgId, store.id);
+  if (existing?.status === 'signed') {
+    return { error: 'This store already has a signed agreement on file. Retract the existing signature first if you need to send a new one.' };
+  }
   const entity = resolveEntity('store', store.id, orgId);
   const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId);
   const templateSetting = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'document_template_text_store'`).get(orgId);
@@ -607,9 +677,11 @@ router.get('/bill-submissions/:billId/file', (req, res) => {
 });
 
 router.get('/import/template', requireAdmin, (req, res) => {
+  const excluded = getTemplateExclusions('store_application');
+  const columns = STORE_IMPORT_COLUMNS.filter(c => !excluded.has(c));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="store_import_template.xlsx"');
-  res.send(buildXlsxTemplate(['id', ...STORE_IMPORT_COLUMNS]));
+  res.send(buildXlsxTemplate(['id', ...columns]));
 });
 
 // Every column an UPDATE row (matched by a filled-in `id` column) can
@@ -660,7 +732,7 @@ router.post('/import', requirePermission('stores', 'can_edit'), upload.single('f
   // below regardless, since a store record is meaningless without them.
   const bypassRequired = req.body.bypass_required === 'true' || req.body.bypass_required === true;
   const requiredErrors = bypassRequired ? [] : rows
-    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveSchema('store_application'), r, { isAdmin: true }) }))
+    .map((r, i) => (rowExisting[i] ? null : { row: i + 2, errors: validateBySchema(getEffectiveImportSchema('store_application'), r, { isAdmin: true }) }))
     .filter(x => x && x.errors.length)
     .map(x => ({ row: x.row, error: x.errors.join('; ') }));
   const idNotFoundErrors = rows

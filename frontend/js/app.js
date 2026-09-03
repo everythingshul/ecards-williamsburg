@@ -1183,7 +1183,24 @@ async function attachColumnCustomizer(buttonId, storageKey, columns, defaultOrde
   let order = defaultOrder;
   try {
     const { value } = await api(`/preferences/${storageKey}`);
-    if (Array.isArray(value) && value.length) order = value.filter(k => columns.some(c => c.key === k));
+    // `known` tracks every column key the user has already made an
+    // explicit show/hide decision about, as of their last save — so a
+    // column added to defaultOrder AFTER that (e.g. a new feature rolled
+    // out later) is neither "explicitly shown" nor "explicitly hidden," and
+    // gets appended below rather than silently staying invisible forever.
+    // Legacy saved value (a bare array, from before `known` existed) is
+    // treated as `known = order`: everything visible then was decided,
+    // anything not visible then is unseen and gets one free reappearance —
+    // an acceptable one-time reset, not a recurring one, since every save
+    // from here on stores the full known set.
+    let known = defaultOrder;
+    if (Array.isArray(value) && value.length) { order = value.filter(k => columns.some(c => c.key === k)); known = order; }
+    else if (value && Array.isArray(value.order)) {
+      order = value.order.filter(k => columns.some(c => c.key === k));
+      known = Array.isArray(value.known) ? value.known : order;
+    }
+    const unseen = defaultOrder.filter(k => !known.includes(k) && !order.includes(k));
+    if (unseen.length) order = [...order, ...unseen];
   } catch { /* use default */ }
 
   let draft = null;
@@ -1212,7 +1229,11 @@ async function attachColumnCustomizer(buttonId, storageKey, columns, defaultOrde
     renderList();
   };
   window.__saveCustomCols = async () => {
-    try { await api(`/preferences/${storageKey}`, { method: 'PUT', body: { value: order } }); closeModal(); onChange(order); } catch (err) { toast(err.message, true); }
+    // `known` = every column that exists right now, since the user just
+    // reviewed the full checklist — so nothing currently on the page can
+    // ever show up as "unseen" again until a future update adds another.
+    const value = { order, known: columns.map(c => c.key) };
+    try { await api(`/preferences/${storageKey}`, { method: 'PUT', body: { value } }); closeModal(); onChange(order); } catch (err) { toast(err.message, true); }
   };
 
   const btn = document.getElementById(buttonId);
