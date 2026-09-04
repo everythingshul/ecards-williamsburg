@@ -80,6 +80,25 @@ router.get('/by-shul', (req, res) => {
   res.json({ shuls: rows.map(r => ({ ...r, remaining: r.allocated - r.spent })) });
 });
 
+// Open card-balance-vs-disccardpromos mismatches (see services/cardSync.js's
+// reconcileApplicantBalance, run automatically as part of every sync sweep)
+// — never auto-corrected, an admin reviews and resolves each one by hand.
+// Must be registered before /:id (same reason as /export and /by-shul above
+// — otherwise Express matches "reconciliation-flags" as an :id).
+router.get('/reconciliation-flags', (req, res) => {
+  const rows = db.prepare(`SELECT f.*, a.first_name, a.last_name, a.external_id FROM card_reconciliation_flags f
+    JOIN applicants a ON a.id = f.applicant_id WHERE f.org_id = ? AND f.status = 'open' ORDER BY f.detected_at DESC`).all(req.user.org_id);
+  res.json({ flags: rows });
+});
+router.post('/reconciliation-flags/:id/resolve', requirePermission('cards', 'can_edit'), (req, res) => {
+  const flag = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE id = ? AND org_id = ?`).get(req.params.id, req.user.org_id);
+  if (!flag) return res.status(404).json({ error: 'Not found' });
+  if (flag.status !== 'open') return res.status(400).json({ error: 'Already resolved' });
+  db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
+    .run(req.user.id, flag.id);
+  res.json({ ok: true });
+});
+
 router.get('/:id', (req, res) => {
   const card = db.prepare(`SELECT c.*, a.first_name, a.last_name, a.husband_cell, a.wife_cell, a.home_phone
     FROM cards c LEFT JOIN applicants a ON a.id=c.applicant_id WHERE c.id = ? AND c.org_id = ?`).get(req.params.id, req.user.org_id);

@@ -501,6 +501,30 @@ CREATE TABLE IF NOT EXISTS duplicate_flags (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- One row per merge-group (or standalone applicant) whose disccardpromos
+-- real balance doesn't match what our own ledger (approval-time card_amount
+-- + shul_allocations, minus spend — see services/applicantBalance.js) says
+-- it should be. Detected during the background card sync sweep (see
+-- services/cardSync.js's reconcileApplicantBalance) — a mismatch means
+-- either a write to disccard failed/partially applied without us noticing,
+-- or something changed the balance directly on disccard's own dashboard.
+-- Never auto-corrected (this app never assumes which side is "right"); an
+-- admin reviews and resolves it manually. applicant_id is always the
+-- merge-group's PRIMARY (or the applicant itself if not merged) — see
+-- routes/applicants.js's fundingAnchor for the same anchor concept.
+CREATE TABLE IF NOT EXISTS card_reconciliation_flags (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  expected_amount REAL NOT NULL,  -- our own ledger's remaining balance
+  actual_amount REAL NOT NULL,    -- disccardpromos' real remaining balance
+  status TEXT DEFAULT 'open',     -- open | resolved
+  resolved_by TEXT REFERENCES users(id),
+  resolved_at TEXT,
+  detected_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id TEXT PRIMARY KEY,
   org_id TEXT,

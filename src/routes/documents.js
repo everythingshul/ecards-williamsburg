@@ -323,7 +323,7 @@ router.post('/sign/:token/sign', async (req, res) => {
   }
   const entityUrlPath = document.entity_type === 'applicant' ? `/admin/applicants?id=${document.entity_id}`
     : document.entity_type === 'store' ? `/admin/stores?id=${document.entity_id}`
-    : '/admin/esignatures';
+    : '/admin/forms-docs-esign';
   await notifyDocSigned(document.org_id, document.entity_type, {
     docTitle: document.title || 'Document', entityName: entityName || '', signerName: signer_name, signedAt,
     entityUrl: `${process.env.APP_URL || ''}${entityUrlPath}`,

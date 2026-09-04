@@ -108,6 +108,13 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulBanners()">Save Banners</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Store Portal</h3>
+      <h4 style="margin-bottom:4px">Store Portal Banners</h4>
+      <p class="small-muted">Each store portal page can show its own banner at the top — different text (or none at all) per page. Supports rich text and right-to-left text (use the RTL button in the toolbar).</p>
+      <div id="store-banners-list"></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveStoreBanners()">Save Banners</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Homepage Popup</h3>
       <p class="small-muted">Shows once per visit on the public homepage. Turn it off and the homepage looks exactly as if it were never there.</p>
       <div class="checkbox-row"><input type="checkbox" id="popup-enabled"><label style="margin:0">Show popup on homepage</label></div>
@@ -337,6 +344,37 @@ window.saveShulBanners = async () => {
     toast('Saved');
   } catch (err) { toast(err.message, true); }
 };
+// Same per-page banner pattern as Shul Portal Banners above, for the store
+// portal — keep in sync with STORE_NAV in app.js.
+const STORE_PORTAL_BANNER_PAGES = [
+  ['dashboard', 'Overview'],
+  ['billing', 'Billing'],
+  ['updates', 'Updates'],
+];
+const storeBannerEditors = {};
+async function loadStoreBanners() {
+  const { settings } = await api('/settings');
+  let banners = {};
+  try { banners = JSON.parse(settings.store_portal_banners) || {}; } catch { banners = {}; }
+  qs('#store-banners-list').innerHTML = STORE_PORTAL_BANNER_PAGES.map(([key, label]) => `
+    <div style="margin:14px 0 18px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="checkbox-row"><input type="checkbox" id="tb-enabled-${key}" ${banners?.[key]?.enabled ? 'checked' : ''}><label style="margin:0">Show on <strong>${esc(label)}</strong></label></div>
+      <div id="tb-editor-${key}" style="margin-top:8px"></div>
+    </div>`).join('');
+  STORE_PORTAL_BANNER_PAGES.forEach(([key]) => {
+    storeBannerEditors[key] = createRichTextEditor(`tb-editor-${key}`, banners?.[key]?.html || '');
+  });
+}
+window.saveStoreBanners = async () => {
+  const banners = {};
+  STORE_PORTAL_BANNER_PAGES.forEach(([key]) => {
+    banners[key] = { enabled: qs(`#tb-enabled-${key}`).checked, html: storeBannerEditors[key].getHtml() };
+  });
+  try {
+    await api('/settings', { method: 'PUT', body: { store_portal_banners: JSON.stringify(banners) } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
 const REQUIRED_FIELDS_FORM_TYPES = [
   ['shul_application', 'Shul Application'],
   ['store_application', 'Store Application'],
@@ -523,7 +561,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadRequiredFields(); loadImportTemplates(); loadStripeEnabledDefault();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadStripeEnabledDefault();
 </script>
 </body>
 </html>

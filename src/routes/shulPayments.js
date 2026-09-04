@@ -119,15 +119,15 @@ router.get('/mine/allocations', (req, res) => {
   const rows = db.prepare(`SELECT sa.*, a.first_name, a.last_name FROM shul_allocations sa
     LEFT JOIN applicants a ON a.id = sa.applicant_id WHERE sa.shul_id = ? ORDER BY sa.created_at DESC`).all(req.user.shul_id);
   // The privacy view: a shul only ever sees its OWN money + what its own
-  // contribution alone would earn against the per-applicant cap — never the
-  // real match (which may be less, if another shul used up cap room first)
-  // and never any hint another shul is involved. See services/matching.js's
+  // contribution alone would earn against the per-applicant cap, capped so
+  // it never exceeds what's actually still available (never any hint
+  // another shul is involved, or by how much). See services/matching.js's
   // shulDisplayMatch for the full reasoning.
   const out = rows.filter(r => r.base_amount > 0).map(r => {
     const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(r.applicant_id);
     const shul = db.prepare('SELECT * FROM shuls WHERE id = ?').get(r.shul_id);
     const season = db.prepare('SELECT * FROM seasons WHERE id = ?').get(r.season_id);
-    const displayMatch = applicant && shul && season ? shulDisplayMatch({ applicant, shul, season, baseAmount: r.base_amount }) : 0;
+    const displayMatch = applicant && shul && season ? shulDisplayMatch({ applicant, shul, season, baseAmount: r.base_amount, ownMatchAmount: r.match_amount }) : 0;
     return {
       id: r.id, applicant_id: r.applicant_id, applicant_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
       base_amount: r.base_amount, display_total: Math.round((r.base_amount + displayMatch) * 100) / 100,

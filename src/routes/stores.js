@@ -99,6 +99,23 @@ router.post('/:id/generate-contract', async (req, res) => {
 
 router.use(auth, requirePermission('stores'));
 
+// Admin-authored banner shown at the top of each store portal page (see
+// renderShell() in app.js) — one independent banner per page (keyed by the
+// last segment of its href, matching STORE_NAV in app.js), rich HTML with
+// RTL support, same createRichTextEditor used by Updates/Shul Portal
+// Banners. Edited from Settings > Store Portal Banners and stored as a
+// single JSON blob under the 'store_portal_banners' org-wide setting (same
+// pattern as routes/shuls.js's GET /mine/portal-banner). No permission
+// check beyond the router's own 'stores' gate above, since it's just
+// read-only banner content, not store data.
+router.get('/mine/portal-banner', (req, res) => {
+  if (req.user.role !== 'store') return res.status(403).json({ error: 'Not permitted' });
+  const raw = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'store_portal_banners'`).get(req.user.org_id)?.value;
+  let banners = {};
+  try { banners = JSON.parse(raw) || {}; } catch { banners = {}; }
+  res.json({ banners });
+});
+
 function scopeWhere(req) {
   let where = 'WHERE org_id = ?';
   const params = [req.user.org_id];

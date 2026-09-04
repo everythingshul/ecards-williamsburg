@@ -69,21 +69,24 @@ export function computeRealMatch({ applicant, shul, season, baseAmount }) {
 
 // What THIS shul sees for THEIR OWN contribution to this applicant — a
 // deliberately self-centered "if I were the only one giving" figure, not a
-// share of the real total. Two shuls each giving $2000 to the same
-// applicant, with a $500 total real match already fully consumed between
-// them, each still see their own money + whatever their own contribution
-// alone would have earned against the per-applicant cap — even though that
-// can add up to more than the real match actually given (that's the point:
-// a shul's own number never reveals whether another shul is involved at
-// all). Only the per-applicant cap applies here, not the shul/season caps
-// — those are operational budget limits, not something tied to this one
-// applicant a shul should have to reason about in their own view.
-export function shulDisplayMatch({ applicant, shul, season, baseAmount }) {
+// share of the real total: it never reveals that another shul is involved
+// at all, or how much that other shul gave. It's still never allowed to
+// OVERSTATE reality, though — capped at whatever room is actually left in
+// the per-applicant cap right now (excluding this shul's own already-
+// counted usage, via ownMatchAmount), so a shul can believe it received
+// the full natural match up to the real limit, but never more than the
+// real limit actually allows. Only the per-applicant cap applies here, not
+// the shul/season caps — those are operational budget limits, not
+// something tied to this one applicant a shul should have to reason about
+// in their own view.
+export function shulDisplayMatch({ applicant, shul, season, baseAmount, ownMatchAmount = 0 }) {
   const rate = resolveRate(applicant, shul, season);
   const natural = baseAmount * rate;
   const applicantCap = resolveApplicantCap(applicant, season);
-  const capped = applicantCap != null ? Math.min(natural, applicantCap) : natural;
-  return Math.round(Math.max(0, capped) * 100) / 100;
+  if (applicantCap == null) return Math.round(Math.max(0, natural) * 100) / 100;
+  const usedByOthers = Math.max(0, usedMatchForApplicant(applicant) - ownMatchAmount);
+  const room = Math.max(0, applicantCap - usedByOthers);
+  return Math.round(Math.max(0, Math.min(natural, room)) * 100) / 100;
 }
 
 // Every allocation the season/shul/applicant chain would let happen, given

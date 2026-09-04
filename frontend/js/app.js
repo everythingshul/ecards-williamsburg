@@ -280,18 +280,15 @@ function applyOrgTheme(org) {
 const NAV_ITEMS = [
   { href: '/admin/dashboard', label: 'Dashboard', icon: '&#9670;', resource: 'dashboard' },
   { href: '/admin/donor-dashboard', label: "Donor's Dash", icon: '&#9670;', resource: 'donor_dashboard' },
-  { href: '/admin/analytics', label: 'Analytics', icon: '&#9670;', resource: 'dashboard' },
   { href: '/admin/shuls', label: 'Shuls', icon: '&#9670;', resource: 'shuls' },
   { href: '/admin/applicants', label: 'Applicants', icon: '&#9670;', resource: 'applicants' },
   { href: '/admin/cards', label: 'Cards & Transactions', icon: '&#9670;', resource: 'cards' },
   { href: '/admin/shul-transactions', label: 'Shul Transactions', icon: '&#9670;', resource: 'shul_payments' },
   { href: '/admin/stores', label: 'Stores', icon: '&#9670;', resource: 'stores' },
   { href: '/admin/tasks', label: 'Tasks', icon: '&#9670;', resource: 'tasks' },
-  { href: '/admin/forms', label: 'Form Builder', icon: '&#9670;', resource: 'forms' },
   { href: '/admin/emails', label: 'Email Center', icon: '&#9670;', resource: 'emails' },
   { href: '/admin/sms', label: 'SMS Center', icon: '&#9670;', resource: 'sms' },
   { href: '/admin/updates', label: 'Updates', icon: '&#9670;', resource: 'updates' },
-  { href: '/admin/esignatures', label: 'E-Signatures', icon: '&#9670;', resource: 'documents' },
   { href: '/admin/users', label: 'Users & Permissions', icon: '&#9670;', resource: 'users' },
   // Its own standalone page/nav item, not a Settings tab — a single link
   // shared between two independently-gated resources meant blocking just
@@ -300,13 +297,18 @@ const NAV_ITEMS = [
   // separate links.
   { href: '/admin/seasons', label: 'Seasons', icon: '&#9670;', resource: 'seasons' },
   { href: '/admin/site-content', label: 'Site Content', icon: '&#9670;', resource: 'site_content' },
-  { href: '/admin/document-settings', label: 'Documents', icon: '&#9670;', resource: 'contract_settings' },
   { href: '/admin/settings', label: 'Settings', icon: '&#9670;', resource: 'settings' },
   // 'audit' has no ROLE_DEFAULTS entry of its own (see RESOURCE_DEFAULT_OVERRIDES
   // in middleware/permissions.js) — it's denied by default for everyone but
   // super_admin until an admin explicitly grants it to a specific user via
   // Users & Permissions, so no hardcoded role check is needed here anymore.
   { href: '/admin/audit', label: 'Recent Actions', icon: '&#9670;', resource: 'audit' },
+  // Kept at the very end of the nav on purpose: Analytics is a secondary,
+  // drill-down view (the primary numbers already live on Dashboard), and
+  // Forms/Documents/E-Signatures (merged into one page as three tabs — see
+  // forms-docs-esign.html) is config/admin-tooling, not day-to-day work.
+  { href: '/admin/analytics', label: 'Analytics', icon: '&#9670;', resource: 'dashboard' },
+  { href: '/admin/forms-docs-esign', label: 'Forms, Docs & Signatures', icon: '&#9670;', resources: ['forms', 'contract_settings', 'documents'] },
 ];
 const SHUL_NAV = [
   { href: '/shul-portal/dashboard', label: 'My Applicants' },
@@ -384,6 +386,19 @@ function renderShell(activeHref, contentHtml) {
     // is the key routes/shuls.js's GET /mine/portal-banner returns banners
     // under, matching SHUL_NAV below.
     api('/shuls/mine/portal-banner').then(({ banners }) => {
+      const pageKey = activeHref.split('/').filter(Boolean).pop();
+      const b = banners?.[pageKey];
+      if (!b || !b.enabled || !b.html) return;
+      const content = document.getElementById('content');
+      if (!content) return;
+      content.insertAdjacentHTML('afterbegin', `<div class="card" style="margin-bottom:16px;border-inline-start:4px solid var(--brand-gold-dark)" dir="auto">${b.html}</div>`);
+    }).catch(() => {});
+  }
+  if (role === 'store') {
+    // Admin-authored banner (Settings > Store Portal Banners), same
+    // per-page pattern as the shul portal banner above — see
+    // routes/stores.js's GET /mine/portal-banner and STORE_NAV below.
+    api('/stores/mine/portal-banner').then(({ banners }) => {
       const pageKey = activeHref.split('/').filter(Boolean).pop();
       const b = banners?.[pageKey];
       if (!b || !b.enabled || !b.html) return;

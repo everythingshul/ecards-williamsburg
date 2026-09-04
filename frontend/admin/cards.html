@@ -16,7 +16,7 @@ renderShell('/admin/cards', `
   <div class="flex-between"><h2>Cards & Transactions</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-sync-all">Sync All Now</button><button class="btn btn-outline btn-sm" id="btn-export-cards">Export Cards CSV</button><button class="btn btn-outline btn-sm" id="btn-export-txns">Export Transactions CSV</button></div></div>
   <p class="small-muted">Cards auto-sync with disccardpromos every 15 minutes in the background. Use Sync All Now for an immediate refresh.</p>
   <div id="mock-banner"></div>
-  <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button></div>
+  <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button><button id="tab-recon-btn">Balance Mismatches<span id="recon-badge"></span></button></div>
   <div id="panel-cards">
     <div class="toolbar"><input id="f-search" placeholder="Search applicant name or card number…"><select id="f-status"><option value="">All statuses</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="activated">Activated</option><option value="deactivated">Deactivated</option></select></div>
     <div class="card" style="padding:0;overflow-x:auto">
@@ -39,24 +39,55 @@ renderShell('/admin/cards', `
       <tbody id="tbody-byshul"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
+  <div id="panel-recon" style="display:none">
+    <p class="small-muted">An applicant whose real disccardpromos balance doesn't match what our own records say it should be — checked automatically on every sync. Never auto-corrected; review each one and resolve it once you've sorted out (or accepted) the difference.</p>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Applicant</th><th>Our Ledger</th><th>disccardpromos</th><th>Difference</th><th>Detected</th><th></th></tr></thead>
+      <tbody id="tbody-recon"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
 `);
 
 let state = { search:'', status:'', page:1, pageSize:25 };
 let txnPage = 1;
 
-const cardsTabs = ['cards', 'txns', 'byshul'];
+const cardsTabs = ['cards', 'txns', 'byshul', 'recon'];
 function showCardsTab(name) {
   cardsTabs.forEach(t => { qs('#tab-'+t+'-btn').classList.toggle('active', t === name); qs('#panel-'+t).style.display = t === name ? 'block' : 'none'; });
   if (name === 'txns') loadTxns();
   if (name === 'byshul') loadByShul();
+  if (name === 'recon') loadReconFlags();
 }
 qs('#tab-cards-btn').addEventListener('click', () => showCardsTab('cards'));
 qs('#tab-txns-btn').addEventListener('click', () => showCardsTab('txns'));
 qs('#tab-byshul-btn').addEventListener('click', () => showCardsTab('byshul'));
+qs('#tab-recon-btn').addEventListener('click', () => showCardsTab('recon'));
+
+async function loadReconFlags() {
+  let flags = [];
+  try { ({ flags } = await api('/cards/reconciliation-flags')); } catch (err) { return toast(err.message, true); }
+  qs('#recon-badge').innerHTML = flags.length ? ' ' + badge(String(flags.length), 'rejected') : '';
+  qs('#tbody-recon').innerHTML = flags.length ? flags.map(f => `<tr>
+      <td>${esc(f.first_name || '')} ${esc(f.last_name || '')}<br><span class="small-muted">ID ${esc(f.external_id || '')}</span></td>
+      <td>${fmtMoney(f.expected_amount)}</td>
+      <td>${fmtMoney(f.actual_amount)}</td>
+      <td>${fmtMoney(f.actual_amount - f.expected_amount)}</td>
+      <td>${fmtDateTime(f.detected_at)}</td>
+      <td><button class="btn btn-sm btn-outline" onclick="resolveReconFlag('${f.id}')">Mark Resolved</button></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No mismatches — everything matches disccardpromos.</td></tr>';
+}
+window.resolveReconFlag = async (id) => {
+  if (!confirm('Mark this mismatch as resolved? This only clears the flag — it never changes any balance.')) return;
+  try { await api(`/cards/reconciliation-flags/${id}/resolve`, { method: 'POST' }); toast('Resolved'); loadReconFlags(); } catch (err) { toast(err.message, true); }
+};
+// Quiet initial check so the badge count shows up without needing to click
+// into the tab first — same "surface it, don't bury it" reasoning as every
+// other pending-count badge in this app.
+loadReconFlags();
 qs('#btn-export-cards').addEventListener('click', () => downloadAuthed('/cards/export?' + new URLSearchParams({ search: state.search, status: state.status }), 'cards.xlsx'));
 qs('#btn-sync-all').addEventListener('click', async () => {
   const btn = qs('#btn-sync-all'); btn.disabled = true; btn.textContent = 'Syncing…';
-  try { const r = await api('/cards/sync-all', { method: 'POST' }); toast(`Checked ${r.cardsChecked} card(s), synced ${r.transactionsSynced} new transaction(s)${r.cardsDiscovered ? `, found ${r.cardsDiscovered} card(s) activated directly on disccardpromos` : ''}${r.cardsRemoved ? `, deactivated ${r.cardsRemoved} card(s) removed on disccardpromos` : ''}`); loadCards(); }
+  try { const r = await api('/cards/sync-all', { method: 'POST' }); toast(`Checked ${r.cardsChecked} card(s), synced ${r.transactionsSynced} new transaction(s)${r.cardsDiscovered ? `, found ${r.cardsDiscovered} card(s) activated directly on disccardpromos` : ''}${r.cardsRemoved ? `, deactivated ${r.cardsRemoved} card(s) removed on disccardpromos` : ''}${r.reconciliationFlags ? `, ${r.reconciliationFlags} balance mismatch(es) flagged` : ''}`); loadCards(); loadReconFlags(); }
   catch (err) { toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = 'Sync All Now'; }
 });

@@ -17,7 +17,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 // Settings > Documents tab. Split out into its own gated resource
 // ('contract_settings' in PERMISSION_RESOURCES) for the same reason as the
 // Seasons/Site Content splits: it's only ever called from
-// frontend/admin/document-settings.html (and app.js's shared signature-box/
+// frontend/admin/forms-docs-esign.html's Documents tab (and app.js's shared signature-box/
 // contract-field editor helpers), never a shul/store portal or public page,
 // so a blanket gate here is safe and lets an admin be independently
 // locked out of or made read-only on just this section.

@@ -597,7 +597,7 @@ window.createShul = async () => {
 async function openImportModal() {
   let seasons = [];
   try { ({ seasons } = await api('/seasons')); } catch { /* season picker just won't show options if this fails */ }
-  const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. New shuls are matched for duplicates automatically; both accounts are paused if one is found. To mass-edit existing shuls, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that shul (only the cells you actually changed), instead of creating a new one.</p>
+  const body = `<p class="small-muted">Upload an Excel (.xlsx) file using the template — CSV isn't accepted, since it doesn't reliably support Hebrew text. New shuls are matched for duplicates automatically; the new account is paused until it's resolved (the existing, already-active account is never affected). To mass-edit existing shuls, export first, edit cells in Excel, and re-upload — a row with a filled-in <code>id</code> column updates that shul (only the cells you actually changed), instead of creating a new one.</p>
     <input type="file" id="import-file" accept=".xlsx">
     <label style="margin-top:12px">Season <span class="req">*</span></label>
     <select id="import-season"><option value="">Select a season…</option>${seasons.map(s => `<option value="${s.id}">${esc(s.name)}${s.is_active ? ' (active)' : ''}</option>`).join('')}</select>

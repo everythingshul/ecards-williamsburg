@@ -136,7 +136,7 @@ router.post('/public/:slug/submit', (req, res) => {
 router.use(auth, requirePermission('forms'));
 
 // Uploads an image for an 'image' block in a form's schema (see
-// frontend/admin/forms.html's field editor) — returns the URL to store on
+// frontend/admin/forms-docs-esign.html's Form Builder tab field editor) — returns the URL to store on
 // that field. Same memory-storage-then-write-to-disk pattern as
 // routes/updates.js's inline-image attachments.
 router.post('/upload-image', requirePermission('forms', 'can_edit'), upload.single('image'), (req, res) => {

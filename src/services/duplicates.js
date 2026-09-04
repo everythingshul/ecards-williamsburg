@@ -18,17 +18,26 @@ const SHUL_MERGE_FIELDS = ['name_en', 'name_he', 'address', 'city', 'state', 'zi
   'ruv_first_name', 'ruv_last_name', 'ruv_phone', 'ruv_address', 'ruv_city', 'ruv_state', 'ruv_zip',
   'gabai_first_name', 'gabai_last_name', 'gabai_cell', 'gabai_email', 'gabai_address', 'gabai_city', 'gabai_state', 'gabai_zip'];
 
-// Freezes both the newly-created record's owning account AND the matched record's
-// owning account (per spec: "pause both accounts from doing any action or using
-// the card until the duplicate is fixed or bypassed").
-function pauseAccountsFor(entityType, entityId, matchedId) {
+// Freezes ONLY the newly-created/just-edited record (entityId) — never the
+// existing record it matched against (matchedId), which stays fully active
+// and usable. A duplicate catch means "this new account needs a human to
+// look at it before it goes any further," not "stop whatever the already-
+// active account is doing" — the existing account was already trusted
+// before this match ever happened, and freezing it (blocking its shul's
+// login, deactivating an applicant's already-issued card) would punish the
+// wrong side of the pair for a problem it didn't cause. Approval/spending
+// on the new side stays blocked via its own is_paused=1 (see routes/
+// applicants.js POST /:id/approve and the shul-login 423 in middleware/
+// auth.js) until an admin resolves or bypasses the flag.
+function pauseAccountsFor(entityType, entityId) {
   if (entityType === 'shul') {
-    db.prepare('UPDATE shuls SET is_paused = 1 WHERE id IN (?, ?)').run(entityId, matchedId);
-    db.prepare(`UPDATE users SET is_paused = 1 WHERE shul_id IN (?, ?)`).run(entityId, matchedId);
+    db.prepare('UPDATE shuls SET is_paused = 1 WHERE id = ?').run(entityId);
+    db.prepare(`UPDATE users SET is_paused = 1 WHERE shul_id = ?`).run(entityId);
   } else {
-    db.prepare('UPDATE applicants SET is_paused = 1 WHERE id IN (?, ?)').run(entityId, matchedId);
-    // Applicants don't log in directly, but pause their card use.
-    db.prepare(`UPDATE cards SET status = 'deactivated' WHERE applicant_id IN (?, ?) AND status != 'deactivated'`).run(entityId, matchedId);
+    db.prepare('UPDATE applicants SET is_paused = 1 WHERE id = ?').run(entityId);
+    // Applicants don't log in directly, but pause their own card use —
+    // never the matched (already-active) applicant's card.
+    db.prepare(`UPDATE cards SET status = 'deactivated' WHERE applicant_id = ? AND status != 'deactivated'`).run(entityId);
   }
 }
 
@@ -90,8 +99,18 @@ function matchReasons(a, aAddress, c) {
 // candidate counts as new. Omitted (or null) for a genuinely new record —
 // nothing "already existed" for it, so every match is new by definition,
 // same as the original one-time creation-only check.
+// 'draft' (shul-portal bulk upload, not yet submitted) and 'incomplete'
+// (carried-forward, awaiting re-enrollment) rows are excluded from the
+// candidate pool entirely — not "real" submissions yet, so they never
+// count as either side of a match: two drafts that happen to share a name
+// don't flag each other, and an already-active applicant never gets
+// flagged just because some unrelated draft shares a field with them. A
+// draft/incomplete row being checked can still match — and get flagged
+// against — a genuinely active (non-draft/incomplete) applicant, since
+// this only narrows the CANDIDATE side, not which row is doing the
+// checking.
 export function checkApplicantDuplicate(orgId, applicant, previousApplicant) {
-  const candidates = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND id != ?`).all(orgId, applicant.season_id, applicant.id);
+  const candidates = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND id != ? AND approval_status NOT IN ('draft', 'incomplete')`).all(orgId, applicant.season_id, applicant.id);
   const applicantAddress = fullAddress(applicant);
   const previousAddress = previousApplicant ? fullAddress(previousApplicant) : null;
   for (const c of candidates) {
@@ -112,7 +131,8 @@ export function checkApplicantDuplicate(orgId, applicant, previousApplicant) {
   return null;
 }
 
-// Runs the appropriate check, and if found: flags it, pauses both accounts, returns the flag row.
+// Runs the appropriate check, and if found: flags it, pauses the NEW/edited
+// account only (see pauseAccountsFor above), and returns the flag row.
 // If not found: returns null and leaves the record active. excludeIds (shul only,
 // see checkShulDuplicate) lets a caller rule out a record known to be the same
 // entity on purpose, like carry-forward's own source shul. previousEntity
@@ -135,7 +155,7 @@ export function detectAndFlag(orgId, entityType, entity, excludeIds = [], previo
     VALUES (?,?,?,?,?,?,'open')`).run(id, orgId, entityType, entity.id, match.matchedId, match.reason);
   if (entityType === 'shul') db.prepare(`UPDATE shuls SET duplicate_status = 'flagged', duplicate_of_shul_id = ? WHERE id = ?`).run(match.matchedId, entity.id);
   else db.prepare(`UPDATE applicants SET duplicate_status = 'flagged', duplicate_of_applicant_id = ? WHERE id = ?`).run(match.matchedId, entity.id);
-  pauseAccountsFor(entityType, entity.id, match.matchedId);
+  pauseAccountsFor(entityType, entity.id);
   return db.prepare('SELECT * FROM duplicate_flags WHERE id = ?').get(id);
 }
 
