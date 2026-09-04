@@ -390,6 +390,7 @@ async function openShul(id) {
       ${shul.is_paused ? `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',false)">Unpause</button>` : `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',true)">Pause</button>`}
       ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteShul('${id}')">Delete Permanently</button>` : ''}
       ${!shul.portal_user_id ? `<button class="btn btn-outline btn-sm" onclick="inviteShul('${id}')">Invite to Portal</button>` : ''}
+      ${shul.portal_user_id && Auth.can('portal_impersonation') ? `<button class="btn btn-outline btn-sm" onclick="enterPortal('shuls','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Enter Portal</button>` : ''}
       ${['approved','rejected'].includes(shul.status) ? `<button class="btn btn-outline btn-sm" onclick="setShulPending('${id}')">Set to Pending</button>` : ''}
       ${shul.status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="rejectShul('${id}')">Reject</button><button class="btn btn-primary btn-sm" onclick="approveShul('${id}')">Approve</button>` : `<button class="btn btn-outline btn-sm" onclick="resendWelcome('${id}')">Resend Welcome Email</button>`}
       ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Set Password</button>` : ''}
@@ -515,8 +516,12 @@ window.rejectPayment = async (paymentId, shulId) => {
   try { await api(`/shul-payments/${paymentId}/reject`, { method: 'POST', body: { reason } }); toast('Rejected'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
 };
 window.reverseAllocation = async (allocationId, shulId) => {
-  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores this shul\'s balance.')) return;
-  try { await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' }); toast('Reversed'); loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul); } catch (err) { toast(err.message, true); }
+  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores this shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
+  try {
+    const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
+    toast(reversal?.shortfall > 0 ? `Reversed — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Reversed', reversal?.shortfall > 0);
+    loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul);
+  } catch (err) { toast(err.message, true); }
 };
 window.addShulNote = async (id) => {
   const note = qs('#new-note').value.trim(); if (!note) return;

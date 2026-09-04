@@ -264,8 +264,63 @@ router.get('/', (req, res) => {
     const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
     return rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
   })();
-  res.json({ applicants: maskForShul(redact(withBalance, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
+  // Merged applicants collapse to ONE row per real person (admin view only
+  // — a shul-portal viewer only ever sees its own shul's own row anyway, so
+  // there's nothing to collapse there). Each collapsed row displays the
+  // merge-group PRIMARY's own submitted data with a `mergeShuls` list of
+  // every contributing shul in join order; a secondary's own originally-
+  // submitted fields are still reachable from GET /:id's mergeGroup. This
+  // is a same-PAGE dedup, not a group-aware COUNT/OFFSET — `total` still
+  // counts raw rows, so a page can legitimately render fewer than pageSize
+  // items when two members of the same group both landed on it. Getting
+  // the count exactly right would need a much larger rewrite of every
+  // filter above to be merge-group-aware at the SQL level; this trades a
+  // little pagination precision for a correct, simple collapse.
+  const finalRows = req.user.role === 'shul' ? withBalance : collapseMergedApplicantRows(req.user.org_id, withBalance);
+  res.json({ applicants: maskForShul(redact(finalRows, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
 });
+
+function collapseMergedApplicantRows(orgId, rows) {
+  const secondaryRows = rows.filter(r => r.merge_group_id && r.merge_group_id !== r.id);
+  const primaryIds = [...new Set(secondaryRows.map(r => r.merge_group_id))];
+  const primaryById = new Map();
+  if (primaryIds.length) {
+    const primaryRows = db.prepare(`SELECT a.*, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a
+      LEFT JOIN shuls s ON s.id = a.shul_id LEFT JOIN shuls ps ON ps.id = a.previous_shul_id
+      WHERE a.org_id = ? AND a.id IN (${primaryIds.map(() => '?').join(',')})`).all(orgId, ...primaryIds);
+    for (const p of primaryRows) primaryById.set(p.id, p);
+  }
+  const seenGroups = new Set();
+  const out = [];
+  for (const r of rows) {
+    const groupKey = r.merge_group_id || r.id;
+    if (seenGroups.has(groupKey)) continue;
+    seenGroups.add(groupKey);
+    if (r.merge_group_id && r.merge_group_id !== r.id && primaryById.has(r.merge_group_id)) {
+      // Substitute the primary's own submitted data, but keep this row's
+      // already-computed (group-shared) balance figures rather than
+      // re-fetching — loaded/spent/remaining are identical for every
+      // member of a group by construction (see applicantBalance.js).
+      out.push({ ...primaryById.get(r.merge_group_id), loaded: r.loaded, spent: r.spent, remaining: r.remaining });
+    } else {
+      out.push(r);
+    }
+  }
+  // Attach the ordered contributing-shul list to every row that's part of a
+  // group, one bulk query rather than N+1.
+  const groupKeys = [...new Set(out.filter(r => r.merge_group_id).map(r => r.merge_group_id))];
+  if (groupKeys.length) {
+    const members = db.prepare(`SELECT a.id, a.merge_group_id, a.created_at, s.name_en as member_shul_name FROM applicants a
+      LEFT JOIN shuls s ON s.id = a.shul_id WHERE a.org_id = ? AND a.merge_group_id IN (${groupKeys.map(() => '?').join(',')}) ORDER BY a.created_at ASC`).all(orgId, ...groupKeys);
+    const byGroup = new Map();
+    for (const m of members) {
+      if (!byGroup.has(m.merge_group_id)) byGroup.set(m.merge_group_id, []);
+      byGroup.get(m.merge_group_id).push({ shul_name: m.member_shul_name || null, created_at: m.created_at });
+    }
+    for (const r of out) if (r.merge_group_id && byGroup.has(r.merge_group_id)) r.mergeShuls = byGroup.get(r.merge_group_id);
+  }
+  return out;
+}
 
 // Full-detail CSV export — every field, no pagination, respects the same
 // filters as the list view. Must be registered before /:id.
@@ -341,6 +396,18 @@ router.get('/:id', (req, res) => {
   const cardApplicantIds = isAdminViewer ? getMergeGroupIds(req.user.org_id, [applicant.id]) : [applicant.id];
   const cards = db.prepare(`SELECT * FROM cards WHERE applicant_id IN (${cardApplicantIds.map(() => '?').join(',')}) ORDER BY created_at DESC`).all(...cardApplicantIds);
   const balance = isAdminViewer ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 }) : null;
+  // Transactions tab (admin-only) — real money moved, by which shul, and
+  // every store purchase — both merge-group aware via cardApplicantIds
+  // above, same reasoning as cards/balance: this is genuinely "the whole
+  // person's" ledger, not just whatever's attached to this one row.
+  let allocations = [], cardTransactions = [];
+  if (isAdminViewer) {
+    const idPh = cardApplicantIds.map(() => '?').join(',');
+    allocations = db.prepare(`SELECT sa.*, s.name_en as shul_name FROM shul_allocations sa LEFT JOIN shuls s ON s.id = sa.shul_id
+      WHERE sa.applicant_id IN (${idPh}) ORDER BY sa.created_at DESC`).all(...cardApplicantIds);
+    cardTransactions = db.prepare(`SELECT t.*, c.applicant_id FROM card_transactions t JOIN cards c ON c.id = t.card_id
+      WHERE c.applicant_id IN (${idPh}) ORDER BY t.occurred_at DESC, t.created_at DESC`).all(...cardApplicantIds);
+  }
   const flags = req.user.role === 'shul' ? [] : db.prepare(`SELECT * FROM duplicate_flags WHERE entity_type='applicant' AND (entity_id=? OR matched_entity_id=?) AND status='open'`).all(applicant.id, applicant.id);
   // Every other record that's this same real person — confirmed (already
   // merged, see services/duplicates.js's mergeApplicants) OR still just an
@@ -354,13 +421,16 @@ router.get('/:id', (req, res) => {
   if (req.user.role !== 'shul') {
     const groupIds = getMergeGroupIds(req.user.org_id, [applicant.id]).filter(gid => gid !== applicant.id);
     if (groupIds.length) {
-      mergeGroup = db.prepare(`SELECT a.id, a.first_name, a.last_name, a.approval_status, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a
+      // created_at drives display order in the profile — "which shul added
+      // this person first, second, and so on" (each shul's own submission
+      // timestamp, since a merge never changes when a member was created).
+      mergeGroup = db.prepare(`SELECT a.id, a.first_name, a.last_name, a.approval_status, a.created_at, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a
           LEFT JOIN shuls s ON s.id = a.shul_id LEFT JOIN shuls ps ON ps.id = a.previous_shul_id
-          WHERE a.id IN (${groupIds.map(() => '?').join(',')})`).all(...groupIds);
+          WHERE a.id IN (${groupIds.map(() => '?').join(',')}) ORDER BY a.created_at ASC`).all(...groupIds);
     }
   }
   const requiresShulContribution = !!db.prepare('SELECT require_shul_contribution FROM seasons WHERE id = ?').get(applicant.season_id)?.require_shul_contribution;
-  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, requiresShulContribution, balance });
+  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, requiresShulContribution, balance, allocations, cardTransactions });
 });
 
 // Who edited this record and when — a shul viewing their own applicant
@@ -876,73 +946,79 @@ router.post('/:id/approve', requirePermission('applicants', 'can_edit'), async (
     }
     // A merged-duplicate secondary (see services/duplicates.js's
     // mergeApplicants — confirmed the same real person as another shul's
-    // applicant) never gets its own disccardpromos account/card, no matter
-    // how many times it's approved — that would be exactly the double gift
-    // card merging was meant to prevent. It just links straight to whatever
-    // the primary member already has (nothing yet if the primary hasn't
-    // been approved either) so admin views show the connection.
+    // applicant) still gets its OWN real contribution pushed — that's a
+    // distinct, genuine sum of money a different shul is actually giving,
+    // never "the same money twice" — but it always goes onto the ONE shared
+    // disccardpromos customer, which disccard only ever knows by whichever
+    // external_id it was originally created under (the merge-group PRIMARY's
+    // — see fundingAnchor below), never a secondary's own external_id. A
+    // secondary calling upsertAccountForApproval/addFunds under its own
+    // external_id would either fail (no such customer) or, worse, create a
+    // second, duplicate customer — exactly what merging was meant to
+    // prevent. provider_account_id still propagates to every member either
+    // way, so every profile in the group shows the one shared account.
     let providerAccountError = null, providerFundsError = null;
-    if (isMergedSecondary(applicant)) {
-      const primary = db.prepare('SELECT provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id);
-      if (primary?.provider_account_id) db.prepare('UPDATE applicants SET provider_account_id = ? WHERE id = ?').run(primary.provider_account_id, applicant.id);
-    } else {
-      // Writes/links the disccardpromos account for this applicant — idempotent
-      // by external_id (existing account just gets the current season added;
-      // a new one is created under a group matching the shul's English name,
-      // creating that group first if needed — see giftcard.js's
-      // upsertAccountForApproval). Best-effort: a disccardpromos hiccup here
-      // must never undo or block the approval that already committed above,
-      // same "external side-effect can fail without failing the action" pattern
-      // as the approval email right above.
-      if (applicant.shul_id && !applicant.provider_exempt) {
-        try {
-          const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(applicant.shul_id);
-          const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, applicant, shul?.name_en || 'Unknown'));
-          if (result.accountId) {
-            db.prepare('UPDATE applicants SET provider_account_id = ? WHERE id = ?').run(result.accountId, applicant.id);
-            // This applicant is (or might become) a merge-group primary —
-            // propagate the account to any secondaries linked to it so
-            // their views catch up once this write finally happened.
-            db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE merge_group_id = ? AND id != ?`).run(result.accountId, applicant.id, applicant.id);
-          }
-        } catch (e) {
-          providerAccountError = e.message;
-          console.error('[giftcard] failed to write disccardpromos account on approval:', e.message);
+    const fundingAnchor = isMergedSecondary(applicant)
+      ? (db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
+      : applicant;
+    // Writes/links the disccardpromos account for the group's anchor identity
+    // — idempotent by external_id (existing account just gets the current
+    // season added; a new one is created under a group matching the shul's
+    // English name, creating that group first if needed — see giftcard.js's
+    // upsertAccountForApproval). Best-effort: a disccardpromos hiccup here
+    // must never undo or block the approval that already committed above,
+    // same "external side-effect can fail without failing the action" pattern
+    // as the approval email right above.
+    if (applicant.shul_id && !applicant.provider_exempt) {
+      try {
+        const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(applicant.shul_id);
+        const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, fundingAnchor, shul?.name_en || 'Unknown'));
+        if (result.accountId) {
+          // Every member of this merge group (fundingAnchor's own group,
+          // which for a non-merged applicant is just itself) shares this one
+          // account id — propagate to all of them, not just whoever
+          // triggered this particular write.
+          db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? OR merge_group_id = ?`).run(result.accountId, fundingAnchor.id, fundingAnchor.id);
         }
+      } catch (e) {
+        providerAccountError = e.message;
+        console.error('[giftcard] failed to write disccardpromos account on approval:', e.message);
       }
-      // disccardpromos has no separate "assign/activate a card" step — crediting
-      // a customer's balance against a configured Package (Settings >
-      // Organization > Gift Card Loading) via add-funds IS how a card actually
-      // gets issued with an amount. Same best-effort pattern as the account
-      // write above: skipped if that write failed (nothing to credit yet), and
-      // never blocks/undoes the approval itself. provider_exempt applicants
-      // (one-time backfill import — see POST /import) never reach either block,
-      // permanently, no matter how many times they're approved/rejected.
-      if (applicant.shul_id && !applicant.provider_exempt && !providerAccountError) {
-        if (amount > 0) {
-          const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
-          if (!discountId) {
-            providerFundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — card amount was not loaded.';
-          } else {
-            try {
-              await giftcard.addFunds(applicant.season_id, { externalId: applicant.external_id, discountId, amount });
-            } catch (e) {
-              providerFundsError = e.message;
-              console.error('[giftcard] failed to load funds on approval:', e.message);
-            }
-          }
+    }
+    // disccardpromos has no separate "assign/activate a card" step — crediting
+    // a customer's balance against a configured Package (Settings >
+    // Organization > Gift Card Loading) via add-funds IS how a card actually
+    // gets issued with an amount. Same best-effort pattern as the account
+    // write above: skipped if that write failed (nothing to credit yet), and
+    // never blocks/undoes the approval itself. provider_exempt applicants
+    // (one-time backfill import — see POST /import) never reach either block,
+    // permanently, no matter how many times they're approved/rejected. This
+    // applicant's OWN amount is what gets pushed, even when fundingAnchor is
+    // a different row (the primary) — the account is shared, the money isn't.
+    if (applicant.shul_id && !applicant.provider_exempt && !providerAccountError) {
+      if (amount > 0) {
+        const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
+        if (!discountId) {
+          providerFundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — card amount was not loaded.';
         } else {
-          // amount<=0 isn't itself an error — the account still gets
-          // created above with no funds, same as an intentionally-comped
-          // applicant — but it used to be entirely silent, indistinguishable
-          // from funds genuinely loading successfully. This resolved from
-          // req.body.card_amount ?? applicant.card_amount ?? season's
-          // default_card_amount ?? 0 — if this fires for every approval,
-          // the season's default (or each applicant's own Card Amount) is
-          // almost certainly $0/unset and that's the real thing to fix, not
-          // this route.
-          providerFundsError = 'Card amount resolved to $0 — nothing was sent to disccardpromos. Set a Card Amount on the applicant (or the season default) before approving if this should have loaded funds.';
+          try {
+            await giftcard.addFunds(applicant.season_id, { externalId: fundingAnchor.external_id, discountId, amount });
+          } catch (e) {
+            providerFundsError = e.message;
+            console.error('[giftcard] failed to load funds on approval:', e.message);
+          }
         }
+      } else {
+        // amount<=0 isn't itself an error — the account still gets
+        // created above with no funds, same as an intentionally-comped
+        // applicant — but it used to be entirely silent, indistinguishable
+        // from funds genuinely loading successfully. This resolved from
+        // req.body.card_amount ?? applicant.card_amount ?? season's
+        // default_card_amount ?? 0 — if this fires for every approval,
+        // the season's default (or each applicant's own Card Amount) is
+        // almost certainly $0/unset and that's the real thing to fix, not
+        // this route.
+        providerFundsError = 'Card amount resolved to $0 — nothing was sent to disccardpromos. Set a Card Amount on the applicant (or the season default) before approving if this should have loaded funds.';
       }
     }
     res.json({ applicant: db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.id), emailError, providerAccountError, providerFundsError });
@@ -1117,19 +1193,19 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
     // Same best-effort account-write + fund-load as the single /:id/approve
     // route — see the comments there. A disccardpromos hiccup on one
     // applicant never stops the rest of the batch. A merged-duplicate
-    // secondary (see isMergedSecondary) never gets its own account/card —
-    // just links to whatever the primary already has.
-    if (isMergedSecondary(applicant)) {
-      const primary = db.prepare('SELECT provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id);
-      if (primary?.provider_account_id) db.prepare('UPDATE applicants SET provider_account_id = ? WHERE id = ?').run(primary.provider_account_id, id);
-    } else if (applicant.shul_id && !applicant.provider_exempt) {
+    // secondary (see isMergedSecondary) still pushes its OWN real amount —
+    // just onto the group's one shared account (identified by the PRIMARY's
+    // external_id, the only one disccard actually knows), never its own.
+    if (applicant.shul_id && !applicant.provider_exempt) {
+      const fundingAnchor = isMergedSecondary(applicant)
+        ? (db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
+        : applicant;
       let accountOk = false;
       try {
         const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(applicant.shul_id);
-        const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, applicant, shul?.name_en || 'Unknown'));
+        const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, fundingAnchor, shul?.name_en || 'Unknown'));
         if (result.accountId) {
-          db.prepare('UPDATE applicants SET provider_account_id = ? WHERE id = ?').run(result.accountId, id);
-          db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE merge_group_id = ? AND id != ?`).run(result.accountId, id, id);
+          db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? OR merge_group_id = ?`).run(result.accountId, fundingAnchor.id, fundingAnchor.id);
         }
         accountOk = true;
       } catch (e) {
@@ -1138,7 +1214,7 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
         console.error('[giftcard] failed to write disccardpromos account on mass-approve:', e.message);
       }
       if (accountOk && amount > 0 && discountId) {
-        try { await giftcard.addFunds(applicant.season_id, { externalId: applicant.external_id, discountId, amount }); }
+        try { await giftcard.addFunds(applicant.season_id, { externalId: fundingAnchor.external_id, discountId, amount }); }
         catch (e) {
           providerErrors++;
           providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: card not loaded — ${e.message}`);

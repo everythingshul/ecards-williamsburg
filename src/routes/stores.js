@@ -384,6 +384,30 @@ router.post('/:id/invite', requirePermission('stores', 'can_edit'), async (req, 
   res.json({ ok: true, emailError: result.emailError });
 });
 
+// Mints a short-lived, single-use exchange code for "Enter Portal" (see
+// POST /auth/impersonate/:token in auth.js, which redeems it for a real
+// session) — never the store's own JWT/password, so this staff member's
+// own session is never at risk of being handed to the store, and the
+// store's actual password (if they have one) is never read, changed, or
+// even touched. Gated on the dedicated portal_impersonation permission
+// (default-denied for everyone but super_admin, same as Recent Actions)
+// rather than stores' own can_edit — "can edit this store's record" and
+// "can act as this store in their own portal" are different levels of
+// trust and shouldn't be bundled by default. Mirrors shuls.js's identical
+// route.
+router.post('/:id/impersonate', requireAdmin, requirePermission('portal_impersonation'), (req, res) => {
+  const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  const portalUser = db.prepare(`SELECT * FROM users WHERE store_id = ? AND role = 'store'`).get(store.id);
+  if (!portalUser || !portalUser.is_active) return res.status(400).json({ error: "This store doesn't have an active portal login yet — approve or invite them first." });
+  const token = uuid();
+  const expires = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+  db.prepare(`INSERT INTO impersonation_tokens (token, user_id, created_by, org_id, expires_at) VALUES (?,?,?,?,?)`)
+    .run(token, portalUser.id, req.user.id, req.user.org_id, expires);
+  logAudit(req.user.org_id, req.user.id, 'impersonate', 'store', store.id, null, { name: store.name, impersonated_email: portalUser.email }, req.ip);
+  res.json({ token });
+});
+
 router.post('/mass-invite', requirePermission('stores', 'can_edit'), async (req, res) => {
   const { ids, bypass_contract } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });

@@ -24,7 +24,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // server-side gate — a resource missing from this list, or a route that
 // only checks requireAdmin instead of requirePermission(), is a section no
 // per-user permission can ever actually restrict, no matter what the UI shows.
-export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit', 'shul_payments'];
+export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'audit', 'shul_payments', 'portal_impersonation'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource. Recent Actions is a full
@@ -34,8 +34,14 @@ export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'a
 // a specific user is explicitly granted it via Users & Permissions. This
 // preserves the original hardcoded "super_admin only" behavior as the
 // default while still making it a real, grantable permission.
+// portal_impersonation ("Enter Portal" — see POST /shuls/:id/impersonate,
+// /stores/:id/impersonate) gets the same treatment for the same reason: it
+// hands whoever has it a real, unaudited-from-the-shul's-side session as
+// that shul/store, so it should never be something org_admin/staff get
+// silently for free just by being org_admin/staff.
 const RESOURCE_DEFAULT_OVERRIDES = {
   audit: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
+  portal_impersonation: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
 };
 
 // One user's can_view/can_edit/can_export/scope for every resource above —

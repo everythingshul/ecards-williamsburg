@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entering Portal · Kipas Hair BP Platform</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<style>body { background: var(--brand-bg); display:flex; flex-direction:column; min-height:100vh; }
+.login-wrap { flex:1; display:flex; align-items:center; justify-content:center; padding: 40px 20px; }
+.login-box { width: 380px; text-align:center; } .login-box .brand-mark { height: 56px; margin-bottom: 14px; } .login-box h1 { color:#fdf7ea; font-size: 20px; }</style>
+</head>
+<body>
+<div class="login-wrap">
+<div class="login-box">
+  <img class="brand-mark" src="/img/org-logo.png" alt="Organization logo">
+  <h1 id="status-heading">Entering Portal…</h1>
+  <div class="card" id="status-card"><p class="small-muted">Please wait.</p></div>
+</div>
+</div>
+<script src="/js/app.js"></script>
+<script>api('/orgs/resolve').then(({ org }) => applyOrgTheme(org)).catch(() => {});</script>
+<script>renderPublicFooter();</script>
+<script>
+(async () => {
+  // Marked BEFORE Auth.set() below runs — Auth._store() reads this flag to
+  // decide sessionStorage vs localStorage, so this session must never touch
+  // the tab's shared localStorage (see app.js's Auth for why: this tab was
+  // opened via window.open() from an admin page, and localStorage is
+  // shared across every tab of this origin — writing the shul/store's
+  // token there would silently sign the ADMIN'S OWN tab into their account
+  // too).
+  sessionStorage.setItem('ec_impersonating', '1');
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token');
+  const label = params.get('label') || '';
+  if (label) sessionStorage.setItem('ec_impersonating_label', label);
+  if (!token) {
+    qs('#status-heading').textContent = 'Link Missing';
+    qs('#status-card').innerHTML = '<p class="small-muted">No portal link was provided. Close this tab and use "Enter Portal" again from the shul/store\'s profile.</p>';
+    return;
+  }
+  try {
+    const { token: authToken, user, permissions } = await api(`/auth/impersonate/${token}`, { method: 'POST' });
+    Auth.set(authToken, user, permissions);
+    location.href = user.role === 'shul' ? '/shul-portal/dashboard' : '/store-portal/dashboard';
+  } catch (err) {
+    qs('#status-heading').textContent = 'Could Not Enter Portal';
+    qs('#status-card').innerHTML = `<p class="small-muted">${esc(err.message || 'This link has expired or was already used.')} Close this tab and use "Enter Portal" again from the shul/store\'s profile.</p>`;
+  }
+})();
+</script>
+</body>
+</html>

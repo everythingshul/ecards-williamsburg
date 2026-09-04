@@ -29,6 +29,23 @@ function usedMatch(column, id) {
   return db.prepare(`SELECT COALESCE(SUM(match_amount),0) t FROM shul_allocations WHERE ${column} = ?`).get(id).t;
 }
 
+// The per-applicant cap means "how much match ONE PERSON can receive" — a
+// merged applicant (see services/duplicates.js's mergeApplicants) is
+// literally one person split across however many shuls' own rows, so their
+// cap usage has to be summed across every member's applicant_id, not just
+// whichever row this particular allocation happens to be against. Without
+// this, each shul's own copy of the same person would track match usage
+// completely independently, letting a per-applicant cap of (say) $100 be
+// consumed twice — once per row — for what disccardpromos only ever sees as
+// one real account. A non-merged applicant is just a group of one, so this
+// is a strict superset of the old per-row behavior, never a narrower one.
+function usedMatchForApplicant(applicant) {
+  const groupId = applicant.merge_group_id || applicant.id;
+  const memberIds = db.prepare('SELECT id FROM applicants WHERE id = ? OR merge_group_id = ?').all(groupId, groupId).map(r => r.id);
+  const placeholders = memberIds.map(() => '?').join(',');
+  return db.prepare(`SELECT COALESCE(SUM(match_amount),0) t FROM shul_allocations WHERE applicant_id IN (${placeholders})`).get(...memberIds).t;
+}
+
 // The REAL match a new allocation actually earns — order-dependent against
 // however much room is left in each applicable cap right now (whichever
 // shul got there first keeps what they already consumed; a later
@@ -40,7 +57,7 @@ export function computeRealMatch({ applicant, shul, season, baseAmount }) {
   let room = baseAmount * rate;
 
   const applicantCap = resolveApplicantCap(applicant, season);
-  if (applicantCap != null) room = Math.min(room, Math.max(0, applicantCap - usedMatch('applicant_id', applicant.id)));
+  if (applicantCap != null) room = Math.min(room, Math.max(0, applicantCap - usedMatchForApplicant(applicant)));
 
   const shulCap = resolveShulCap(shul, season);
   if (shulCap != null) room = Math.min(room, Math.max(0, shulCap - usedMatch('shul_id', shul.id)));
@@ -92,6 +109,18 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   const { rate, matchAmount } = computeRealMatch({ applicant, shul, season, baseAmount });
   const totalAmount = Math.round((baseAmount + matchAmount) * 100) / 100;
 
+  // A merge-group secondary (see services/duplicates.js's mergeApplicants
+  // and routes/applicants.js's isMergedSecondary) shares one real
+  // disccardpromos customer with the rest of its group, but that customer
+  // is only ever known to disccard under the group's PRIMARY member's
+  // external_id — addFunds under a secondary's own external_id would either
+  // fail (no such customer) or create a second, duplicate one. This shul's
+  // real base_amount still gets pushed in full either way; only WHICH
+  // external_id identifies the shared account changes.
+  const fundingExternalId = (applicant.merge_group_id && applicant.merge_group_id !== applicant.id)
+    ? (db.prepare('SELECT external_id FROM applicants WHERE id = ?').get(applicant.merge_group_id)?.external_id || applicant.external_id)
+    : applicant.external_id;
+
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   let giftcardStatus = 'ok', giftcardError = null;
   if (!discountId) {
@@ -99,7 +128,7 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
   } else {
     try {
-      await giftcard.addFunds(applicant.season_id, { externalId: applicant.external_id, discountId, amount: totalAmount });
+      await giftcard.addFunds(applicant.season_id, { externalId: fundingExternalId, discountId, amount: totalAmount });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -117,42 +146,62 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
 }
 
 // Reverses an allocation as an equal-and-opposite entry (never a delete —
-// same reasoning as every other money record in this app). Blocked once
-// the applicant's card balance no longer covers the amount being pulled
-// back — a fungible balance can't prove which specific dollars are still
-// sitting there, so "still covered" is the only check that's actually
-// possible, per the confirmed design.
+// same reasoning as every other money record in this app). A fungible
+// balance can't prove which specific dollars are still sitting there, so
+// "how much is left on the card right now" is the only check that's
+// actually possible — but unlike before, a lower balance no longer blocks
+// the whole reversal: it pulls back whatever's still retrievable (up to the
+// full original amount) and WRITES OFF the rest — the shul's balance is
+// only restored for the portion actually retrieved, never for money the
+// applicant already spent, since that's real money that's genuinely gone.
+// The shortfall (if any) is returned so the caller can warn about it.
 export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   const original = db.prepare('SELECT * FROM shul_allocations WHERE id = ? AND org_id = ?').get(allocationId, orgId);
   if (!original) throw new Error('Allocation not found');
   if (original.reversed_at) throw new Error('This allocation has already been reversed');
 
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(original.applicant_id);
+  // Same merge-group anchor reasoning as createAllocation above — the
+  // shared customer is only ever known to disccard under the group's
+  // PRIMARY member's external_id.
+  const fundingExternalId = (applicant?.merge_group_id && applicant.merge_group_id !== applicant.id)
+    ? (db.prepare('SELECT external_id FROM applicants WHERE id = ?').get(applicant.merge_group_id)?.external_id || applicant?.external_id)
+    : applicant?.external_id;
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   // getCustomerByExternalId (not getCardBalance, which needs a real 16-digit
   // card number this app never retains — see cards.card_number_masked's own
   // "last 4 only, ever displayed" comment) is the one already live-tested
   // against the real API elsewhere in this file.
-  if (applicant?.external_id && discountId) {
-    const customer = await giftcard.getCustomerByExternalId(original.season_id, applicant.external_id, { balances: true }).catch(() => null);
+  let retrievable = original.total_amount, shortfall = 0;
+  if (fundingExternalId && discountId) {
+    const customer = await giftcard.getCustomerByExternalId(original.season_id, fundingExternalId, { balances: true }).catch(() => null);
     const pkg = customer?.packages?.find(p => String(p.id) === String(discountId));
     const currentBalance = pkg ? Number(pkg.amount) : null;
     if (currentBalance != null && currentBalance < original.total_amount - 1e-9) {
-      throw new Error(`Cannot undo — the applicant's card balance ($${currentBalance.toFixed(2)}) no longer covers the amount given ($${original.total_amount.toFixed(2)}), meaning some of it has already been spent.`);
+      retrievable = Math.max(0, Math.round(currentBalance * 100) / 100);
+      shortfall = Math.round((original.total_amount - retrievable) * 100) / 100;
     }
   }
 
-  if (discountId) {
-    await giftcard.addFunds(original.season_id, { externalId: applicant.external_id, discountId, amount: -original.total_amount });
+  if (discountId && retrievable > 0) {
+    await giftcard.addFunds(original.season_id, { externalId: fundingExternalId, discountId, amount: -retrievable });
   }
+
+  // Split the retrievable amount between base/match in the same proportion
+  // as the original allocation, so a partial reversal claws back match-cap
+  // room (see usedMatch() above) in proportion to what was actually pulled
+  // back, rather than over- or under-crediting either bucket.
+  const matchRatio = original.total_amount > 0 ? original.match_amount / original.total_amount : 0;
+  const reversalMatch = Math.round(retrievable * matchRatio * 100) / 100;
+  const reversalBase = Math.round((retrievable - reversalMatch) * 100) / 100;
 
   const id = uuid();
   db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, reversal_of)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -original.base_amount, -original.match_amount, -original.total_amount, original.match_rate_used, original.is_admin_override, userId, discountId ? 'ok' : 'failed', original.id);
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, discountId ? 'ok' : 'failed', original.id);
 
   db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
-  logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, reversalRow, ip);
-  return reversalRow;
+  logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
+  return { ...reversalRow, shortfall };
 }

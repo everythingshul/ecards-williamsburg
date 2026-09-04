@@ -14,13 +14,14 @@
 Auth.requireAdmin();
 // Kept in sync with PERMISSION_RESOURCES (src/middleware/permissions.js) —
 // every resource that can be gated at all gets a row here.
-const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit'];
+const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit','portal_impersonation'];
 const RESOURCE_LABELS = {
   dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
   shul_payments: 'Shul Transactions & Allocations',
   seasons: 'Seasons', forms: 'Form Builder', tasks: 'Tasks', emails: 'Email Center', sms: 'SMS Center',
   updates: 'Updates', documents: 'E-Signatures', site_content: 'Site Content', contract_settings: 'Documents',
   users: 'Users & Permissions', settings: 'Settings', audit: 'Recent Actions',
+  portal_impersonation: 'Enter Shul/Store Portal',
 };
 const HIDABLE_FIELDS = {
   shuls: ['name_en','name_he','address','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email'],
@@ -117,6 +118,7 @@ function permRow(resource, p) {
         <label class="checkbox-row"><input type="checkbox" class="p-export" ${p.can_export?'checked':''}>Export</label>
       </div>
     </div>
+    ${resource === 'portal_impersonation' ? '<p class="small-muted" style="margin:6px 0 0">Only "View" matters here — it\'s what shows the "Enter Portal" button on a shul/store\'s profile and lets it be used. This signs the admin into that shul or store\'s own portal, seeing and doing exactly what they can, with no separate password.</p>' : ''}
     <label style="margin-top:10px">Scope</label>
     <select class="p-scope"><option value="all" ${p.scope==='all'?'selected':''}>All records</option><option value="assigned" ${p.scope==='assigned'?'selected':''}>Only assigned records</option></select>
     ${fields ? `<label>${resource === 'dashboard' ? 'Hidden Sections (invisible to this user)' : 'Hidden Fields (invisible to this user)'}</label><div class="pill-row">${fields.map(f => `<label class="checkbox-row"><input type="checkbox" class="p-hide" value="${f}" ${p.hidden_fields.includes(f)?'checked':''}>${esc(HIDABLE_FIELD_LABELS[f] || f)}</label>`).join('')}</div>` : ''}
@@ -139,7 +141,7 @@ async function openUser(id) {
     // access to everything), simply opening their profile and hitting Save
     // would silently downgrade them to view-only across the entire app.
     const defaultPermFor = (r, role) => {
-      if (r === 'audit') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
+      if (r === 'audit' || r === 'portal_impersonation') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
       if (role === 'super_admin' || role === 'org_admin') return { can_view: 1, can_edit: 1, can_export: 1, scope: 'all', hidden_fields: [] };
       return { can_view: 1, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
     };

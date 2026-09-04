@@ -2,14 +2,29 @@
 const API_BASE = '/api';
 
 const Auth = {
-  token() { return localStorage.getItem('ec_token'); },
-  user() { try { return JSON.parse(localStorage.getItem('ec_user') || 'null'); } catch { return null; } },
+  // "Enter Portal" (see impersonate.html) opens in a NEW TAB and needs its
+  // own session that's completely independent of whatever tab opened it —
+  // localStorage is shared across every tab of this origin, so writing an
+  // impersonated shul/store's token there would silently log the ADMIN'S
+  // OWN tab into that account too. sessionStorage isn't shared between
+  // tabs (a tab opened via window.open() starts with a one-time COPY of
+  // the opener's sessionStorage, not a live link to it), so an
+  // impersonation session lives there instead — isolated to this one tab,
+  // and gone the moment it's closed. Every other page/tab keeps using
+  // localStorage exactly as before; only a tab that's actually running an
+  // impersonation session (ec_impersonating set — done by impersonate.html
+  // before it ever calls set()) is redirected through sessionStorage here.
+  _store() { return (sessionStorage.getItem('ec_impersonating') === '1') ? sessionStorage : localStorage; },
+  isImpersonating() { return sessionStorage.getItem('ec_impersonating') === '1'; },
+  impersonatingLabel() { return sessionStorage.getItem('ec_impersonating_label') || ''; },
+  token() { return this._store().getItem('ec_token'); },
+  user() { try { return JSON.parse(this._store().getItem('ec_user') || 'null'); } catch { return null; } },
   // permissions is the resource->{can_view,can_edit,can_export,scope} map
   // computed server-side at login/me (see routes/auth.js) — cached onto the
   // user object so Auth.can() below can check it synchronously, no per-page
   // fetch needed. Optional so existing call sites that don't have it yet
   // (or a stale cached user from before this existed) don't break.
-  set(token, user, permissions) { localStorage.setItem('ec_token', token); localStorage.setItem('ec_user', JSON.stringify(permissions ? { ...user, permissions } : user)); },
+  set(token, user, permissions) { const s = this._store(); s.setItem('ec_token', token); s.setItem('ec_user', JSON.stringify(permissions ? { ...user, permissions } : user)); },
   // Refreshes the cached user's permissions from the server in the
   // background — picks up a permission change an admin just made without
   // requiring the affected user to log out/in. Fire-and-forget; the CURRENT
@@ -22,7 +37,24 @@ const Auth = {
       .then(data => { if (data?.user) this.set(this.token(), data.user, data.permissions); })
       .catch(() => {});
   },
-  logout() { localStorage.removeItem('ec_token'); localStorage.removeItem('ec_user'); location.href = '/login'; },
+  // An impersonation session ends by closing the tab (it was opened
+  // specifically for this, via window.open()) rather than going back to
+  // /login in the same tab — there's no "logged out" state worth showing
+  // for a tab that only ever existed to view someone else's portal. If the
+  // tab wasn't script-opened (browsers then refuse to script-close it,
+  // e.g. a link that was middle-clicked/opened manually instead of through
+  // the Enter Portal button), fall back to /login after a moment.
+  logout() {
+    const impersonating = this.isImpersonating();
+    this._store().removeItem('ec_token'); this._store().removeItem('ec_user');
+    if (impersonating) {
+      sessionStorage.removeItem('ec_impersonating'); sessionStorage.removeItem('ec_impersonating_label');
+      window.close();
+      setTimeout(() => { location.href = '/login'; }, 300);
+      return;
+    }
+    location.href = '/login';
+  },
   requireAuth() { if (!this.token()) location.href = '/login'; },
   // Bounces away immediately if the signed-in role isn't one of `roles` —
   // e.g. a shul-portal login typing /admin/dashboard into the address
@@ -85,8 +117,8 @@ async function api(path, { method = 'GET', body, isForm = false } = {}) {
   if (Auth.token()) headers['Authorization'] = `Bearer ${Auth.token()}`;
   if (!isForm) headers['Content-Type'] = 'application/json';
   const res = await fetch(API_BASE + path, { method, headers, body: isForm ? body : (body ? JSON.stringify(body) : undefined) });
-  let data = {};
-  try { data = await res.json(); } catch {}
+  let data = {}, parsed = true;
+  try { data = await res.json(); } catch { parsed = false; }
   // A 401 with no token attached (e.g. a failed /auth/login) is a real
   // credentials/permission error, not a stale session — surface the actual
   // server message instead of forcing a confusing "session expired" logout.
@@ -96,6 +128,16 @@ async function api(path, { method = 'GET', body, isForm = false } = {}) {
   }
   if (res.status === 423) { toast(data.error || 'Account paused', true); throw new Error(data.error); }
   if (!res.ok) { const err = new Error(data.error || `Request failed (${res.status})`); err.data = data; throw err; }
+  // Every route in this app returns a real JSON body on a 2xx response,
+  // never an empty one — getting here with a body that failed to parse
+  // means something between the browser and the server mangled or
+  // truncated a genuinely successful response (a flaky mobile connection,
+  // a proxy hiccup mid-request). Silently returning {} used to let every
+  // call site's blind destructuring (e.g. login.html's `const { user } =
+  // await api(...)`, immediately followed by `user.role`) crash with a
+  // raw, meaningless "undefined is not an object" instead of a real,
+  // actionable message.
+  if (!parsed) throw new Error('Something went wrong loading the response. Please try again.');
   return data;
 }
 
@@ -287,8 +329,18 @@ function renderShell(activeHref, contentHtml) {
   else if (role === 'store') items = STORE_NAV;
   else if (['staff', 'org_admin'].includes(role)) Auth.refreshPermissions(); // super_admin always has full access; skip the round-trip
   const navHtml = items.map(i => `<a href="${i.href}" class="${activeHref === i.href ? 'active' : ''}" title="${esc(i.label)}" data-href="${i.href}"><span class="nav-label">${esc(i.label)}</span></a>`).join('');
+  // A staff member using "Enter Portal" (see impersonate.html) is signed
+  // into a shul/store's own account in this tab — this bar is the only
+  // thing distinguishing that from actually being that shul/store, so it
+  // has to be impossible to miss or scroll past.
+  const impersonateBar = Auth.isImpersonating()
+    ? `<div id="impersonate-bar" style="background:var(--danger,#b91c1c);color:#fff;padding:8px 16px;font-size:13px;text-align:center;font-weight:600">
+        Viewing as ${esc(Auth.impersonatingLabel() || (user?.first_name || '') + ' ' + (user?.last_name || ''))} — staff view, no separate password
+        <button onclick="Auth.logout()" style="margin-left:12px;background:#fff;color:var(--danger,#b91c1c);border:none;padding:3px 10px;border-radius:3px;font-weight:700;cursor:pointer">Exit Portal</button>
+      </div>` : '';
   document.body.innerHTML = `
     <div class="app-shell">
+      ${impersonateBar}
       <header class="app-header" id="app-header">
         <div class="brand"><img src="/img/org-logo.png" alt="Organization logo"><div class="brand-name">Kupes Hair Williamsburg<span>Platform</span></div></div>
         <button class="header-menu-btn" id="header-menu-btn" aria-label="Toggle menu">&#9776;</button>
@@ -803,6 +855,19 @@ async function storeLandingUrl(user) {
     const { store } = await api(`/stores/${user.store_id}`);
     return (store.onboarding_step || 0) >= 3 ? '/store-portal/dashboard' : '/store-portal/onboarding';
   } catch { return '/store-portal/dashboard'; }
+}
+
+// "Enter Portal" — mints a one-time exchange code (see POST /shuls/:id or
+// /stores/:id/impersonate) and opens it in a new tab, which redeems it for
+// a real session as that shul/store (see impersonate.html and
+// Auth._store()/isImpersonating() for why a new tab, not this one). Shared
+// by shuls.html and stores.html rather than duplicated per page.
+async function enterPortal(resource, id, name) {
+  try {
+    const { token } = await api(`/${resource}/${id}/impersonate`, { method: 'POST' });
+    const url = `/impersonate?token=${encodeURIComponent(token)}&label=${encodeURIComponent(name || '')}`;
+    window.open(url, '_blank');
+  } catch (err) { toast(err.message, true); }
 }
 
 // Authenticated PDF view (opens in a new tab instead of forcing a download) —

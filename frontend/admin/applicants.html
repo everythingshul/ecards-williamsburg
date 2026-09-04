@@ -68,7 +68,14 @@ function contactLine(a) {
 const APPLICANT_COLUMNS = [
   { key: 'external_id', label: 'ID', sort: 'external_id', render: a => `<code>${esc(a.external_id||'')}</code>` },
   { key: 'name', label: 'Name', sort: 'last_name', render: a => `<strong>${esc(a.first_name)} ${esc(a.last_name)}</strong>${a.is_paused ? ' ' + badge('paused','paused') : ''}` },
-  { key: 'shul', label: 'Shul', render: a => esc(a.shul_name || (a.approval_status === 'soft_rejected' && a.previous_shul_name ? `Previously: ${a.previous_shul_name}` : '')) },
+  // mergeShuls (see collapseMergedApplicantRows in routes/applicants.js) is
+  // only present once this row represents more than one shul's submission
+  // of the same merged person — every contributing shul (primary included),
+  // already ordered by who added them first, since every member of a group
+  // shares one merge_group_id.
+  { key: 'shul', label: 'Shul', render: a => a.mergeShuls
+    ? `${esc(a.shul_name || '')} <span class="small-muted">(merged — ${a.mergeShuls.length} shuls: ${esc(a.mergeShuls.map(m => m.shul_name || '(no shul)').join(' → '))})</span>`
+    : esc(a.shul_name || (a.approval_status === 'soft_rejected' && a.previous_shul_name ? `Previously: ${a.previous_shul_name}` : '')) },
   { key: 'marital_status', label: 'Marital', render: a => esc(a.marital_status||'') },
   { key: 'contact', label: 'Contact', render: a => contactLine(a) },
   { key: 'email', label: 'Email', render: a => esc(a.email||'') },
@@ -234,19 +241,32 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openApplicant(id) {
   try {
-    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution, balance } = await api(`/applicants/${id}`);
+    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution, balance, allocations, cardTransactions } = await api(`/applicants/${id}`);
     const body = `
-      <div class="tabs" id="atabs"><button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button><button data-t="cards">Card (${cards.length})</button><button data-t="documents">Documents</button><button data-t="messages">Messages</button><button data-t="history">History</button></div>
+      <div class="tabs" id="atabs"><button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button><button data-t="cards">Card (${cards.length})</button><button data-t="transactions">Transactions</button><button data-t="documents">Documents</button><button data-t="messages">Messages</button><button data-t="history">History</button></div>
       <div id="atab-info">
         <div class="grid-2">
           <div><strong>Applicant ID</strong><br><code>${esc(a.external_id||'')}</code></div>
           <div><strong>Status</strong><br>${badge(a.approval_status, a.approval_status)} ${a.is_paused ? badge('paused','paused') : ''}</div>
         </div>
         ${a.approval_status === 'soft_rejected' && a.previous_shul_name ? `<div class="divider"></div><p class="small-muted">Previously at: <strong>${esc(a.previous_shul_name)}</strong></p>` : ''}
-        ${mergeGroup && mergeGroup.length ? `<div class="divider"></div><div style="color:var(--text-muted);background:#f9efe0;padding:8px 12px;border-radius:6px">
-          <strong>Same person, enrolled through ${mergeGroup.length + 1} record${mergeGroup.length ? 's' : ''}${a.merge_group_id === a.id ? ' (this is the primary record — the only one with a real gift card)' : (a.merge_group_id ? " — the primary record's shul holds the actual gift card" : ' — not yet resolved, see the duplicate flag below')}:</strong>
-          ${mergeGroup.map(m => `${esc(m.first_name)} ${esc(m.last_name)} — ${esc(m.shul_name || (m.previous_shul_name ? `previously ${m.previous_shul_name}` : 'no shul'))} (${badge(m.approval_status, m.approval_status)})`).join(', ')}
-        </div>` : ''}
+        ${mergeGroup && mergeGroup.length ? (() => {
+          // Every member (this record plus mergeGroup) shares one real
+          // disccardpromos account and shows a combined balance/card — see
+          // services/applicantBalance.js — but each shul's own real
+          // contribution still counts and loads separately (see routes/
+          // applicants.js's fundingAnchor). Ordered by created_at across
+          // ALL members (this one included) so "1st/2nd/3rd" reflects who
+          // actually enrolled them first, not just primary-vs-the-rest.
+          const all = [...mergeGroup, { ...a, id: a.id }].sort((x, y) => new Date(x.created_at) - new Date(y.created_at));
+          const ordinal = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
+          return `<div class="divider"></div><div style="color:var(--text-muted);background:#f9efe0;padding:8px 12px;border-radius:6px">
+            <strong>Same person, enrolled through ${all.length} record${all.length === 1 ? '' : 's'} — one shared gift card account, each shul's own contribution counted separately:</strong>
+            <ol style="margin:6px 0 0;padding-left:20px">
+              ${all.map((m, i) => `<li>${m.id === a.id ? '<strong>' : ''}${esc(m.first_name)} ${esc(m.last_name)} — ${esc(m.shul_name || (m.previous_shul_name ? `previously ${m.previous_shul_name}` : 'no shul'))} (${badge(m.approval_status, m.approval_status)})${m.id === a.id ? ' — viewing this one</strong>' : ''} <span class="small-muted">(${ordinal(i + 1)} to add them)</span></li>`).join('')}
+            </ol>
+          </div>`;
+        })() : ''}
         <div class="divider"></div>
         <div class="grid-2">
           <div><label>First Name</label><input id="e-first_name" value="${esc(a.first_name||'')}"></div>
@@ -304,6 +324,22 @@ async function openApplicant(id) {
         ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code></p>` : ''}
         ${cards.length ? cards.map(c => `<div class="card" style="margin-bottom:10px"><div class="flex-between"><strong>${esc(c.card_number_masked||'Unassigned')}</strong>${badge(c.status,c.status)}</div><div class="small-muted">Amount: ${fmtMoney(c.amount)} · Activated: ${c.activated_at?fmtDateTime(c.activated_at):'not yet'}</div><a class="small-muted" href="/admin/cards?card=${c.id}">View transactions</a></div>`).join('') : `<p class="small-muted">No card assigned yet.</p>${a.approval_status==='approved' ? `<button class="btn btn-sm btn-primary" onclick="assignCard('${id}')">Assign Gift Card</button>` : '<p class="small-muted">Applicant must be approved first.</p>'}`}
       </div>
+      <div id="atab-transactions" style="display:none">
+        <h4 style="margin:0 0 8px">Given by Shuls</h4>
+        <p class="small-muted" style="margin-top:0">Real money given toward this person's card, by which shul — merged records combined into one list. Undoing pulls the money back off the card where possible; if some has already been spent, only what's left comes back and the rest is written off.</p>
+        ${allocations && allocations.length ? `<div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Shul</th><th>Given</th><th>Match</th><th>Total</th><th>Date</th><th></th></tr></thead><tbody>
+          ${allocations.filter(al => al.total_amount !== 0).map(al => `<tr${al.reversed_at ? ' style="opacity:.55"' : ''}>
+            <td>${esc(al.shul_name||'')}${al.is_admin_override ? ' ' + badge('override','pending') : ''}${al.reversal_of ? ' ' + badge('reversal','rejected') : ''}</td>
+            <td>${fmtMoney(al.base_amount)}</td><td>${fmtMoney(al.match_amount)}</td><td>${fmtMoney(al.total_amount)}</td>
+            <td>${fmtDateTime(al.created_at)}</td>
+            <td>${!al.reversed_at && !al.reversal_of && al.total_amount > 0 ? `<button class="btn btn-outline btn-sm" onclick="undoApplicantAllocation('${al.id}','${id}')">Undo</button>` : ''}</td>
+          </tr>`).join('')}
+        </tbody></table></div>` : '<p class="small-muted">No shul has given money to this person yet.</p>'}
+        <h4 style="margin:20px 0 8px">Store Purchases</h4>
+        ${cardTransactions && cardTransactions.length ? `<div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Date</th><th>Type</th><th>Store</th><th>Amount</th></tr></thead><tbody>
+          ${cardTransactions.map(t => `<tr><td>${fmtDateTime(t.occurred_at || t.created_at)}</td><td>${esc(t.type||'')}</td><td>${esc(t.store_name||'')}</td><td>${fmtMoney(t.amount)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<p class="small-muted">No store transactions yet.</p>'}
+      </div>
       <div id="atab-documents" style="display:none">
         <div id="atab-documents-list"><p class="small-muted">Loading…</p></div>
       </div>
@@ -326,7 +362,7 @@ async function openApplicant(id) {
     loadGoogleMaps().then(() => { attachPlacesAutocomplete('e-address', { address: 'e-address', city: 'e-city', state: 'e-state', zip: 'e-zip' }); });
     qsa('#atabs button').forEach(b => b.addEventListener('click', () => {
       qsa('#atabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
-      ['info','notes','cards','documents','messages','history'].forEach(t => qs('#atab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
+      ['info','notes','cards','transactions','documents','messages','history'].forEach(t => qs('#atab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
     }));
     loadDocumentsTab('applicant', id, 'atab-documents-list', a.email || '');
     loadMessagesTab('applicant', id, 'atab-messages-list', a.husband_cell || a.wife_cell || a.home_phone || '', a.email || '', a);
@@ -420,6 +456,20 @@ window.assignCard = async (id) => {
   const cardNumber = prompt('Enter the physical card number to activate for this applicant (disccardpromos activates a real card you already hold — it does not generate one):');
   if (!cardNumber) return;
   try { await api('/cards/assign', { method: 'POST', body: { applicant_id: id, card_number: cardNumber.trim() } }); toast('Card assigned'); closeModal(); openApplicant(id); } catch (err) { toast(err.message, true); }
+};
+
+// Undo a shul's allocation right from the applicant's own Transactions tab —
+// same endpoint/warning as Admin > Shuls' Payments tab and the Shul
+// Transactions page, just reachable from the person's own profile too. If
+// some of the money has already been spent, only what's left comes back;
+// the rest is written off, never re-added to the shul's balance.
+window.undoApplicantAllocation = async (allocationId, applicantId) => {
+  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
+  try {
+    const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
+    toast(reversal?.shortfall > 0 ? `Undone — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Undone', reversal?.shortfall > 0);
+    openApplicant(applicantId);
+  } catch (err) { toast(err.message, true); }
 };
 
 function openApplicantForm() {

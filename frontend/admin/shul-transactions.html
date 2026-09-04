@@ -139,8 +139,12 @@ async function loadAllocations() {
     </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No allocations match these filters.</td></tr>';
 }
 window.undoAllocation = async (id) => {
-  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance.')) return;
-  try { await api(`/shul-payments/allocations/${id}/reverse`, { method: 'POST' }); toast('Reversed'); loadAllocations(); } catch (err) { toast(err.message, true); }
+  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
+  try {
+    const { reversal } = await api(`/shul-payments/allocations/${id}/reverse`, { method: 'POST' });
+    toast(reversal?.shortfall > 0 ? `Reversed — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Reversed', reversal?.shortfall > 0);
+    loadAllocations();
+  } catch (err) { toast(err.message, true); }
 };
 async function loadApplicantsForShul(shulId) {
   const sel = qs('#al-applicant');

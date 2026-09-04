@@ -32,7 +32,7 @@ renderShell('/admin/audit', `
 `);
 
 const ENTITY_LABELS = { shul: 'shul', applicant: 'applicant', store: 'store', season: 'season', task: 'task', user: 'user', card: 'card', shul_allocation: 'allocation' };
-const ACTION_VERBS = { create: 'Created', update: 'Updated', delete: 'Deleted', approve: 'Approved', reject: 'Rejected', undo: 'Reversed a change to', login: 'Signed in', esign: 'Signed', send_contract: 'Sent a contract to', retract_signature: 'Retracted a signature on', resolve_duplicate: 'Resolved a duplicate flag on' };
+const ACTION_VERBS = { create: 'Created', update: 'Updated', delete: 'Deleted', approve: 'Approved', reject: 'Rejected', undo: 'Reversed a change to', login: 'Signed in', esign: 'Signed', send_contract: 'Sent a contract to', retract_signature: 'Retracted a signature on', resolve_duplicate: 'Resolved a duplicate flag on', impersonate: 'Entered the portal as' };
 // Mass actions (bulk buttons + spreadsheet imports) log one audit_log row
 // per click/upload instead of one per affected record — entity_id is null,
 // and the record ids/names/counts live in after_json instead of a normal
@@ -193,13 +193,18 @@ window.undoAction = async (id, isRedo, action) => {
 // Deliberately NOT routed through undoAction()/POST /audit/:id/undo — a
 // shul_allocation isn't in ENTITY_TABLES, so the generic column-restore undo
 // can't handle it. It has its own money-aware reversal (checks the
-// applicant's live card balance via disccardpromos before allowing it, see
-// services/matching.js reverseAllocation) already wired up for the admin
+// applicant's live card balance via disccardpromos and only pulls back
+// whatever's still there, writing off the rest — see services/matching.js
+// reverseAllocation) already wired up for the admin
 // Shuls > Payments tab; this just gives Recent Actions a button to the same
 // endpoint instead of duplicating that logic.
 window.reverseShulAllocation = async (allocationId) => {
-  if (!confirm("Undo this allocation? This adds an equal-and-opposite entry to the applicant's card balance. Only allowed if the money hasn't been spent yet.")) return;
-  try { await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' }); toast('Undone'); load(); } catch (err) { toast(err.message, true); }
+  if (!confirm("Undo this allocation? This pulls the money back off the applicant's card and restores the shul's balance. If some of it has already been spent, only what's left comes back — the rest is written off, not restored to the shul's balance.")) return;
+  try {
+    const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
+    toast(reversal?.shortfall > 0 ? `Undone — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Undone', reversal?.shortfall > 0);
+    load();
+  } catch (err) { toast(err.message, true); }
 };
 qs('#f-hours').addEventListener('change', load);
 load();

@@ -90,23 +90,38 @@ app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 2000 }));
 // Auth endpoints get their own much tighter limit — the blanket 2000/15min
 // above is sized for normal app usage (list pages, dashboards polling), not
-// for how many password/token guesses one IP should get. Scoped to just the
-// four routes that are actually a credential-guessing surface (login,
-// forgot-password, accept-invite, change-password) — GET /me is deliberately
-// excluded: it's a routine "is my session still good" check that fires on
-// every admin page load for logged-in staff/org_admin users (see app.js's
-// refreshPermissions), not something a password guesser hits, and sharing
-// this tight a budget with it was enough on its own to lock a normal
-// browsing session out of login/forgot-password within minutes. /me stays
-// covered by the blanket 2000/15min limit above instead.
-const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+// for how many password/token guesses one IP should get. GET /me is
+// deliberately excluded: it's a routine "is my session still good" check
+// that fires on every admin page load for logged-in staff/org_admin users
+// (see app.js's refreshPermissions), not something a password guesser hits,
+// and sharing this tight a budget with it was enough on its own to lock a
+// normal browsing session out of login/forgot-password within minutes. /me
+// stays covered by the blanket 2000/15min limit above instead.
+//
+// login/change-password and forgot-password/accept-invite are two SEPARATE
+// budgets, not one shared pool — they used to be one (max 20 total across
+// all four), which meant a struggling password-reset attempt (retried out
+// of frustration, or several people troubleshooting from one shared office
+// IP) could burn through the whole budget and lock out completely normal,
+// correct-password logins on that same IP too, with no indication to
+// anyone that "invalid" was actually "rate limited." Confirmed live: 20 was
+// tight enough that ordinary confused-user retries (not an attack) tripped
+// it in well under a minute. Both budgets are also considerably higher now
+// for the same reason — trying a password, then forgot-password, then the
+// emailed link, more than once, is completely normal troubleshooting
+// behavior and shouldn't come anywhere near a "too many attempts" wall.
+const loginRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
   message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
 });
-app.use('/api/auth/login', authRateLimit);
-app.use('/api/auth/forgot-password', authRateLimit);
-app.use('/api/auth/accept-invite', authRateLimit);
-app.use('/api/auth/change-password', authRateLimit);
+const resetRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
+});
+app.use('/api/auth/login', loginRateLimit);
+app.use('/api/auth/change-password', loginRateLimit);
+app.use('/api/auth/forgot-password', resetRateLimit);
+app.use('/api/auth/accept-invite', resetRateLimit);
 
 initMail();
 

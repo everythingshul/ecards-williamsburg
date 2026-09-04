@@ -64,6 +64,25 @@ router.post('/forgot-password', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Redeems a one-time "Enter Portal" code (see POST /shuls/:id/impersonate
+// and /stores/:id/impersonate) for a real session on the target shul/store
+// login — same shape as login/accept-invite, so the new tab that opens this
+// URL can Auth.set() straight from the response. Never requires or reads
+// the target account's actual password. The code itself is single-use and
+// expires in minutes (see the issuing routes), so a link left in browser
+// history or a mistakenly-forwarded message is worthless within moments of
+// being issued.
+router.post('/impersonate/:token', (req, res) => {
+  const row = db.prepare('SELECT * FROM impersonation_tokens WHERE token = ?').get(req.params.token);
+  if (!row || row.used_at) return res.status(404).json({ error: 'Invalid or expired link' });
+  if (new Date(row.expires_at) < new Date()) return res.status(410).json({ error: 'This link has expired' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id);
+  if (!user || !user.is_active) return res.status(404).json({ error: 'This account is no longer active' });
+  db.prepare('UPDATE impersonation_tokens SET used_at = datetime(\'now\') WHERE token = ?').run(row.token);
+  const { password_hash, ...safe } = user;
+  res.json({ token: signToken(user), user: safe, permissions: computePermissionMap(user) });
+});
+
 router.post('/change-password', auth, (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });

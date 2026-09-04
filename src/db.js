@@ -1059,5 +1059,24 @@ if (incompleteBackfill.changes) {
   console.log(`[db] Marked ${incompleteBackfill.changes} pending/rejected applicant(s) missing a now-required field (address/city/state/zip/husband cell) as 'incomplete' for the shul to complete.`);
 }
 
+// "Enter Portal" (staff impersonating a shul/store's own portal login, see
+// POST /shuls/:id/impersonate, /stores/:id/impersonate, and the redeeming
+// POST /auth/impersonate/:token in routes/auth.js) — a single-use, short-
+// lived exchange code, never the account's real password or a copy of the
+// staff member's own JWT. Deliberately its own table rather than reusing
+// users.invite_token/invite_expires: those are already live for a shul/
+// store's OWN onboarding/reset flow, and issuing an impersonation code
+// through the same columns would silently invalidate (or be invalidated
+// by) whichever of the two happened more recently.
+db.exec(`CREATE TABLE IF NOT EXISTS impersonation_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  created_by TEXT NOT NULL REFERENCES users(id),
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+
 export const DEFAULT_ORG_ID = defaultOrgId;
 export function uuid() { return randomUUID(); }
