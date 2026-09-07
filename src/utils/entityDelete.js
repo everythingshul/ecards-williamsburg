@@ -55,7 +55,18 @@ export function hardDeleteApplicant(applicant) {
   // an applicant who's ever had money allocated to them (shul_payments >
   // give to applicant) couldn't be deleted at all before this.
   db.prepare('DELETE FROM shul_allocations WHERE applicant_id = ?').run(applicant.id);
+  // Same gap again for card_reconciliation_flags (services/providerAccount.js) —
+  // any applicant a disccardpromos balance mismatch was ever flagged for
+  // (open or already resolved, the row is never deleted on its own) has a
+  // NOT NULL FK on applicant_id, so deleting them threw an unhandled
+  // FOREIGN KEY constraint error instead of a real delete.
+  db.prepare('DELETE FROM card_reconciliation_flags WHERE applicant_id = ?').run(applicant.id);
   db.prepare('UPDATE applicants SET duplicate_of_applicant_id = NULL WHERE duplicate_of_applicant_id = ?').run(applicant.id);
+  // carried_from_applicant_id (set on the NEXT season's carried-forward row,
+  // pointing back at this one) is nullable, so this doesn't trip the FK
+  // constraint the way the NOT NULL ones above do — but left as a dangling
+  // reference to a since-deleted row otherwise, which is just as wrong.
+  db.prepare('UPDATE applicants SET carried_from_applicant_id = NULL WHERE carried_from_applicant_id = ?').run(applicant.id);
   deletePolymorphicRefs('applicant', applicant.id);
   db.prepare('DELETE FROM applicants WHERE id = ?').run(applicant.id);
 }
@@ -172,7 +183,9 @@ export function captureApplicantSnapshot(applicant) {
     cards, cardTransactions,
     notes: db.prepare('SELECT * FROM applicant_notes WHERE applicant_id = ?').all(applicant.id),
     shulAllocations: db.prepare('SELECT * FROM shul_allocations WHERE applicant_id = ?').all(applicant.id),
+    cardReconciliationFlags: db.prepare('SELECT * FROM card_reconciliation_flags WHERE applicant_id = ?').all(applicant.id),
     duplicateOfApplicantIds: db.prepare('SELECT id FROM applicants WHERE duplicate_of_applicant_id = ?').all(applicant.id).map(r => r.id),
+    carriedFromApplicantIds: db.prepare('SELECT id FROM applicants WHERE carried_from_applicant_id = ?').all(applicant.id).map(r => r.id),
     ...capturePolymorphicRefs('applicant', applicant.id),
   };
 }
@@ -181,11 +194,14 @@ export function restoreApplicantSnapshot(snap) {
   snap.cards.forEach(r => insertIfMissing('cards', r));
   snap.cardTransactions.forEach(r => insertIfMissing('card_transactions', r));
   snap.notes.forEach(r => insertIfMissing('applicant_notes', r));
-  // '|| []' — snapshots captured before shul_allocations was added here
-  // won't have the key; restoring one of those still works, just without
-  // allocation history that was never captured for it.
+  // '|| []' — snapshots captured before shul_allocations/card_reconciliation_flags/
+  // carriedFromApplicantIds were added here won't have those keys; restoring
+  // one of those older snapshots still works, just without whatever wasn't
+  // captured for it at the time.
   (snap.shulAllocations || []).forEach(r => insertIfMissing('shul_allocations', r));
+  (snap.cardReconciliationFlags || []).forEach(r => insertIfMissing('card_reconciliation_flags', r));
   snap.duplicateOfApplicantIds.forEach(id => db.prepare('UPDATE applicants SET duplicate_of_applicant_id = ? WHERE id = ?').run(snap.row.id, id));
+  (snap.carriedFromApplicantIds || []).forEach(id => db.prepare('UPDATE applicants SET carried_from_applicant_id = ? WHERE id = ? AND carried_from_applicant_id IS NULL').run(snap.row.id, id));
   restorePolymorphicRefs(snap);
 }
 
