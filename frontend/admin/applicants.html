@@ -21,6 +21,7 @@ renderShell('/admin/applicants', `
       <button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button>
       <button class="btn btn-outline btn-sm" id="f-dupes">Duplicates</button>
       <button class="btn btn-outline btn-sm" id="btn-columns">Customize Columns</button>
+      ${Auth.user()?.role === 'super_admin' ? '<button class="btn btn-outline btn-sm" id="btn-provider-sync">Disccardpromos Sync</button>' : ''}
       <button class="btn btn-primary btn-sm" id="btn-new">+ Add Applicant</button>
     </div>
   </div>
@@ -53,7 +54,7 @@ renderShell('/admin/applicants', `
   <div class="paginator" id="pager"></div>
 `);
 
-let state = { search:'', status:'', paused:'', marital_status:'', shul_id:'', season_id:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
+let state = { search:'', status:'', paused:'', marital_status:'', shul_id:'', season_id:'', provider_sync:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
 let selected = new Set();
 
 // Every field a column can show, plus how to render it — the checkbox
@@ -85,7 +86,9 @@ const APPLICANT_COLUMNS = [
   { key: 'address', label: 'Address', render: a => esc([a.address,a.city,a.state,a.zip].filter(Boolean).join(', ')) },
   { key: 'num_children', label: 'Children', render: a => a.num_children ?? 0 },
   { key: 'home_for_yomtov', label: 'Home Yom Tov', render: a => a.home_for_yomtov ? 'Yes' : 'No' },
-  { key: 'approval_status', label: 'Status', sort: 'approval_status', render: a => badge(a.approval_status, a.approval_status) },
+  { key: 'approval_status', label: 'Status', sort: 'approval_status', render: a => badge(a.approval_status, a.approval_status)
+    + (a.provider_sync === 'missing' ? ' ' + badge('disccard missing', 'rejected') : '')
+    + (a.provider_deactivate_error ? ' ' + badge('deactivate failed', 'rejected') : '') },
   { key: 'card_amount', label: 'Card $', sort: 'card_amount', render: a => a.card_amount != null ? fmtMoney(a.card_amount) : '' },
   // loaded/spent/remaining are the REAL gift-card balance (see
   // services/applicantBalance.js), merge-group aware — distinct from
@@ -169,6 +172,95 @@ qs('#btn-export').addEventListener('click', () => downloadAuthed('/applicants/ex
 qs('#btn-new').addEventListener('click', () => openApplicantForm());
 qs('#btn-import').addEventListener('click', () => openImportModal());
 qs('#f-dupes').addEventListener('click', showDuplicates);
+qs('#btn-provider-sync')?.addEventListener('click', openProviderSyncModal);
+
+// ============================= Disccardpromos Sync (super_admin only) =============================
+// Internal reconciliation diagnostic — see services/providerAccount.js and
+// GET /applicants/provider-sync-summary. Both approve routes push a
+// disccardpromos customer account on approval regardless of card_amount
+// (amount only gates the separate add-funds call), so "approved but no
+// account" always means a write that failed and was never retried.
+async function openProviderSyncModal() {
+  const body = `<div id="psync-body">Loading…</div>`;
+  openModal('Disccardpromos Sync', body, '');
+  await refreshProviderSyncModal();
+}
+async function refreshProviderSyncModal() {
+  let summary;
+  try { summary = await api('/applicants/provider-sync-summary' + (state.season_id ? `?season_id=${encodeURIComponent(state.season_id)}` : '')); }
+  catch (err) { qs('#psync-body').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; return; }
+  const buckets = [
+    ['synced', 'Synced', summary.synced, 'active'],
+    ['exempt', 'Exempt', summary.exempt, 'pending'],
+    ['missing', 'Missing Account', summary.missing, 'rejected'],
+    ['deactivated', 'Should Be Deactivated', summary.deactivated, 'rejected'],
+    ['deactivate_error', 'Deactivation Failed', summary.deactivateError, 'rejected'],
+  ];
+  qs('#psync-body').innerHTML = `
+    <p class="small-muted">For the currently-selected season filter. Click a number to see exactly which applicants.</p>
+    <div class="stat-grid">${buckets.map(([key, label, n, tone]) => `
+      <div class="card" style="cursor:pointer" onclick="filterByProviderSync('${key}')">
+        <div class="small-muted">${esc(label)}</div>
+        <div style="font-size:22px;font-weight:600">${badge(String(n), n > 0 && key !== 'synced' ? tone : 'active')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="divider"></div>
+    <div class="pill-row">
+      ${summary.deactivateError ? `<button class="btn btn-sm btn-outline" onclick="retryAllDeactivations()">Retry All Deactivation Failures (${summary.deactivateError})</button>` : ''}
+      <button class="btn btn-sm btn-outline" onclick="reconcileMergedAccounts()">Reconcile Merged Accounts</button>
+      <button class="btn btn-sm btn-outline" onclick="runProviderJob('provider-audit', 'psync-audit-result')">Run Full Audit</button>
+      <button class="btn btn-sm btn-primary" onclick="runProviderJob('provider-enforce', 'psync-enforce-result')">Make Disccardpromos Match</button>
+    </div>
+    <div id="psync-audit-result" style="margin-top:10px"></div>
+    <div id="psync-enforce-result" style="margin-top:10px"></div>
+  `;
+}
+window.filterByProviderSync = (key) => {
+  closeModal();
+  state.provider_sync = key; state.page = 1;
+  load();
+};
+window.retryAllDeactivations = async () => {
+  try {
+    const r = await api('/applicants/retry-deactivation-all', { method: 'POST', body: { season_id: state.season_id || undefined } });
+    toast(`Retried ${r.attempted}: ${r.succeeded} succeeded, ${r.failed} still failing`);
+    refreshProviderSyncModal();
+  } catch (err) { toast(err.message, true); }
+};
+window.reconcileMergedAccounts = async () => {
+  try {
+    const r = await api('/applicants/reconcile-merged-accounts', { method: 'POST', body: { season_id: state.season_id || undefined } });
+    toast(`Checked ${r.groupsChecked} merge group(s), linked ${r.linked} account(s)${r.conflicts.length ? `, ${r.conflicts.length} conflict(s) need manual review` : ''}`);
+    refreshProviderSyncModal();
+  } catch (err) { toast(err.message, true); }
+};
+// Both provider-audit and provider-enforce are async jobs (they pull
+// disccardpromos' full customer list, which can take a while for a large
+// org) — kick off, then poll every 2s until done rather than holding the
+// request open.
+window.runProviderJob = async (path, resultElId) => {
+  const el = qs('#' + resultElId);
+  el.innerHTML = '<p class="small-muted">Starting…</p>';
+  try {
+    await api(`/applicants/${path}`, { method: 'POST', body: { season_id: state.season_id || undefined } });
+  } catch (err) { el.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; return; }
+  const poll = async () => {
+    let job;
+    try { job = await api(`/applicants/${path}`); } catch (err) { el.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; return; }
+    if (job.status === 'running') {
+      el.innerHTML = `<p class="small-muted">Running… ${job.progress}/${job.total}</p>`;
+      setTimeout(poll, 2000);
+    } else if (job.status === 'error') {
+      el.innerHTML = `<p class="small-muted">Failed: ${esc(job.error)}</p>`;
+    } else if (job.status === 'done') {
+      el.innerHTML = `<pre style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(job.result, null, 2))}</pre>`;
+      if (resultElId === 'psync-enforce-result') refreshProviderSyncModal();
+    } else {
+      el.innerHTML = '<p class="small-muted">Idle.</p>';
+    }
+  };
+  poll();
+};
 const MASS_ACTIONS = {
   approve: {
     confirm: null,

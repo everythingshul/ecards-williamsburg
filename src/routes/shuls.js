@@ -142,7 +142,7 @@ router.post('/apply', async (req, res) => {
 // applicants themselves and were never meant to be picked from a list.
 router.get('/public/list', (req, res) => {
   const orgId = req.query.org_id || DEFAULT_ORG_ID;
-  const rows = db.prepare(`SELECT id, name_en, name_he FROM shuls WHERE org_id = ? AND status='approved' AND is_paused = 0 AND is_locked = 0 ORDER BY name_en`).all(orgId);
+  const rows = db.prepare(`SELECT id, name_en, name_he FROM shuls WHERE org_id = ? AND status='approved' AND is_paused = 0 AND is_locked = 0 ORDER BY name_en COLLATE NOCASE`).all(orgId);
   res.json({ shuls: rows });
 });
 
@@ -228,7 +228,7 @@ router.get('/all-list', (req, res) => {
   const { season_id } = req.query;
   const clause = season_id ? ' AND season_id = ?' : '';
   const params = season_id ? [req.user.org_id, season_id] : [req.user.org_id];
-  const rows = db.prepare(`SELECT id, name_en, name_he, city, state FROM shuls WHERE org_id = ? AND is_locked = 0${clause} ORDER BY name_en`).all(...params);
+  const rows = db.prepare(`SELECT id, name_en, name_he, city, state FROM shuls WHERE org_id = ? AND is_locked = 0${clause} ORDER BY name_en COLLATE NOCASE`).all(...params);
   res.json({ shuls: rows });
 });
 

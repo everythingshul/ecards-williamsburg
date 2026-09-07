@@ -105,11 +105,14 @@ router.post('/mine/request-method', async (req, res) => {
   // (Settings > Notify on Payment Method Requests), not every admin/staff
   // user's own login email. No-op (silently) if that setting is blank,
   // same as the others.
+  // replyTo: the submitting shul's own login email, so hitting "Reply" on
+  // this internal alert goes straight back to whoever actually asked, not
+  // nowhere (or the org's own generic reply-to).
   await notifyNewSignup(req.user.org_id, 'notify_payment_method_request_email', 'paymentMethodRequest', {
     shulName: shul?.name_en || 'A shul',
     requestedMethod: requested_method,
     message: message ? `<p>Message: ${esc(message)}</p>` : '',
-  });
+  }, { replyTo: req.user.email });
   res.status(201).json({ ok: true });
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }

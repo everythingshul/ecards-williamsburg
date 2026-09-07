@@ -101,7 +101,12 @@ qs('#btn-compose').addEventListener('click', async () => {
   selectedShulIds = new Set(); selectedStoreIds = new Set();
   try {
     const [{ seasons }, { season: active }, { stores }] = await Promise.all([api('/seasons'), api('/seasons/active'), api('/stores')]);
-    seasonsCache = seasons; storesCache = stores; activeSeasonId = active?.id || '';
+    // GET /stores orders by created_at, not name — sort here so the picker
+    // reads alphabetically. localeCompare with sensitivity:'base' ignores
+    // case (and accents), so e.g. "apple" and "Apple" sort as if both were
+    // the same case instead of every uppercase name grouping before every
+    // lowercase one (plain string comparison sorts by codepoint).
+    seasonsCache = seasons; storesCache = stores.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })); activeSeasonId = active?.id || '';
   } catch { /* recipient lists just won't populate */ }
   const body = `
     <label>Title <span class="req">*</span></label><input id="up-title" dir="auto">

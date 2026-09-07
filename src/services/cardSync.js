@@ -3,6 +3,7 @@ import * as giftcard from './giftcard.js';
 import { resolveStoreId } from './storeMatch.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
+import { scheduleProviderEnforceSoon } from './providerAccount.js';
 
 // Pulls new transactions for a single card from disccardpromos and inserts
 // them into the ledger, resolving each to a known store where possible.
@@ -51,9 +52,20 @@ export async function lockApplicantCards(orgId, applicant) {
     // in giftcard.js for the full story). Re-sending it here is what keeps
     // by-external-id lookups working for this applicant after a reject.
     await giftcard.updateCustomer(applicant.season_id, applicant.provider_account_id, { isActive: false, externalId: applicant.external_id });
+    // Clears a previously-flagged failure the moment a later attempt
+    // (automatic retry, or a manual one from the sync-status diagnostic)
+    // actually succeeds.
+    db.prepare(`UPDATE applicants SET provider_deactivate_error = NULL WHERE id = ?`).run(applicant.id);
     return { errors: [] };
   } catch (e) {
     console.error('[cardSync] failed to lock disccardpromos customer for applicant', applicant.id, ':', e.message);
+    db.prepare(`UPDATE applicants SET provider_deactivate_error = ? WHERE id = ?`).run(e.message, applicant.id);
+    // A failed write here means disccardpromos and our own "should be
+    // locked" expectation have drifted apart — the same standing
+    // reconciliation loop that keeps approvals matched (services/
+    // providerAccount.js's runProviderEnforce) will pick this up and retry
+    // it shortly, without anyone needing to notice or click a button.
+    scheduleProviderEnforceSoon(orgId, `deactivation failed for applicant ${applicant.id}`);
     return { errors: [e.message] };
   }
 }

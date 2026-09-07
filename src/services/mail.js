@@ -284,13 +284,18 @@ export function renderSystemTemplate(orgId, key, vars) {
 // and — like every other automatic email in this file — best-effort: a
 // failure on one (or all) recipients never blocks or undoes the signup
 // that triggered it, just logs.
-export async function notifyNewSignup(orgId, settingKey, templateKey, vars) {
+// replyTo (optional): overrides the template's own configured reply-to for
+// this one send — used by the payment-method-request notification (routes/
+// shulPayments.js) to set it to the submitting shul's own account email,
+// so "Reply" on the internal alert goes straight back to whoever asked,
+// not wherever the template's static reply-to (or nothing) points.
+export async function notifyNewSignup(orgId, settingKey, templateKey, vars, { replyTo } = {}) {
   const raw = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = ?`).get(orgId || DEFAULT_ORG_ID, settingKey)?.value;
   const recipients = (raw || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!recipients.length) return;
   const tmpl = renderSystemTemplate(orgId, templateKey, vars);
   for (const to of recipients) {
-    const { emailError } = await sendMailChecked(orgId, to, tmpl.subject, tmpl.body, { replyTo: tmpl.replyTo });
+    const { emailError } = await sendMailChecked(orgId, to, tmpl.subject, tmpl.body, { replyTo: replyTo || tmpl.replyTo });
     if (emailError) console.error(`[mail] new-signup notification (${templateKey}) to ${to} failed:`, emailError);
   }
 }

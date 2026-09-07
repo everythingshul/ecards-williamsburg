@@ -21,15 +21,16 @@
 // pasted in by the user (docs.disccardpromos.com itself is blocked by this
 // environment's network egress policy, so we only ever see what gets pasted
 // in directly):
-//   - Customers: /org/customers/... — see the block further down.
-//   - Card ops: /v1/balances/, /v1/charge/, /v1/refund/, /v1/add-funds/ —
-//     see getCardBalance/chargeCard/refundCard/addFunds below.
+//   - Customers: /org/customers/... — see the block further down. Loading
+//     funds onto a card is a Customer PATCH (see addFunds below), NOT the
+//     /v1/add-funds/ endpoint this comment originally described — that was
+//     an earlier best guess, corrected 2026-09 once the real contract was
+//     confirmed: there is no separate add-funds endpoint at all.
+//   - Card ops: /v1/balances/, /v1/charge/, /v1/refund/ — see
+//     getCardBalance/chargeCard/refundCard below.
 //
-// IMPORTANT — this changes the mental model of "assigning a card":
-// /v1/add-funds/ credits a customer's balance against one of their
-// `packages` (their term for what we'd call a season's Discount), identified
-// by discount_id, and takes the customer by our external_id directly. There
-// is no confirmed "assign/activate a card to an applicant" endpoint at all —
+// IMPORTANT — this changes the mental model of "assigning a card": there is
+// no confirmed "assign/activate a card to an applicant" endpoint at all —
 // every real endpoint we've seen operates on an existing customer (who
 // already carries `active_cards`), not on a card being provisioned fresh.
 // assignCard/activateCard/deactivateCard/getCardStatus/listTransactions
@@ -181,17 +182,40 @@ export async function refundCard(seasonId, { cardNum, amount }) {
   return call(seasonId, '/v1/refund/', { method: 'POST', body: JSON.stringify({ cardNum, amount }) });
 }
 
-// Credits amount onto a customer's balance against one of their `packages`
-// (discountId) — this is what actually loads money onto a card, identified
-// by OUR applicant's external_id rather than a disccardpromos customer id.
-// Wired into applicant approval (routes/applicants.js) — per-season/package
-// mapping was explicitly ruled out; there's one org-wide Package/Discount ID
+// Credits (or debits, for a negative `amount`) a customer's balance against
+// one of their `packages` (discountId) — this is what actually loads money
+// onto a card. Wired into applicant approval and every shul allocation
+// (routes/applicants.js, services/matching.js) — per-season/package mapping
+// was explicitly ruled out; there's one org-wide Package/Discount ID
 // (Settings > Organization > Gift Card Loading, settings key
 // disccardpromos_discount_id) used for every approval regardless of season.
-export async function addFunds(seasonId, { externalId, discountId, amount }) {
+//
+// CORRECTED (2026-09): there is NO separate /v1/add-funds/ endpoint — that
+// was the earlier best-guess described in this file's header, and it does
+// not match the real API. The only write path for a customer's balance is
+// PATCHing the customer record directly, and that PATCH's own `amount`
+// field is the CUSTOMER'S ENTIRE NEW TOTAL for that package, not a delta —
+// to "add" $100 on top of an existing $100 balance, the real PATCH must be
+// sent with amount: 200. Every caller of this function still thinks in
+// deltas (how much to add, or a negative amount to subtract for a partial/
+// full reversal — see services/matching.js's createAllocation/
+// reverseAllocation), so this function does the fetch-current-then-PATCH-
+// new-total translation internally, once, here — no caller has to reason
+// about the provider's "total, not delta" quirk itself.
+//
+// customerId (disccardpromos' own numeric id — our provider_account_id) is
+// required: a Customer PATCH has no by-external-id write path, only the
+// by-external-id READ endpoints elsewhere in this file. externalId is still
+// always included on the PATCH body too, since ANY PATCH that omits it
+// silently clears the field (see linkCardToCustomer's identical note).
+export async function addFunds(seasonId, { customerId, externalId, discountId, amount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
-  return call(seasonId, '/v1/add-funds/', { method: 'POST', body: JSON.stringify({
-    external_id: externalId, discount_id: discountId, amount,
+  const customer = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/?balances=true`);
+  const pkg = (customer.packages || []).find(p => String(p.id) === String(discountId));
+  const currentAmount = pkg ? Number(pkg.amount) || 0 : 0;
+  const newTotal = Math.max(0, Math.round((currentAmount + amount) * 100) / 100);
+  return call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'PATCH', body: JSON.stringify({
+    amount: newTotal, discount_id: discountId, external_id: externalId,
   }) });
 }
 
@@ -391,6 +415,27 @@ export async function updateCustomer(seasonId, customerId, opts) {
 export async function deleteCustomer(seasonId, customerId) {
   if (isMockMode(seasonId)) return { ok: true };
   return call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'DELETE' });
+}
+
+// Pulls every customer this org has on disccardpromos, paginated via
+// whatever `next` cursor their list endpoint returns (standard DRF-style
+// {results, next, previous} shape assumed — `next` is a full absolute URL,
+// so it's fed back through resolveConfig's own apiBase stripped off rather
+// than treated as a path). Used by services/providerAccount.js's
+// runProviderAudit/runProviderEnforce so a full-org reconciliation costs
+// one paginated pull, never one GET per applicant.
+export async function listAllCustomers(seasonId) {
+  if (isMockMode(seasonId)) return [];
+  const cfg = resolveConfig(seasonId);
+  let results = [];
+  let path = '/org/customers/';
+  while (path) {
+    const body = await call(seasonId, path);
+    results = results.concat(body.results || body.data || []);
+    const next = body.next || null;
+    path = next ? next.replace(cfg.apiBase, '') : null;
+  }
+  return results;
 }
 
 // Full customer record including active_cards (masked numbers) and packages

@@ -18,6 +18,9 @@ import { logAudit, logMassAudit, getEntityHistory } from '../services/audit.js';
 import { hardDeleteApplicant, captureApplicantSnapshot } from '../utils/entityDelete.js';
 import { lockApplicantCards } from '../services/cardSync.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
+import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
+  startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
+  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts } from '../services/providerAccount.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -38,52 +41,9 @@ const EDITABLE_FIELDS = ['first_name','last_name','marital_status','home_phone',
 // approved — see the shulLockedToPhoneOnly gate in PUT /:id below.
 const PHONE_FIELDS = ['home_phone', 'husband_cell', 'wife_cell'];
 
-// Which applicant fields Settings > Organization > Gift Card Loading lets an
-// admin choose to push to disccardpromos — external_id and the shul's group
-// name are always included regardless (they're how a customer gets matched
-// and organized at all, not "applicant info" in the sense being toggled).
-// Default (no setting saved yet) is everything, matching the original
-// always-push-it-all behavior so existing orgs see no change until someone
-// deliberately narrows it.
-export const PROVIDER_PUSH_FIELDS = ['first_name', 'last_name', 'home_phone', 'husband_cell', 'wife_cell', 'email', 'address', 'city', 'state', 'zip'];
-
-function getProviderPushFields(orgId) {
-  const row = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_push_fields'`).get(orgId);
-  if (!row) return PROVIDER_PUSH_FIELDS;
-  try {
-    const saved = JSON.parse(row.value);
-    return Array.isArray(saved) ? saved.filter(f => PROVIDER_PUSH_FIELDS.includes(f)) : PROVIDER_PUSH_FIELDS;
-  } catch { return PROVIDER_PUSH_FIELDS; }
-}
-
-// Builds the opts object giftcard.js's create/updateCustomer expect, limited
-// to whichever fields are configured to push. husband_cell/wife_cell map to
-// disccardpromos' cell/phone2 slots respectively — sending both, not just
-// whichever one happens to be set, was itself a bug (only one ever reached
-// disccardpromos before).
-function buildProviderOpts(orgId, applicant, groupName) {
-  const allowed = getProviderPushFields(orgId);
-  const opts = { externalId: applicant.external_id, groupName };
-  if (allowed.includes('first_name')) opts.firstName = applicant.first_name;
-  if (allowed.includes('last_name')) opts.lastName = applicant.last_name;
-  if (allowed.includes('home_phone')) opts.homePhone = applicant.home_phone;
-  if (allowed.includes('husband_cell')) opts.cell = applicant.husband_cell;
-  if (allowed.includes('wife_cell')) opts.phone2 = applicant.wife_cell;
-  if (allowed.includes('email')) opts.email = applicant.email;
-  if (allowed.includes('address')) opts.address = applicant.address;
-  if (allowed.includes('city')) opts.city = applicant.city;
-  if (allowed.includes('state')) opts.state = applicant.state;
-  if (allowed.includes('zip')) opts.zip = applicant.zip;
-  return opts;
-}
-
-// True if this applicant was merged into another shul's record as the same
-// real person (see services/duplicates.js's mergeApplicants) — merge_group_id
-// is set to the PRIMARY member's own id on every member of a merged group,
-// so a secondary is any row where that id differs from its own.
-function isMergedSecondary(applicant) {
-  return !!applicant.merge_group_id && applicant.merge_group_id !== applicant.id;
-}
+// buildProviderOpts/isMergedSecondary now live in services/providerAccount.js
+// (imported above) — shared with the new ensureProviderAccount/
+// runProviderEnforce reconciliation logic instead of duplicated here.
 
 // Season setting "require_shul_contribution": before an applicant can be
 // approved/carded, the shul must have confirmed how much they personally
@@ -231,9 +191,20 @@ function scopeWhere(req) {
 }
 
 router.get('/', (req, res) => {
-  const { search, status, shul_id, season_id, home_for_yomtov, marital_status, paused, sort = 'created_at', dir = 'DESC', page = 1, pageSize = 50 } = req.query;
+  const { search, status, shul_id, season_id, home_for_yomtov, marital_status, paused, provider_sync, sort = 'created_at', dir = 'DESC', page = 1, pageSize = 50 } = req.query;
   let { where, params } = scopeWhere(req);
   if (status) { where += ' AND a.approval_status = ?'; params.push(status); }
+  // Internal reconciliation filter — see providerSyncStatus in
+  // services/providerAccount.js and GET /provider-sync-summary below.
+  // super_admin only, same as the diagnostic it's driven from; silently
+  // ignored for anyone else rather than 403ing a normal list request.
+  if (provider_sync && req.user.role === 'super_admin') {
+    if (provider_sync === 'missing') where += ` AND a.approval_status = 'approved' AND a.provider_exempt = 0 AND a.provider_account_id IS NULL`;
+    else if (provider_sync === 'synced') where += ` AND a.approval_status = 'approved' AND a.provider_account_id IS NOT NULL`;
+    else if (provider_sync === 'exempt') where += ` AND a.approval_status = 'approved' AND a.provider_exempt = 1`;
+    else if (provider_sync === 'deactivated') where += ` AND a.approval_status IN ('rejected','pending') AND a.provider_account_id IS NOT NULL`;
+    else if (provider_sync === 'deactivate_error') where += ` AND a.provider_deactivate_error IS NOT NULL`;
+  }
   if (paused === '1' || paused === '0') { where += ' AND a.is_paused = ?'; params.push(+paused); }
   if (shul_id) { where += ' AND a.shul_id = ?'; params.push(shul_id); }
   if (season_id) { where += ' AND a.season_id = ?'; params.push(season_id); }
@@ -277,7 +248,11 @@ router.get('/', (req, res) => {
   // filter above to be merge-group-aware at the SQL level; this trades a
   // little pagination precision for a correct, simple collapse.
   const finalRows = req.user.role === 'shul' ? withBalance : collapseMergedApplicantRows(req.user.org_id, withBalance);
-  res.json({ applicants: maskForShul(redact(finalRows, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
+  // Internal disccardpromos reconciliation status — super_admin only (see
+  // GET /provider-sync-summary below for the full reasoning); never sent to
+  // a shul-portal viewer, and never even computed for org_admin/staff.
+  const withSyncStatus = req.user.role === 'super_admin' ? finalRows.map(r => ({ ...r, provider_sync: providerSyncStatus(r) })) : finalRows;
+  res.json({ applicants: maskForShul(redact(withSyncStatus, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
 });
 
 function collapseMergedApplicantRows(orgId, rows) {
@@ -372,6 +347,44 @@ router.get('/my-export', (req, res) => {
     return [c, r[c] ?? ''];
   })));
   sendXlsx(res, `my-applicants-${Date.now()}.xlsx`, out, columns);
+});
+
+// ============================= Disccardpromos reconciliation GET routes (super_admin only) =============================
+// Registered here, before GET /:id, since each of these is a single path
+// segment — after /:id (also single-segment) they'd never be reached at
+// all, Express would match /:id first and treat e.g. "provider-audit" as
+// an applicant id. See requireSuperAdmin and the matching POST routes near
+// the end of this file for the full reasoning on each.
+
+// Counts of synced/exempt/missing/deactivated/deactivate_error for a season
+// (defaults to the org's active season) — the breakdown behind the
+// "Disccardpromos Sync" button. Both approve routes push a disccardpromos
+// customer account on approval regardless of card_amount (amount only gates
+// the separate add-funds call), so "approved but no account" always means a
+// write that failed and was never retried, not an amount thing.
+router.get('/provider-sync-summary', requireSuperAdmin, (req, res) => {
+  const seasonId = req.query.season_id || getActiveSeasonId(req.user.org_id);
+  if (!seasonId) return res.json({ synced: 0, exempt: 0, missing: 0, deactivated: 0, deactivateError: 0, seasonId: null });
+  const rows = db.prepare(`SELECT approval_status, provider_exempt, provider_account_id, provider_deactivate_error FROM applicants WHERE org_id = ? AND season_id = ?`).all(req.user.org_id, seasonId);
+  let synced = 0, exempt = 0, missing = 0, deactivated = 0, deactivateError = 0;
+  for (const r of rows) {
+    const status = providerSyncStatus(r);
+    if (status === 'synced') synced++;
+    else if (status === 'exempt') exempt++;
+    else if (status === 'missing') missing++;
+    // A rejected/pending-reverted applicant that still holds a real account
+    // should have been locked by lockApplicantCards — if it's still here,
+    // that lock either never ran or failed silently.
+    if (['rejected', 'pending'].includes(r.approval_status) && r.provider_account_id) deactivated++;
+    if (r.provider_deactivate_error) deactivateError++;
+  }
+  res.json({ synced, exempt, missing, deactivated, deactivateError, seasonId, total: rows.length });
+});
+router.get('/provider-audit', requireSuperAdmin, (req, res) => {
+  res.json(getProviderAuditJob(req.user.org_id) || { status: 'idle' });
+});
+router.get('/provider-enforce', requireSuperAdmin, (req, res) => {
+  res.json(getProviderEnforceJob(req.user.org_id) || { status: 'idle' });
 });
 
 router.get('/:id', (req, res) => {
@@ -624,7 +637,14 @@ router.put('/:id', requirePermission('applicants', 'can_edit'), async (req, res)
   // itself is what surfaced it). A field that was never touched this save
   // can't be the cause of a new match either way, so this never re-flags
   // stale data that was already sitting there matching on both sides.
-  if (sets.length) detectAndFlag(req.user.org_id, 'applicant', updated, [], applicant);
+  // 'incomplete' (carried-forward, awaiting re-enrollment) rows are already
+  // excluded as a duplicate CANDIDATE (see services/duplicates.js's
+  // checkApplicantDuplicate) — but an edit made to an incomplete row itself
+  // (e.g. mid-re-enrollment, before it's actually resubmitted) could still
+  // trigger a flag if it happens to now match some other real applicant.
+  // Skip entirely while it's still 'incomplete' — only flag once the row is
+  // genuinely re-enrolled (its own status has moved off 'incomplete').
+  if (sets.length && updated.approval_status !== 'incomplete') detectAndFlag(req.user.org_id, 'applicant', updated, [], applicant);
   // Push the current info to disccardpromos on every save, not just at
   // approval — only meaningful once a customer already exists there
   // (provider_account_id is set the first time they're approved); nothing
@@ -949,63 +969,36 @@ router.post('/:id/approve', requirePermission('applicants', 'can_edit'), async (
     // applicant) still gets its OWN real contribution pushed — that's a
     // distinct, genuine sum of money a different shul is actually giving,
     // never "the same money twice" — but it always goes onto the ONE shared
-    // disccardpromos customer, which disccard only ever knows by whichever
-    // external_id it was originally created under (the merge-group PRIMARY's
-    // — see fundingAnchor below), never a secondary's own external_id. A
-    // secondary calling upsertAccountForApproval/addFunds under its own
-    // external_id would either fail (no such customer) or, worse, create a
-    // second, duplicate customer — exactly what merging was meant to
-    // prevent. provider_account_id still propagates to every member either
-    // way, so every profile in the group shows the one shared account.
+    // disccardpromos customer (services/providerAccount.js's
+    // ensureProviderAccount resolves which identity that is), never a
+    // secondary's own external_id/account. Best-effort: a disccardpromos
+    // hiccup here must never undo or block the approval that already
+    // committed above, same "external side-effect can fail without failing
+    // the action" pattern as the approval email right above.
     let providerAccountError = null, providerFundsError = null;
-    const fundingAnchor = isMergedSecondary(applicant)
-      ? (db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
-      : applicant;
-    // Writes/links the disccardpromos account for the group's anchor identity
-    // — idempotent by external_id (existing account just gets the current
-    // season added; a new one is created under a group matching the shul's
-    // English name, creating that group first if needed — see giftcard.js's
-    // upsertAccountForApproval). Best-effort: a disccardpromos hiccup here
-    // must never undo or block the approval that already committed above,
-    // same "external side-effect can fail without failing the action" pattern
-    // as the approval email right above.
     if (applicant.shul_id && !applicant.provider_exempt) {
-      try {
-        const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(applicant.shul_id);
-        const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, fundingAnchor, shul?.name_en || 'Unknown'));
-        if (result.accountId) {
-          // Every member of this merge group (fundingAnchor's own group,
-          // which for a non-merged applicant is just itself) shares this one
-          // account id — propagate to all of them, not just whoever
-          // triggered this particular write.
-          db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? OR merge_group_id = ?`).run(result.accountId, fundingAnchor.id, fundingAnchor.id);
-        }
-      } catch (e) {
-        providerAccountError = e.message;
-        console.error('[giftcard] failed to write disccardpromos account on approval:', e.message);
-      }
-    }
-    // disccardpromos has no separate "assign/activate a card" step — crediting
-    // a customer's balance against a configured Package (Settings >
-    // Organization > Gift Card Loading) via add-funds IS how a card actually
-    // gets issued with an amount. Same best-effort pattern as the account
-    // write above: skipped if that write failed (nothing to credit yet), and
-    // never blocks/undoes the approval itself. provider_exempt applicants
-    // (one-time backfill import — see POST /import) never reach either block,
-    // permanently, no matter how many times they're approved/rejected. This
-    // applicant's OWN amount is what gets pushed, even when fundingAnchor is
-    // a different row (the primary) — the account is shared, the money isn't.
-    if (applicant.shul_id && !applicant.provider_exempt && !providerAccountError) {
-      if (amount > 0) {
+      const acctResult = await ensureProviderAccount(req.user.org_id, applicant);
+      if (acctResult.error) {
+        providerAccountError = acctResult.error;
+        console.error('[giftcard] failed to write disccardpromos account on approval:', acctResult.error);
+        scheduleProviderEnforceSoon(req.user.org_id, `account write failed on approval for applicant ${applicant.id}`);
+      } else if (amount > 0) {
+        // disccardpromos has no separate "assign/activate a card" step —
+        // crediting a customer's balance against a configured Package
+        // (Settings > Organization > Gift Card Loading) IS how a card
+        // actually gets issued with an amount. This applicant's OWN amount
+        // is what gets pushed, even when the account is shared with a
+        // merge-group primary — the account is shared, the money isn't.
         const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
         if (!discountId) {
           providerFundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — card amount was not loaded.';
         } else {
           try {
-            await giftcard.addFunds(applicant.season_id, { externalId: fundingAnchor.external_id, discountId, amount });
+            await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount });
           } catch (e) {
             providerFundsError = e.message;
             console.error('[giftcard] failed to load funds on approval:', e.message);
+            scheduleProviderEnforceSoon(req.user.org_id, `fund load failed on approval for applicant ${applicant.id}`);
           }
         }
       } else {
@@ -1193,32 +1186,25 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
     // Same best-effort account-write + fund-load as the single /:id/approve
     // route — see the comments there. A disccardpromos hiccup on one
     // applicant never stops the rest of the batch. A merged-duplicate
-    // secondary (see isMergedSecondary) still pushes its OWN real amount —
-    // just onto the group's one shared account (identified by the PRIMARY's
-    // external_id, the only one disccard actually knows), never its own.
+    // secondary still pushes its OWN real amount — just onto the group's
+    // one shared account (services/providerAccount.js's ensureProviderAccount
+    // resolves which identity that is), never its own.
     if (applicant.shul_id && !applicant.provider_exempt) {
-      const fundingAnchor = isMergedSecondary(applicant)
-        ? (db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
-        : applicant;
-      let accountOk = false;
-      try {
-        const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(applicant.shul_id);
-        const result = await giftcard.upsertAccountForApproval(applicant.season_id, buildProviderOpts(req.user.org_id, fundingAnchor, shul?.name_en || 'Unknown'));
-        if (result.accountId) {
-          db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? OR merge_group_id = ?`).run(result.accountId, fundingAnchor.id, fundingAnchor.id);
-        }
-        accountOk = true;
-      } catch (e) {
+      const acctResult = await ensureProviderAccount(req.user.org_id, applicant);
+      const accountOk = !acctResult.error;
+      if (acctResult.error) {
         providerErrors++;
-        providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: account write failed — ${e.message}`);
-        console.error('[giftcard] failed to write disccardpromos account on mass-approve:', e.message);
+        providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: account write failed — ${acctResult.error}`);
+        console.error('[giftcard] failed to write disccardpromos account on mass-approve:', acctResult.error);
+        scheduleProviderEnforceSoon(req.user.org_id, `account write failed on mass-approve for applicant ${applicant.id}`);
       }
       if (accountOk && amount > 0 && discountId) {
-        try { await giftcard.addFunds(applicant.season_id, { externalId: fundingAnchor.external_id, discountId, amount }); }
+        try { await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount }); }
         catch (e) {
           providerErrors++;
           providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: card not loaded — ${e.message}`);
           console.error('[giftcard] failed to load funds on mass-approve:', e.message);
+          scheduleProviderEnforceSoon(req.user.org_id, `fund load failed on mass-approve for applicant ${applicant.id}`);
         }
       } else if (accountOk && amount > 0 && !discountId) {
         providerErrors++;
@@ -1534,4 +1520,93 @@ router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_ed
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ============================= Disccardpromos reconciliation (super_admin only) =============================
+// Everything below is an internal diagnostic/reconciliation surface, not
+// something org_admin/staff should see or use — deliberately gated on
+// role === 'super_admin' directly rather than requireAdmin (which also
+// allows org_admin/staff) or requirePermission('applicants', ...) (which a
+// super_admin already passes anyway, but org_admin/staff could too).
+
+function requireSuperAdmin(req, res, next) {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+  next();
+}
+
+// Re-attempts account creation/fund-loading for one applicant flagged
+// 'missing' — same ensureProviderAccount + addFunds path the approve routes
+// use, just callable on demand instead of waiting for the next automatic
+// provider-enforce sweep.
+router.post('/:id/retry-provider-sync', requireSuperAdmin, async (req, res) => {
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!applicant) return res.status(404).json({ error: 'Not found' });
+  if (applicant.approval_status !== 'approved') return res.status(400).json({ error: 'Only an approved applicant can be retried' });
+  const acctResult = await ensureProviderAccount(req.user.org_id, applicant);
+  if (acctResult.error) return res.status(400).json({ error: acctResult.error });
+  let fundsError = null;
+  if (applicant.card_amount > 0) {
+    const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
+    if (!discountId) fundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
+    else {
+      try { await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount: applicant.card_amount }); }
+      catch (e) { fundsError = e.message; }
+    }
+  }
+  res.json({ ok: true, accountId: acctResult.accountId, created: acctResult.created, linked: acctResult.linked, fundsError });
+});
+
+// Re-attempts services/cardSync.js's lockApplicantCards for one applicant
+// currently flagged with a provider_deactivate_error (single), or every
+// such applicant in a season at once (bulk) — see item 4/27's tracking of
+// deactivation-write failures that previously only ever logged to the
+// server console.
+router.post('/:id/retry-deactivation', requireSuperAdmin, async (req, res) => {
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!applicant) return res.status(404).json({ error: 'Not found' });
+  const result = await retryDeactivation(req.user.org_id, applicant);
+  res.json({ ok: !result.errors.length, errors: result.errors });
+});
+router.post('/retry-deactivation-all', requireSuperAdmin, async (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND provider_deactivate_error IS NOT NULL`).all(req.user.org_id, seasonId);
+  let succeeded = 0, failed = 0;
+  for (const applicant of rows) {
+    const result = await retryDeactivation(req.user.org_id, applicant);
+    if (result.errors.length) failed++; else succeeded++;
+  }
+  res.json({ attempted: rows.length, succeeded, failed });
+});
+
+// Fixes historical data: a merged-duplicate secondary only ever gets linked
+// onto its primary's disccardpromos account by the approve routes' own
+// propagation logic, which never ran for a merge that happened before that
+// logic existed, or for a secondary approved before its primary. Runs
+// services/providerAccount.js's reconcileAccountsForGroup across every
+// existing merge group in a season at once — pure DB propagation, no
+// disccardpromos call needed (it only ever propagates an account id this
+// app already knows about).
+router.post('/reconcile-merged-accounts', requireSuperAdmin, (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  res.json(reconcileAllMergedAccounts(req.user.org_id, seasonId));
+});
+
+// Full two-way audit against disccardpromos' own real customer list — see
+// services/providerAccount.js's runProviderAudit for the full reasoning.
+// Async: POST kicks the job off (or returns the already-running one), GET
+// polls its progress/result.
+router.post('/provider-audit', requireSuperAdmin, (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  if (!seasonId) return res.status(400).json({ error: 'No season to audit' });
+  res.json(startProviderAudit(req.user.org_id, seasonId));
+});
+// "Make Disccardpromos Match" — one idempotent job that enforces the whole
+// rule end to end (see services/providerAccount.js's runProviderEnforce).
+// Same async job/poll shape as provider-audit above. Also runs
+// automatically (boot, every 15 minutes, and shortly after any logged
+// disccardpromos write failure — see index.js and scheduleProviderEnforceSoon)
+// so this button is a manual "do it now" rather than the only way it runs.
+router.post('/provider-enforce', requireSuperAdmin, (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  if (!seasonId) return res.status(400).json({ error: 'No season to enforce' });
+  res.json(startProviderEnforce(req.user.org_id, seasonId));
+});
 export default router;

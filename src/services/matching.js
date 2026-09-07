@@ -116,22 +116,25 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   // and routes/applicants.js's isMergedSecondary) shares one real
   // disccardpromos customer with the rest of its group, but that customer
   // is only ever known to disccard under the group's PRIMARY member's
-  // external_id — addFunds under a secondary's own external_id would either
-  // fail (no such customer) or create a second, duplicate one. This shul's
-  // real base_amount still gets pushed in full either way; only WHICH
-  // external_id identifies the shared account changes.
-  const fundingExternalId = (applicant.merge_group_id && applicant.merge_group_id !== applicant.id)
-    ? (db.prepare('SELECT external_id FROM applicants WHERE id = ?').get(applicant.merge_group_id)?.external_id || applicant.external_id)
-    : applicant.external_id;
+  // identity — addFunds under a secondary's own external_id/account would
+  // either fail (no such customer) or create a second, duplicate one. This
+  // shul's real base_amount still gets pushed in full either way; only
+  // WHICH identity the write targets changes.
+  const fundingAnchor = (applicant.merge_group_id && applicant.merge_group_id !== applicant.id)
+    ? (db.prepare('SELECT external_id, provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
+    : applicant;
 
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   let giftcardStatus = 'ok', giftcardError = null;
   if (!discountId) {
     giftcardStatus = 'failed';
     giftcardError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
+  } else if (!fundingAnchor.provider_account_id) {
+    giftcardStatus = 'failed';
+    giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
     try {
-      await giftcard.addFunds(applicant.season_id, { externalId: fundingExternalId, discountId, amount: totalAmount });
+      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, amount: totalAmount });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -166,10 +169,11 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(original.applicant_id);
   // Same merge-group anchor reasoning as createAllocation above — the
   // shared customer is only ever known to disccard under the group's
-  // PRIMARY member's external_id.
-  const fundingExternalId = (applicant?.merge_group_id && applicant.merge_group_id !== applicant.id)
-    ? (db.prepare('SELECT external_id FROM applicants WHERE id = ?').get(applicant.merge_group_id)?.external_id || applicant?.external_id)
-    : applicant?.external_id;
+  // PRIMARY member's identity.
+  const fundingAnchor = (applicant?.merge_group_id && applicant.merge_group_id !== applicant.id)
+    ? (db.prepare('SELECT external_id, provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
+    : applicant;
+  const fundingExternalId = fundingAnchor?.external_id;
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   // getCustomerByExternalId (not getCardBalance, which needs a real 16-digit
   // card number this app never retains — see cards.card_number_masked's own
@@ -186,8 +190,8 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     }
   }
 
-  if (discountId && retrievable > 0) {
-    await giftcard.addFunds(original.season_id, { externalId: fundingExternalId, discountId, amount: -retrievable });
+  if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
+    await giftcard.addFunds(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, amount: -retrievable });
   }
 
   // Split the retrievable amount between base/match in the same proportion

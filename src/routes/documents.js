@@ -308,6 +308,16 @@ router.post('/sign/:token/sign', async (req, res) => {
   const signatureData = primary ? values[primary.id] : null;
   db.prepare(`UPDATE documents SET status='signed', signature_data=?, signer_name=?, signer_title=?, signed_at=?, ip_address=?, signed_pdf_path=?, field_values=?, esign_consent_at=? WHERE id=?`)
     .run(signatureData, signer_name, signer_title || '', signedAt, req.ip, signedPath, JSON.stringify(values), signedAt, document.id);
+  // Unlike a shul's dedicated contracts table (which sets status=
+  // 'contract_signed' directly on the shul at sign time), a store's
+  // agreement is just a generic documents row — nothing was ever written
+  // back onto the store's own record. Set once, here; deliberately never
+  // cleared by a later retraction (retraction resets the document's own
+  // live status/signed_at, but this timestamp records that signing
+  // genuinely happened at some point, which stays true either way).
+  if (document.entity_type === 'store') {
+    db.prepare(`UPDATE stores SET contract_signed_at = ? WHERE id = ?`).run(signedAt, document.entity_id);
+  }
 
   // A copy for the signer's own records — same "review & sign" link, which
   // now shows the signed state with a download button (sign-document.html).

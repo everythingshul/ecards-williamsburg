@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { initMail } from './services/mail.js';
 import { sendDueTaskReminders } from './services/reminders.js';
 import { syncAllCards } from './services/cardSync.js';
+import { startProviderEnforceScheduler } from './services/providerAccount.js';
 import { syncInboundSms, getOwnSmsNumber } from './services/sms.js';
 import { runBackup } from './services/backup.js';
 import { DEFAULT_ORG_ID } from './db.js';
@@ -211,6 +212,15 @@ setTimeout(() => { sendDueTaskReminders().catch(e => console.error('[reminders] 
 const CARD_SYNC_INTERVAL_MS = 15 * 60 * 1000;
 setInterval(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, CARD_SYNC_INTERVAL_MS);
 setTimeout(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, 20 * 1000);
+
+// Keeps disccardpromos matched to our own approval records automatically —
+// no admin should ever need to click "Make Disccardpromos Match" for this
+// to stay correct. Runs once ~45s after boot (heals any drift that built up
+// while the server was down), every 15 minutes on its own, and again
+// shortly after any logged disccardpromos write failure anywhere in the
+// approval/reject flow (see services/providerAccount.js's
+// scheduleProviderEnforceSoon, called from those catch blocks directly).
+startProviderEnforceScheduler(DEFAULT_ORG_ID);
 
 // Automatic inbound-SMS sync — SimpleSender doesn't support webhooks yet, so
 // this polls GET /v1/messages for new incoming replies instead. No-ops

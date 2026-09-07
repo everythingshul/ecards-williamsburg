@@ -885,6 +885,26 @@ safeAlter(`ALTER TABLE documents ADD COLUMN fields_json TEXT`);
 // while the record is actually soft-rejected.
 safeAlter(`ALTER TABLE applicants ADD COLUMN previous_shul_id TEXT REFERENCES shuls(id)`);
 
+// Set whenever services/cardSync.js's lockApplicantCards fails to PATCH
+// disccardpromos to deactivate this applicant's customer (reject / revert to
+// pending) — cleared back to NULL the moment a later attempt (automatic
+// retry via services/providerAccount.js's runProviderEnforce, or a manual
+// retry from the sync-status diagnostic) actually succeeds. Previously a
+// failure here was only ever a server-log line — this is what lets it
+// surface in the UI at all and be retried instead of silently staying wrong
+// on disccardpromos' side forever.
+safeAlter(`ALTER TABLE applicants ADD COLUMN provider_deactivate_error TEXT`);
+
+// Stores sign their participation agreement through the generic documents
+// system (entity_type='store' on a documents row), unlike shuls (which get
+// status='contract_signed' written directly onto the shul at sign time) —
+// nothing was ever recorded back onto the store's own record. Set once, at
+// sign time, in routes/documents.js's public sign route; deliberately left
+// alone by a later signature retraction (records that signing happened at
+// all, not the document's current live state — documents.signed_at already
+// tracks that).
+safeAlter(`ALTER TABLE stores ADD COLUMN contract_signed_at TEXT`);
+
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to

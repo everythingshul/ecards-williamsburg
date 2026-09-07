@@ -247,10 +247,23 @@ router.post('/', requirePermission('stores', 'can_edit'), (req, res) => {
   res.status(201).json({ store });
 });
 
+// Admin-only fields, mirroring applicants.js PUT /:id's identical
+// role-conditional pattern: `discount` is set on a store's profile by an
+// admin, not something the store itself should ever be able to write, same
+// for the disccard setup-tracking/internal fields. In practice a plain
+// store-portal login can't reach this route at all today (its 'stores'
+// permission defaults to can_edit:0 — see middleware/permissions.js's
+// ROLE_DEFAULTS — so requirePermission above already 403s it; the
+// store-portal's own self-edit goes through PUT /:id/onboarding instead,
+// whose own whitelist never included these fields either), but this keeps
+// the same belt-and-suspenders shape as applicants.js rather than relying
+// on the router-level gate alone.
+const STORE_ADMIN_ONLY_FIELDS = ['setup_status', 'has_provider_account', 'provider_store_id', 'discount', 'disccard_setup_comments', 'disccard_setup_complete'];
 router.put('/:id', requirePermission('stores', 'can_edit'), (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
-  const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments','setup_status','has_provider_account','provider_store_id','discount','disccard_setup_comments','disccard_setup_complete'];
+  const baseFields = ['name','address','city','state','zip','phone','pos_system','discount_details','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','same_person','comments'];
+  const fields = req.user.role === 'store' ? baseFields : [...baseFields, ...STORE_ADMIN_ONLY_FIELDS];
   const b = req.body || {};
   if (b.phone !== undefined) b.phone = normalizePhone(b.phone);
   if (b.manager_phone !== undefined) b.manager_phone = normalizePhone(b.manager_phone);
