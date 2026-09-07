@@ -64,21 +64,31 @@ router.post('/forgot-password', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Redeems a one-time "Enter Portal" code (see POST /shuls/:id/impersonate
-// and /stores/:id/impersonate) for a real session on the target shul/store
-// login — same shape as login/accept-invite, so the new tab that opens this
-// URL can Auth.set() straight from the response. Never requires or reads
-// the target account's actual password. The code itself is single-use and
-// expires in minutes (see the issuing routes), so a link left in browser
-// history or a mistakenly-forwarded message is worthless within moments of
-// being issued.
+// Redeems an "Enter Portal" code (see POST /shuls/:id/impersonate and
+// /stores/:id/impersonate) for a real session on the target shul/store
+// login — same shape as login/accept-invite, so the caller (see app.js's
+// enterPortal()) can Auth.set() straight from the response. Never requires
+// or reads the target account's actual password.
+//
+// Reusable within its short (2-minute) expiry window, not strictly single-
+// use — redeeming twice just re-signs the same session, which is harmless.
+// This used to hard-reject a second redeem (`row.used_at` was a 404), which
+// meant a request that actually succeeded server-side but whose response
+// got mangled/truncated in transit (some corporate networks do this
+// intermittently) could never be safely retried — the client had no way to
+// tell "truly invalid token" apart from "worked, but I didn't get to see
+// it," and a same-token retry always lost that race with a confusing 404.
+// enterPortal() now retries once on exactly that transport failure, which
+// this endpoint needs to tolerate. `used_at` is still recorded, just no
+// longer enforced — the 2-minute expiry remains the only real time bound,
+// same as before.
 router.post('/impersonate/:token', (req, res) => {
   const row = db.prepare('SELECT * FROM impersonation_tokens WHERE token = ?').get(req.params.token);
-  if (!row || row.used_at) return res.status(404).json({ error: 'Invalid or expired link' });
+  if (!row) return res.status(404).json({ error: 'Invalid or expired link' });
   if (new Date(row.expires_at) < new Date()) return res.status(410).json({ error: 'This link has expired' });
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id);
   if (!user || !user.is_active) return res.status(404).json({ error: 'This account is no longer active' });
-  db.prepare('UPDATE impersonation_tokens SET used_at = datetime(\'now\') WHERE token = ?').run(row.token);
+  if (!row.used_at) db.prepare('UPDATE impersonation_tokens SET used_at = datetime(\'now\') WHERE token = ?').run(row.token);
   const { password_hash, ...safe } = user;
   res.json({ token: signToken(user), user: safe, permissions: computePermissionMap(user) });
 });

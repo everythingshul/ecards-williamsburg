@@ -877,13 +877,32 @@ async function storeLandingUrl(user) {
 // a real session as that shul/store (see impersonate.html and
 // Auth._store()/isImpersonating() for why a new tab, not this one). Shared
 // by shuls.html and stores.html rather than duplicated per page.
+// Retries once on the specific "2xx response body didn't parse" failure —
+// safe here (and only added here, not in api() itself) because both calls
+// enterPortal wraps with this are harmless to repeat: the mint route always
+// just issues a fresh token, and the redeem route is now reusable within its
+// short expiry rather than strictly single-use (see auth.js), specifically
+// so this retry can't collide with a first attempt that actually succeeded
+// server-side. Most POST calls elsewhere in the app are NOT safe to blindly
+// retry this way (e.g. a create endpoint could double-submit), which is why
+// this stays local to enterPortal instead of living inside api() itself.
+async function apiRetryOnParseFailure(path, opts) {
+  try {
+    return await api(path, opts);
+  } catch (err) {
+    if (!/Something went wrong loading the response/.test(err.message)) throw err;
+    await new Promise(r => setTimeout(r, 400));
+    return api(path, opts);
+  }
+}
+
 async function enterPortal(resource, id, name) {
   // window.open() reserved SYNCHRONOUSLY, before any await — some browsers/
   // security software only treat window.open() as a trusted, direct
   // response to the click if it happens before any asynchronous gap.
   const win = window.open('', '_blank');
   try {
-    const { token } = await api(`/${resource}/${id}/impersonate`, { method: 'POST' });
+    const { token } = await apiRetryOnParseFailure(`/${resource}/${id}/impersonate`, { method: 'POST' });
     // Both the mint above AND the redeem below now happen right here, in
     // this already-established tab — not as a follow-up fetch made from
     // inside the freshly-opened one. A live report (several computers, one
@@ -895,7 +914,14 @@ async function enterPortal(resource, id, name) {
     // first request, this routes around the pattern entirely: the new tab
     // now does no networking of its own for this at all. See
     // impersonate.html for the other half.
-    const session = await api(`/auth/impersonate/${token}`, { method: 'POST' });
+    //
+    // Some shuls still hit "Something went wrong loading the response" here
+    // specifically — every server code path in this flow returns valid JSON
+    // unconditionally (checked directly, error paths included), so this
+    // isn't an app-logic bug tied to particular records; it's the response
+    // getting mangled/truncated in transit on some networks. The retry
+    // wrapper above is the fix for that class of failure.
+    const session = await apiRetryOnParseFailure(`/auth/impersonate/${token}`, { method: 'POST' });
     // In the URL *fragment*, not a query string — never sent to the server
     // at all (so it can't be logged, cached, or inspected by anything in
     // the network path the way a query string can), and impersonate.html
