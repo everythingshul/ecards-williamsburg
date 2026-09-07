@@ -878,19 +878,29 @@ async function storeLandingUrl(user) {
 // Auth._store()/isImpersonating() for why a new tab, not this one). Shared
 // by shuls.html and stores.html rather than duplicated per page.
 async function enterPortal(resource, id, name) {
-  // window.open() is reserved SYNCHRONOUSLY, before the await below, not
-  // after — calling it post-await is a well-known cross-browser
-  // inconsistency: some browsers/security software only treat window.open()
-  // as a trusted, direct response to the click if it happens before any
-  // asynchronous gap, and quietly degrade how the resulting tab behaves
-  // (up to and including that tab's very first network request) once one
-  // has passed. That's a plausible reason "Could Not Enter Portal" only
-  // shows up on some computers and not others — it depends on that
-  // browser's/software's own strictness, not on anything server-side.
+  // window.open() reserved SYNCHRONOUSLY, before any await — some browsers/
+  // security software only treat window.open() as a trusted, direct
+  // response to the click if it happens before any asynchronous gap.
   const win = window.open('', '_blank');
   try {
     const { token } = await api(`/${resource}/${id}/impersonate`, { method: 'POST' });
-    const url = `/impersonate?token=${encodeURIComponent(token)}&label=${encodeURIComponent(name || '')}`;
+    // Both the mint above AND the redeem below now happen right here, in
+    // this already-established tab — not as a follow-up fetch made from
+    // inside the freshly-opened one. A live report (several computers, one
+    // office, previously worked) pointed at exactly that follow-up fetch —
+    // made from inside a just-opened tab specifically — failing on some
+    // networks even after hardening window.open()'s timing above, with
+    // every other request in the app working fine on the same machines.
+    // Rather than keep guessing at what that network does to a fresh tab's
+    // first request, this routes around the pattern entirely: the new tab
+    // now does no networking of its own for this at all. See
+    // impersonate.html for the other half.
+    const session = await api(`/auth/impersonate/${token}`, { method: 'POST' });
+    // In the URL *fragment*, not a query string — never sent to the server
+    // at all (so it can't be logged, cached, or inspected by anything in
+    // the network path the way a query string can), and impersonate.html
+    // scrubs it from history the moment it's read.
+    const url = `/impersonate#session=${encodeURIComponent(JSON.stringify(session))}&label=${encodeURIComponent(name || '')}`;
     if (win) win.location.href = url;
     else window.open(url, '_blank'); // popup was blocked outright — same fallback as before
   } catch (err) {

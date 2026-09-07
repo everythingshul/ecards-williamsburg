@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Entering Portal · Kipas Hair BP Platform</title>
+<title>Entering Portal · Kupes Hair Williamsburg</title>
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
@@ -31,17 +31,29 @@
   // token there would silently sign the ADMIN'S OWN tab into their account
   // too).
   sessionStorage.setItem('ec_impersonating', '1');
-  const params = new URLSearchParams(location.search);
-  const token = params.get('token');
+  // The already-redeemed session ({token, user, permissions}) is handed
+  // over in the URL *fragment* by app.js's enterPortal() — the admin's own
+  // tab does both the mint AND redeem API calls itself now (a previously-
+  // reported failure was specifically a fetch made from inside this
+  // freshly-opened tab; this tab now makes no such fetch at all, see
+  // enterPortal()'s own comment for the full story). A fragment (unlike a
+  // query string) is never sent to the server, so it can't be logged or
+  // inspected anywhere in the network path — and it's scrubbed from this
+  // tab's history the instant it's read, below, so it doesn't linger
+  // there either.
+  const params = new URLSearchParams(location.hash.slice(1));
   const label = params.get('label') || '';
   if (label) sessionStorage.setItem('ec_impersonating_label', label);
-  if (!token) {
+  const sessionRaw = params.get('session');
+  history.replaceState(null, '', location.pathname);
+  if (!sessionRaw) {
     qs('#status-heading').textContent = 'Link Missing';
-    qs('#status-card').innerHTML = '<p class="small-muted">No portal link was provided. Close this tab and use "Enter Portal" again from the shul/store\'s profile.</p>';
+    qs('#status-card').innerHTML = '<p class="small-muted">No portal session was provided. Close this tab and use "Enter Portal" again from the shul/store\'s profile.</p>';
     return;
   }
   try {
-    const { token: authToken, user, permissions } = await api(`/auth/impersonate/${token}`, { method: 'POST' });
+    const { token: authToken, user, permissions } = JSON.parse(sessionRaw);
+    if (!authToken || !user) throw new Error('This link is incomplete.');
     Auth.set(authToken, user, permissions);
     location.href = user.role === 'shul' ? '/shul-portal/dashboard' : '/store-portal/dashboard';
   } catch (err) {
