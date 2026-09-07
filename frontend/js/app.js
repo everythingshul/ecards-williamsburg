@@ -878,11 +878,25 @@ async function storeLandingUrl(user) {
 // Auth._store()/isImpersonating() for why a new tab, not this one). Shared
 // by shuls.html and stores.html rather than duplicated per page.
 async function enterPortal(resource, id, name) {
+  // window.open() is reserved SYNCHRONOUSLY, before the await below, not
+  // after — calling it post-await is a well-known cross-browser
+  // inconsistency: some browsers/security software only treat window.open()
+  // as a trusted, direct response to the click if it happens before any
+  // asynchronous gap, and quietly degrade how the resulting tab behaves
+  // (up to and including that tab's very first network request) once one
+  // has passed. That's a plausible reason "Could Not Enter Portal" only
+  // shows up on some computers and not others — it depends on that
+  // browser's/software's own strictness, not on anything server-side.
+  const win = window.open('', '_blank');
   try {
     const { token } = await api(`/${resource}/${id}/impersonate`, { method: 'POST' });
     const url = `/impersonate?token=${encodeURIComponent(token)}&label=${encodeURIComponent(name || '')}`;
-    window.open(url, '_blank');
-  } catch (err) { toast(err.message, true); }
+    if (win) win.location.href = url;
+    else window.open(url, '_blank'); // popup was blocked outright — same fallback as before
+  } catch (err) {
+    if (win) win.close();
+    toast(err.message, true);
+  }
 }
 
 // Authenticated PDF view (opens in a new tab instead of forcing a download) —
