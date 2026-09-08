@@ -131,9 +131,27 @@ async function api(path, { method = 'GET', body, isForm = false } = {}) {
   const hadToken = !!Auth.token();
   if (Auth.token()) headers['Authorization'] = `Bearer ${Auth.token()}`;
   if (!isForm) headers['Content-Type'] = 'application/json';
-  const res = await fetch(API_BASE + path, { method, headers, body: isForm ? body : (body ? JSON.stringify(body) : undefined) });
+  const doFetch = () => fetch(API_BASE + path, { method, headers, body: isForm ? body : (body ? JSON.stringify(body) : undefined) });
+  let res = await doFetch();
   let data = {}, parsed = true;
   try { data = await res.json(); } catch { parsed = false; }
+  // GET is idempotent, so a parse failure on an otherwise-successful GET —
+  // which only ever means the response body got mangled/truncated in
+  // transit (see the comment below this function), never a real app error
+  // — is safe to retry once outright. A POST/PUT/DELETE is NOT retried
+  // here, since blindly repeating one of those could double a write that
+  // actually already succeeded server-side (enterPortal() below has its
+  // own narrowly-scoped retry for its two POSTs, specifically because both
+  // of those happen to be provably safe to repeat — see its comment). This
+  // GET retry is what a real report of the Applicants list turning up
+  // "Something went wrong loading the response" for one user (every other
+  // list page fine on the same computer) needed — that page's response is
+  // the largest of any list (every row's loaded/spent/remaining computed
+  // live), so it's the one most likely to catch a flaky connection mid-transfer.
+  if (!parsed && res.ok && method === 'GET') {
+    res = await doFetch();
+    try { data = await res.json(); parsed = true; } catch { parsed = false; }
+  }
   // A 401 with no token attached (e.g. a failed /auth/login) is a real
   // credentials/permission error, not a stale session — surface the actual
   // server message instead of forcing a confusing "session expired" logout.

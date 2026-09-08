@@ -64,13 +64,22 @@ async function loadBalance() {
 // weighed against the Approved Balance actually on file — a shul typing
 // amounts into several applicants at once sees, before committing to
 // anything, whether what they're about to give is fully covered.
+//
+// "Needed" means additional money beyond the approved balance — money
+// already paid in and sitting in that balance is covered, not still
+// needed, so this is only ever the SHORTFALL (typed amounts minus what's
+// available), clamped at $0 once the balance covers everything typed in.
+// This used to be `approvedBalance - notActivated`, which — with nothing
+// typed into any box yet (notActivated=0) — showed the shul's entire
+// available balance as "Total Needed", as if money they'd already paid in
+// still needed to be paid.
 function updateCalculator() {
   const notActivated = qsa('.give-amount-input').reduce((sum, el) => sum + (+el.value || 0), 0);
-  const needed = approvedBalance - notActivated;
+  const needed = Math.max(0, notActivated - approvedBalance);
   qs('#calc-stats').innerHTML = `
     <div class="card"><div class="small-muted">Available Balance</div><div style="font-size:20px;font-weight:600">${fmtMoney(approvedBalance)}</div></div>
     <div class="card"><div class="small-muted">Total Not Activated</div><div style="font-size:20px;font-weight:600">${fmtMoney(notActivated)}</div></div>
-    <div class="card"><div class="small-muted">Total Needed</div><div style="font-size:20px;font-weight:600${needed < 0 ? ';color:var(--danger,#b91c1c)' : ''}">${fmtMoney(needed)}</div></div>
+    <div class="card"><div class="small-muted">Total Needed</div><div style="font-size:20px;font-weight:600${needed > 0 ? ';color:var(--danger,#b91c1c)' : ''}">${fmtMoney(needed)}</div></div>
   `;
 }
 

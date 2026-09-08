@@ -334,13 +334,14 @@ window.saveApplicantEdit = async (id) => {
   }
   try { await api(`/applicants/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
-// Detaches the applicant from this shul rather than truly deleting the
-// record (see routes/applicants.js's POST /:id/soft-reject) — if they were
-// removed by mistake, or re-enroll with any shul later, an admin can still
-// find and restore them. The shul just sees them gone from their list.
+// A real, permanent delete (see routes/applicants.js's POST /:id/soft-reject
+// — same endpoint, but the shul-role branch there now hard-deletes instead
+// of detaching) — only ever reachable here for an applicant no admin has
+// reviewed yet (the "Remove" button itself is hidden once approved_at is
+// set, see the render calls above), so there's no decision history to lose.
 window.removeApplicantShul = async (id) => {
-  if (!confirm('Remove this applicant from your list? They will no longer appear here.')) return;
-  try { await api(`/applicants/${id}/soft-reject`, { method: 'POST' }); toast('Applicant removed'); closeModal(); load(); } catch (err) { toast(err.message, true); }
+  if (!confirm('Delete this applicant permanently? This cannot be undone from here — they will be removed from the system entirely, not just from your list.')) return;
+  try { await api(`/applicants/${id}/soft-reject`, { method: 'POST' }); toast('Applicant deleted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
 // Season Report picker — every season this shul (matched by gabai_email
 // across every carried-forward season row, see routes/shuls.js's

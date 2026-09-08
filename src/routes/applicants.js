@@ -1085,30 +1085,34 @@ router.get('/:id/shul-group', requireAdmin, (req, res) => {
   res.json({ members });
 });
 
-// Duplicate-resolution tool AND the shul-portal's own "remove this
-// applicant" action — both land here. Admin use: this exact applicant
-// appears to be submitted by more than one shul (or an admin just wants
-// one specific shul's submission gone without touching the others in the
-// group), so this picks ONE record — not necessarily the one the request
-// URL is even on, see the frontend's shul-group modal. Shul-portal use: a
-// shul removing an applicant from their own list was, until now, a real
-// permanent delete — it's this instead, so an accidental removal (or one
-// genuinely meant to be temporary) doesn't destroy history and can find
-// its way back. Either way this detaches the record: shul_id cleared and
-// status set to 'soft_rejected'. That status behaves like 'rejected'
-// everywhere a slot count matters (every such query is already scoped
-// `WHERE shul_id = ?`, which a NULL shul_id can never match — nothing
-// extra needed there), but it's meant to be temporary: PUT /:id auto-
-// clears it back to 'pending' the moment this same row is ever given a
-// shul_id again (any admin action, not just a dedicated "re-add" flow),
+// Two very different actions share this one route by caller role. Admin
+// use (duplicate-resolution tool): this exact applicant appears to be
+// submitted by more than one shul (or an admin just wants one specific
+// shul's submission gone without touching the others in the group), so
+// this picks ONE record — not necessarily the one the request URL is even
+// on, see the frontend's shul-group modal — and detaches it: shul_id
+// cleared, status set to 'soft_rejected'. That status behaves like
+// 'rejected' everywhere a slot count matters (every such query is already
+// scoped `WHERE shul_id = ?`, which a NULL shul_id can never match —
+// nothing extra needed there), but it's meant to be temporary: PUT /:id
+// auto-clears it back to 'pending' the moment this same row is ever given
+// a shul_id again (any admin action, not just a dedicated "re-add" flow),
 // and re-enrolling the same person elsewhere gets caught by the ordinary
 // duplicate-detection flag (checkApplicantDuplicate has no status filter,
 // so a soft-rejected record is still a live match candidate) — resolving
 // that flag by merging with the new submission as primary is what actually
 // brings them back under a shul (see services/duplicates.js's
-// mergeApplicants). Never exposed to the shul beyond the fact that their
-// own action succeeded — no flag/group/other-shul detail ever reaches
-// that role (see GET /:id and GET /:id/shul-group, both admin-only).
+// mergeApplicants).
+//
+// Shul-portal use ("Remove" on the dashboard): a real, permanent hard
+// delete instead (see the `role === 'shul'` branch below) — this used to
+// be the same soft-detach as the admin path above, but only ever fires for
+// an applicant no admin has reviewed yet (the approved_at guard below), so
+// there's no decision history worth preserving the way there is for
+// anything an admin has actually touched. Never exposed to the shul beyond
+// the fact that their own action succeeded — no flag/group/other-shul
+// detail ever reaches that role (see GET /:id and GET /:id/shul-group,
+// both admin-only).
 router.post('/:id/soft-reject', requirePermission('applicants', 'can_edit'), async (req, res) => {
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!applicant) return res.status(404).json({ error: 'Not found' });
@@ -1119,6 +1123,21 @@ router.post('/:id/soft-reject', requirePermission('applicants', 'can_edit'), asy
     // reject, deliberately left alone by set-pending) is no longer purely
     // the shul's to retract, no matter its current status.
     if (applicant.approved_at) return res.status(403).json({ error: 'This applicant has already been reviewed by an admin and can no longer be removed. Contact your admin.' });
+    // Back to a real hard delete for this specific case, per explicit
+    // request — the guard right above already limits this to an applicant
+    // no admin has ever reviewed (never approved/rejected), so there's no
+    // decision history worth preserving here the way there is for anything
+    // an admin has actually touched; a shul mass-uploading/typo-ing an
+    // applicant wants it gone, not sitting around as a recoverable
+    // soft_rejected row. Same cascade + Recent Actions safety net as the
+    // admin-only DELETE /:id/permanent route above, just reachable from the
+    // shul's own "Remove" button instead.
+    const { errors: cardLockErrors } = await lockApplicantCards(req.user.org_id, applicant);
+    const snapshot = captureApplicantSnapshot(applicant);
+    const del = db.transaction(() => hardDeleteApplicant(applicant));
+    del();
+    logAudit(req.user.org_id, req.user.id, 'delete', 'applicant', applicant.id, snapshot, null, req.ip);
+    return res.json({ ok: true, cardLockErrors });
   }
   if (applicant.approval_status === 'approved') return res.status(400).json({ error: 'This applicant is already approved — use Set to Pending or Reject instead, not Soft Reject.' });
   if (!applicant.shul_id) return res.status(400).json({ error: 'This applicant isn\'t currently assigned to a shul.' });
