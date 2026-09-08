@@ -17,6 +17,18 @@ export function signToken(user) {
   return jwt.sign({ userId: user.id, tokenVersion: user.token_version || 0 }, JWT_SECRET, { expiresIn: '30d' });
 }
 
+// Strips password_hash and parses page_size_prefs from its raw stored JSON
+// string into a real object — every route that ever sends a `user` object to
+// the client (login, /me, accept-invite, impersonate redeem) goes through
+// this instead of repeating `const { password_hash, ...safe } = user` four
+// times with page_size_prefs left as an unparsed string in three of them.
+export function safeUser(user) {
+  const { password_hash, page_size_prefs, ...safe } = user;
+  let prefs = {};
+  try { prefs = page_size_prefs ? JSON.parse(page_size_prefs) : {}; } catch { prefs = {}; }
+  return { ...safe, page_size_prefs: prefs };
+}
+
 export function auth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;

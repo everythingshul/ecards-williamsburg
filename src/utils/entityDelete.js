@@ -8,9 +8,59 @@
 // matching the values those tables were actually written with.
 import { db } from '../db.js';
 
+// A duplicate flag pauses BOTH sides (see services/duplicates.js's
+// pauseAccountsFor) until an admin resolves it — but if one side gets hard-
+// deleted instead of resolved, the flag row disappears with it (below),
+// leaving the OTHER side paused forever with no flag left for anyone to
+// bypass/resolve from. This unpauses a deleted entity's still-open flag
+// partner(s) right before those flag rows are deleted — but only when the
+// partner isn't ALSO paused by some other, still-open flag (checked via
+// `id != flag.id` below), so a partner genuinely still flagged against a
+// third record stays paused exactly as it should.
+function unpauseDuplicatePartners(entityType, entityId) {
+  const openFlags = db.prepare(`SELECT * FROM duplicate_flags WHERE entity_type = ? AND status = 'open' AND (entity_id = ? OR matched_entity_id = ?)`).all(entityType, entityId, entityId);
+  for (const flag of openFlags) {
+    const partnerId = flag.entity_id === entityId ? flag.matched_entity_id : flag.entity_id;
+    const stillFlagged = db.prepare(`SELECT 1 FROM duplicate_flags WHERE id != ? AND entity_type = ? AND status = 'open' AND (entity_id = ? OR matched_entity_id = ?)`)
+      .get(flag.id, entityType, partnerId, partnerId);
+    if (stillFlagged) continue;
+    if (entityType === 'applicant') db.prepare('UPDATE applicants SET is_paused = 0 WHERE id = ?').run(partnerId);
+    else if (entityType === 'shul') {
+      db.prepare('UPDATE shuls SET is_paused = 0 WHERE id = ?').run(partnerId);
+      db.prepare('UPDATE users SET is_paused = 0 WHERE shul_id = ?').run(partnerId);
+    }
+  }
+}
+
+// Captures each open flag's partner's pre-unpause is_paused, so a later
+// undo (restorePolymorphicRefs below) can put a partner that legitimately
+// stayed paused for some OTHER reason back into that state, instead of
+// unconditionally leaving it unpaused just because this particular delete
+// touched it.
+function captureDuplicatePartnerPauseState(entityType, entityId) {
+  const openFlags = db.prepare(`SELECT * FROM duplicate_flags WHERE entity_type = ? AND status = 'open' AND (entity_id = ? OR matched_entity_id = ?)`).all(entityType, entityId, entityId);
+  return openFlags.map(flag => {
+    const partnerId = flag.entity_id === entityId ? flag.matched_entity_id : flag.entity_id;
+    const row = entityType === 'applicant'
+      ? db.prepare('SELECT is_paused FROM applicants WHERE id = ?').get(partnerId)
+      : db.prepare('SELECT is_paused FROM shuls WHERE id = ?').get(partnerId);
+    return { partnerId, wasPaused: !!row?.is_paused };
+  });
+}
+function restoreDuplicatePartnerPauseState(entityType, states) {
+  (states || []).forEach(({ partnerId, wasPaused }) => {
+    if (entityType === 'applicant') db.prepare('UPDATE applicants SET is_paused = ? WHERE id = ?').run(wasPaused ? 1 : 0, partnerId);
+    else if (entityType === 'shul') {
+      db.prepare('UPDATE shuls SET is_paused = ? WHERE id = ?').run(wasPaused ? 1 : 0, partnerId);
+      db.prepare('UPDATE users SET is_paused = ? WHERE shul_id = ?').run(wasPaused ? 1 : 0, partnerId);
+    }
+  });
+}
+
 export function deletePolymorphicRefs(entityType, entityId) {
   db.prepare(`DELETE FROM documents WHERE entity_type = ? AND entity_id = ?`).run(entityType, entityId);
   db.prepare(`DELETE FROM tasks WHERE entity_type = ? AND entity_id = ?`).run(entityType, entityId);
+  unpauseDuplicatePartners(entityType, entityId);
   db.prepare(`DELETE FROM duplicate_flags WHERE entity_type = ? AND (entity_id = ? OR matched_entity_id = ?)`).run(entityType, entityId, entityId);
   db.prepare(`DELETE FROM sms_messages WHERE related_entity_type = ? AND related_entity_id = ?`).run(entityType, entityId);
   db.prepare(`DELETE FROM emails_sent WHERE related_entity_type = ? AND related_entity_id = ?`).run(entityType, entityId);
@@ -114,15 +164,21 @@ function capturePolymorphicRefs(entityType, entityId) {
     documents: db.prepare('SELECT * FROM documents WHERE entity_type = ? AND entity_id = ?').all(entityType, entityId),
     tasks: db.prepare('SELECT * FROM tasks WHERE entity_type = ? AND entity_id = ?').all(entityType, entityId),
     duplicateFlags: db.prepare('SELECT * FROM duplicate_flags WHERE entity_type = ? AND (entity_id = ? OR matched_entity_id = ?)').all(entityType, entityId, entityId),
+    // Captured here, BEFORE hardDelete*() (and its deletePolymorphicRefs ->
+    // unpauseDuplicatePartners call) ever runs, so this reflects each open
+    // flag partner's real pre-delete is_paused — not the already-unpaused
+    // state deletePolymorphicRefs is about to leave them in.
+    duplicatePartnerPauseState: captureDuplicatePartnerPauseState(entityType, entityId),
     smsMessages: db.prepare('SELECT * FROM sms_messages WHERE related_entity_type = ? AND related_entity_id = ?').all(entityType, entityId),
     emailsSent: db.prepare('SELECT * FROM emails_sent WHERE related_entity_type = ? AND related_entity_id = ?').all(entityType, entityId),
     formResponses: db.prepare('SELECT * FROM form_responses WHERE entity_type = ? AND entity_id = ?').all(entityType, entityId),
   };
 }
-function restorePolymorphicRefs(snap) {
+function restorePolymorphicRefs(entityType, snap) {
   snap.documents.forEach(r => insertIfMissing('documents', r));
   snap.tasks.forEach(r => insertIfMissing('tasks', r));
   snap.duplicateFlags.forEach(r => insertIfMissing('duplicate_flags', r));
+  restoreDuplicatePartnerPauseState(entityType, snap.duplicatePartnerPauseState);
   snap.smsMessages.forEach(r => insertIfMissing('sms_messages', r));
   snap.emailsSent.forEach(r => insertIfMissing('emails_sent', r));
   snap.formResponses.forEach(r => insertIfMissing('form_responses', r));
@@ -168,7 +224,7 @@ export function restoreShulSnapshot(snap) {
   snap.unlinkedApplicantIds.forEach(id => db.prepare('UPDATE applicants SET shul_id = ? WHERE id = ? AND shul_id IS NULL').run(snap.row.id, id));
   snap.duplicateOfShulIds.forEach(id => db.prepare('UPDATE shuls SET duplicate_of_shul_id = ? WHERE id = ?').run(snap.row.id, id));
   restorePortalUser(snap.portalUser);
-  restorePolymorphicRefs(snap);
+  restorePolymorphicRefs('shul', snap);
 }
 
 export function captureApplicantSnapshot(applicant) {
@@ -202,7 +258,7 @@ export function restoreApplicantSnapshot(snap) {
   (snap.cardReconciliationFlags || []).forEach(r => insertIfMissing('card_reconciliation_flags', r));
   snap.duplicateOfApplicantIds.forEach(id => db.prepare('UPDATE applicants SET duplicate_of_applicant_id = ? WHERE id = ?').run(snap.row.id, id));
   (snap.carriedFromApplicantIds || []).forEach(id => db.prepare('UPDATE applicants SET carried_from_applicant_id = ? WHERE id = ? AND carried_from_applicant_id IS NULL').run(snap.row.id, id));
-  restorePolymorphicRefs(snap);
+  restorePolymorphicRefs('applicant', snap);
 }
 
 export function captureStoreSnapshot(store) {
@@ -223,5 +279,5 @@ export function restoreStoreSnapshot(snap) {
     db.prepare(`UPDATE card_transactions SET store_id = ? WHERE id IN (${placeholders}) AND store_id IS NULL`).run(snap.row.id, ...snap.unlinkedCardTransactionIds);
   }
   restorePortalUser(snap.portalUser);
-  restorePolymorphicRefs(snap);
+  restorePolymorphicRefs('store', snap);
 }

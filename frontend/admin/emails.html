@@ -23,6 +23,7 @@ renderShell('/admin/emails', `
     <div class="toolbar">
       <input id="f-search" placeholder="Search recipient or subject…">
       <select id="f-status"><option value="">All statuses</option><option value="sent">Sent</option><option value="failed">Failed</option><option value="dry_run">Dry Run (no provider)</option></select>
+      <select id="f-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select>
       <button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button>
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
@@ -44,7 +45,7 @@ qsa('#etabs button').forEach(b => b.addEventListener('click', () => {
   if (b.dataset.t === 'templates') loadTemplates();
 }));
 
-let state = { search: '', status: '', page: 1, pageSize: 25 };
+let state = { search: '', status: '', page: 1, pageSize: Auth.pageSize('emails') };
 async function loadSent() {
   const params = new URLSearchParams(Object.fromEntries(Object.entries(state).filter(([,v]) => v !== '')));
   try {
@@ -77,6 +78,8 @@ function rowHtml(e) {
 }
 qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page = 1; loadSent(); }, 350));
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page = 1; loadSent(); });
+qs('#f-pagesize').value = state.pageSize;
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; Auth.savePageSize('emails', state.pageSize); loadSent(); });
 qs('#btn-export').addEventListener('click', () => downloadAuthed('/emails/export', 'sent-emails.xlsx'));
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 

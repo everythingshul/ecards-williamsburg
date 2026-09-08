@@ -18,7 +18,7 @@ renderShell('/admin/cards', `
   <div id="mock-banner"></div>
   <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button><button id="tab-recon-btn">Balance Mismatches<span id="recon-badge"></span></button></div>
   <div id="panel-cards">
-    <div class="toolbar"><input id="f-search" placeholder="Search applicant name or card number…"><select id="f-status"><option value="">All statuses</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="activated">Activated</option><option value="deactivated">Deactivated</option></select></div>
+    <div class="toolbar"><input id="f-search" placeholder="Search applicant name or card number…"><select id="f-status"><option value="">All statuses</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="activated">Activated</option><option value="deactivated">Deactivated</option></select><select id="f-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select></div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Applicant</th><th>Shul</th><th>Card #</th><th>Status</th><th>Amount</th><th>Activated</th><th></th></tr></thead>
       <tbody id="tbody-cards"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
@@ -48,7 +48,7 @@ renderShell('/admin/cards', `
   </div>
 `);
 
-let state = { search:'', status:'', page:1, pageSize:25 };
+let state = { search:'', status:'', page:1, pageSize:Auth.pageSize('cards') };
 let txnPage = 1;
 
 const cardsTabs = ['cards', 'txns', 'byshul', 'recon'];
@@ -110,6 +110,8 @@ async function loadCards() {
 function changePage(d) { state.page += d; loadCards(); }
 qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page=1; loadCards(); }, 350));
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page=1; loadCards(); });
+qs('#f-pagesize').value = state.pageSize;
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; Auth.savePageSize('cards', state.pageSize); loadCards(); });
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 async function loadTxns() {

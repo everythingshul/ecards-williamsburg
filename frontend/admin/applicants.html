@@ -54,7 +54,7 @@ renderShell('/admin/applicants', `
   <div class="paginator" id="pager"></div>
 `);
 
-let state = { search:'', status:'', paused:'', marital_status:'', shul_id:'', season_id:'', provider_sync:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
+let state = { search:'', status:'', paused:'', marital_status:'', shul_id:'', season_id:'', provider_sync:'', sort:'created_at', dir:'DESC', page:1, pageSize:Auth.pageSize('applicants') };
 let selected = new Set();
 
 // Every field a column can show, plus how to render it — the checkbox
@@ -164,7 +164,7 @@ qs('#f-season').addEventListener('change', () => {
   load();
 });
 qs('#f-pagesize').value = state.pageSize;
-qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; load(); });
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; Auth.savePageSize('applicants', state.pageSize); load(); });
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 qs('#btn-template').addEventListener('click', () => downloadAuthed('/applicants/import/template', 'applicant_import_template.xlsx'));

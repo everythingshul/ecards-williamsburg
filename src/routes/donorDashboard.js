@@ -51,6 +51,22 @@ router.get('/stats', (req, res) => {
     rejected: shulStatusCount('rejected'),
   };
 
+  // Stores have no season_id column (a store isn't tied to one season the
+  // way a shul/applicant/card is — see routes/stores.js), so this is
+  // deliberately never season-filtered even when a season is selected
+  // above, unlike every other bucket in this endpoint.
+  const storesTotal = db.prepare(`SELECT COUNT(*) c FROM stores WHERE org_id = ?`).get(orgId).c;
+  const storesByStatus = db.prepare(`SELECT setup_status, COUNT(*) c FROM stores WHERE org_id = ? GROUP BY setup_status`).all(orgId);
+  const storeStatusCount = (s) => storesByStatus.find(r => r.setup_status === s)?.c || 0;
+  const stores = {
+    total: storesTotal,
+    active: storeStatusCount('active'),
+    // pending + in_progress are both "still onboarding" from a donor's-eye
+    // view, same grouping shuls.pending uses above.
+    onboarding: storeStatusCount('pending') + storeStatusCount('in_progress'),
+    inactive: storeStatusCount('inactive'),
+  };
+
   const cardsTotal = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).c;
   const cardsByStatus = db.prepare(`SELECT status, COUNT(*) c FROM cards WHERE org_id = ?${seasonClause} GROUP BY status`).all(orgId, ...seasonParams);
   const cardStatusCount = (s) => cardsByStatus.find(r => r.status === s)?.c || 0;
@@ -78,7 +94,7 @@ router.get('/stats', (req, res) => {
 
   const duplicatesOpen = db.prepare(`SELECT COUNT(*) c FROM duplicate_flags WHERE org_id = ? AND status = 'open'`).get(orgId).c;
 
-  res.json({ applicants, shuls, cards, funds, duplicatesOpen });
+  res.json({ applicants, shuls, stores, cards, funds, duplicatesOpen });
 });
 
 router.get('/daily', (req, res) => {

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { db, uuid } from '../db.js';
-import { auth, signToken } from '../middleware/auth.js';
+import { auth, signToken, safeUser } from '../middleware/auth.js';
 import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
 import { computePermissionMap } from '../middleware/permissions.js';
 
@@ -23,15 +23,13 @@ router.post('/login', (req, res) => {
   db.prepare(`UPDATE users SET last_login_at = datetime('now') WHERE id = ?`).run(user.id);
   db.prepare(`INSERT INTO audit_log (id, org_id, user_id, action, entity_type, entity_id, ip_address) VALUES (?,?,?,?,?,?,?)`)
     .run(uuid(), user.org_id, user.id, 'login', 'user', user.id, req.ip);
-  const { password_hash, ...safe } = user;
   // Handed to the client so nav items it can't view are hidden outright
   // (see app.js's renderShell) instead of shown and only 403ing on click.
-  res.json({ token: signToken(user), user: safe, permissions: computePermissionMap(user) });
+  res.json({ token: signToken(user), user: safeUser(user), permissions: computePermissionMap(user) });
 });
 
 router.get('/me', auth, (req, res) => {
-  const { password_hash, ...safe } = req.user;
-  res.json({ user: safe, permissions: computePermissionMap(req.user) });
+  res.json({ user: safeUser(req.user), permissions: computePermissionMap(req.user) });
 });
 
 // Accept an invite (set initial password) — token comes from the approval email.
@@ -44,8 +42,7 @@ router.post('/accept-invite', (req, res) => {
   db.prepare(`UPDATE users SET password_hash = ?, invite_token = NULL, invite_expires = NULL, is_active = 1 WHERE id = ?`)
     .run(bcrypt.hashSync(password, 10), user.id);
   const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-  const { password_hash, ...safe } = fresh;
-  res.json({ token: signToken(fresh), user: safe, permissions: computePermissionMap(fresh) });
+  res.json({ token: signToken(fresh), user: safeUser(fresh), permissions: computePermissionMap(fresh) });
 });
 
 router.post('/forgot-password', async (req, res) => {
@@ -89,8 +86,26 @@ router.post('/impersonate/:token', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id);
   if (!user || !user.is_active) return res.status(404).json({ error: 'This account is no longer active' });
   if (!row.used_at) db.prepare('UPDATE impersonation_tokens SET used_at = datetime(\'now\') WHERE token = ?').run(row.token);
-  const { password_hash, ...safe } = user;
-  res.json({ token: signToken(user), user: safe, permissions: computePermissionMap(user) });
+  res.json({ token: signToken(user), user: safeUser(user), permissions: computePermissionMap(user) });
+});
+
+// Self-service preference save — deliberately living here (gated only on
+// `auth`, same as /me and /change-password above) rather than under
+// routes/users.js, whose whole router is locked to super_admin/org_admin
+// (see router.use there) for actual user-management actions. A 'staff' user
+// picking their own page size isn't managing anyone, so it can't sit behind
+// that gate. Merge-only (never replaces the whole blob) so saving one
+// page's size never clobbers another page's already-saved preference.
+router.put('/preferences', auth, (req, res) => {
+  const { page, pageSize } = req.body || {};
+  if (!page || typeof page !== 'string') return res.status(400).json({ error: 'page is required' });
+  const size = +pageSize;
+  if (!(size > 0)) return res.status(400).json({ error: 'pageSize must be a positive number' });
+  let prefs = {};
+  try { prefs = req.user.page_size_prefs ? JSON.parse(req.user.page_size_prefs) : {}; } catch { prefs = {}; }
+  prefs[page] = size;
+  db.prepare('UPDATE users SET page_size_prefs = ? WHERE id = ?').run(JSON.stringify(prefs), req.user.id);
+  res.json({ ok: true, page_size_prefs: prefs });
 });
 
 router.post('/change-password', auth, (req, res) => {

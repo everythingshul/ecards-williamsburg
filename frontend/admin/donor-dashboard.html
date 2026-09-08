@@ -49,9 +49,10 @@ renderShell('/admin/donor-dashboard', `
     <div class="card"><h4 style="margin:0 0 10px">Shuls by Status</h4><div id="donut-shuls"></div></div>
   </div>
   <div class="grid-2" style="margin-top:16px;align-items:start">
+    <div class="card"><h4 style="margin:0 0 10px">Stores by Status</h4><div id="donut-stores"></div></div>
     <div class="card"><h4 style="margin:0 0 10px">Cards by Status</h4><div id="donut-cards"></div></div>
-    <div class="card"><h4 style="margin:0 0 10px">Funds — Spent vs. Remaining</h4><div id="donut-funds"></div></div>
   </div>
+  <div class="card" style="margin-top:16px"><h4 style="margin:0 0 10px">Funds — Spent vs. Remaining</h4><div id="donut-funds"></div></div>
   <div class="card" style="margin-top:16px">
     <div class="flex-between"><h4 style="margin:0">New Applicants, Last 30 Days</h4>
       <select id="f-days" style="max-width:160px"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
@@ -176,7 +177,7 @@ function renderDailyBars(containerId, daily) {
 async function loadDonorDashboard() {
   const season_id = qs('#f-season').value;
   const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
-  const { applicants, shuls, cards, funds, duplicatesOpen } = await api('/donor-dashboard/stats' + qp);
+  const { applicants, shuls, stores, cards, funds, duplicatesOpen } = await api('/donor-dashboard/stats' + qp);
 
   qs('#kpi-row').innerHTML = [
     ['Total Applicants', applicants.total],
@@ -200,6 +201,11 @@ async function loadDonorDashboard() {
     { label: 'Approved', value: shuls.approved, color: 'var(--viz-good)' },
     { label: 'Pending', value: shuls.pending, color: 'var(--viz-warning)' },
     { label: 'Rejected', value: shuls.rejected, color: 'var(--viz-critical)' },
+  ]);
+  renderDonut('donut-stores', [
+    { label: 'Active', value: stores.active, color: 'var(--viz-good)' },
+    { label: 'Onboarding', value: stores.onboarding, color: 'var(--viz-warning)' },
+    { label: 'Inactive', value: stores.inactive, color: 'var(--viz-critical)' },
   ]);
   // Card status is a lifecycle stage, not a good/bad state — categorical
   // slots in fixed order.

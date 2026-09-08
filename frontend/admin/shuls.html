@@ -55,7 +55,7 @@ renderShell('/admin/shuls', `
   <div class="paginator" id="pager"></div>
 `);
 
-let state = { search:'', status:'', paused:'', season_id:'', sort:'created_at', dir:'DESC', page:1, pageSize:25 };
+let state = { search:'', status:'', paused:'', season_id:'', sort:'created_at', dir:'DESC', page:1, pageSize:Auth.pageSize('shuls') };
 let selected = new Set();
 if (new URLSearchParams(location.search).get('dup') === '1') showDuplicates();
 
@@ -174,7 +174,7 @@ qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status'
 qs('#f-paused').addEventListener('change', () => { state.paused = qs('#f-paused').value; state.page = 1; load(); });
 qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; state.page = 1; load(); });
 qs('#f-pagesize').value = state.pageSize;
-qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; load(); });
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; Auth.savePageSize('shuls', state.pageSize); load(); });
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 qs('#btn-template').addEventListener('click', () => downloadAuthed('/shuls/import/template', 'shul_import_template.xlsx'));

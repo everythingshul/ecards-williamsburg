@@ -25,6 +25,21 @@ const Auth = {
   // fetch needed. Optional so existing call sites that don't have it yet
   // (or a stale cached user from before this existed) don't break.
   set(token, user, permissions) { const s = this._store(); s.setItem('ec_token', token); s.setItem('ec_user', JSON.stringify(permissions ? { ...user, permissions } : user)); },
+  // Per-user (not per-browser — see PUT /api/auth/preferences) list
+  // page-size memory. `page_size_prefs` rides along on the cached user
+  // object exactly like `permissions` above, set at login/me and kept
+  // current here without a re-login: savePageSize() patches the local copy
+  // immediately (so the very next page navigation already reflects it) and
+  // persists it server-side in the background — best-effort, since losing a
+  // page-size pick to a flaky request isn't worth blocking on.
+  pageSize(pageKey, fallback = 25) { return this.user()?.page_size_prefs?.[pageKey] ?? fallback; },
+  async savePageSize(pageKey, size) {
+    const u = this.user();
+    if (!u) return;
+    const prefs = { ...(u.page_size_prefs || {}), [pageKey]: size };
+    this._store().setItem('ec_user', JSON.stringify({ ...u, page_size_prefs: prefs }));
+    try { await api('/auth/preferences', { method: 'PUT', body: { page: pageKey, pageSize: size } }); } catch { /* local copy already updated; not worth surfacing */ }
+  },
   // Refreshes the cached user's permissions from the server in the
   // background — picks up a permission change an admin just made without
   // requiring the affected user to log out/in. Fire-and-forget; the CURRENT

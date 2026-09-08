@@ -26,6 +26,7 @@ renderShell('/admin/sms', `
       <input id="f-search" placeholder="Search phone or message…">
       <select id="f-status"><option value="">All statuses</option><option value="sent">Sent</option><option value="failed">Failed</option><option value="mock">Mock (no provider)</option></select>
       <select id="f-season"></select>
+      <select id="f-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select>
       <button class="btn btn-outline btn-sm" id="btn-export">Export Excel</button>
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
@@ -39,6 +40,7 @@ renderShell('/admin/sms', `
     <p class="small-muted">SimpleSender doesn't support inbound webhooks yet, so incoming messages are pulled by checking in every 15 minutes automatically. <button type="button" class="btn btn-sm btn-outline" id="btn-sync-inbox" style="margin-left:4px">Check Now</button></p>
     <p class="small-muted">If your provider adds webhooks later, this Inbox is also ready to receive them directly at:</p>
     <p><code id="webhook-url" style="user-select:all"></code></p>
+    <div class="toolbar"><select id="f-inbox-pagesize"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="200">200 / page</option></select></div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>From</th><th>Account</th><th>Message</th><th>Received</th></tr></thead>
       <tbody id="tbody-inbox"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table>
@@ -111,7 +113,7 @@ api('/sms/config').then(({ mockMode }) => {
   </div>`;
 }).catch(() => {});
 
-let state = { search: '', status: '', season_id: '', page: 1, pageSize: 25 };
+let state = { search: '', status: '', season_id: '', page: 1, pageSize: Auth.pageSize('sms') };
 async function loadSent() {
   const params = new URLSearchParams(Object.fromEntries(Object.entries({ ...state, direction: 'outbound' }).filter(([,v]) => v !== '')));
   try {
@@ -137,10 +139,12 @@ function sentRowHtml(m) {
 qs('#f-search').addEventListener('input', debounce(() => { state.search = qs('#f-search').value; state.page = 1; loadSent(); }, 350));
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; state.page = 1; loadSent(); });
 qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; state.page = 1; loadSent(); loadInbox(); });
+qs('#f-pagesize').value = state.pageSize;
+qs('#f-pagesize').addEventListener('change', () => { state.pageSize = +qs('#f-pagesize').value; state.page = 1; Auth.savePageSize('sms', state.pageSize); loadSent(); });
 qs('#btn-export').addEventListener('click', () => downloadAuthed('/sms/export' + (state.season_id ? `?season_id=${state.season_id}` : ''), 'sms-messages.xlsx'));
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
-let inboxState = { page: 1, pageSize: 25 };
+let inboxState = { page: 1, pageSize: Auth.pageSize('sms_inbox') };
 async function loadInbox() {
   const params = new URLSearchParams({ direction: 'inbound', page: inboxState.page, pageSize: inboxState.pageSize, ...(state.season_id ? { season_id: state.season_id } : {}) });
   try {
@@ -151,6 +155,8 @@ async function loadInbox() {
   } catch (err) { toast(err.message, true); }
 }
 function changeInboxPage(d) { inboxState.page += d; loadInbox(); }
+qs('#f-inbox-pagesize').value = inboxState.pageSize;
+qs('#f-inbox-pagesize').addEventListener('change', () => { inboxState.pageSize = +qs('#f-inbox-pagesize').value; inboxState.page = 1; Auth.savePageSize('sms_inbox', inboxState.pageSize); loadInbox(); });
 
 let templatesCache = [];
 async function loadTemplates() {
