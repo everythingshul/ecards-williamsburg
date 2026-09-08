@@ -913,11 +913,6 @@ safeAlter(`ALTER TABLE stores ADD COLUMN contract_signed_at TEXT`);
 // with no query changes needed anywhere that already reads this table.
 safeAlter(`ALTER TABLE shul_payments ADD COLUMN direction TEXT NOT NULL DEFAULT 'in'`);
 
-// Per-user list page-size memory (Applicants/Shuls/Cards/Emails/SMS list
-// pages) — JSON object keyed by a short page key, e.g. {"applicants":50}.
-// See PUT /api/auth/preferences and app.js's Auth.pageSize/savePageSize.
-safeAlter(`ALTER TABLE users ADD COLUMN page_size_prefs TEXT`);
-
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to
