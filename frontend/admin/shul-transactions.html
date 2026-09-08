@@ -45,9 +45,28 @@ renderShell('/admin/shul-transactions', `
       <label style="margin-top:10px">Notes</label><textarea id="mp-notes" rows="2"></textarea>
       <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitManualPayment()">Add Payment</button>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-top:0">Pay Shul</h3>
+      <p class="small-muted">Records money the org paid BACK to a shul (e.g. a refund) — just a transaction record, no card processing. Reduces the shul's Approved Balance by this amount.</p>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Shul</label><select id="po-shul"><option value="">Select a shul…</option></select></div>
+        <div><label style="margin-top:0">Season</label><select id="po-season"><option value="">Select a season…</option></select></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Method</label><select id="po-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+        <div><label style="margin-top:0">Amount ($)</label><input id="po-amount" type="number" min="0.01" step="0.01"></div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><label style="margin-top:0">Date</label><input id="po-date" type="date"></div>
+        <div><label style="margin-top:0">Time</label><input id="po-time" type="time"></div>
+      </div>
+      <label style="margin-top:10px">Ref# / Check#</label><input id="po-ref">
+      <label style="margin-top:10px">Notes</label><textarea id="po-notes" rows="2"></textarea>
+      <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitPayout()">Pay Shul</button>
+    </div>
     <div class="card" style="padding:0;overflow-x:auto">
-      <table><thead><tr><th>Shul</th><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Ref#</th><th>Entered By</th><th>Date</th><th></th></tr></thead>
-      <tbody id="tbody-payments"><tr><td colspan="10" class="empty-state">Loading…</td></tr></tbody></table>
+      <table><thead><tr><th>Shul</th><th>Type</th><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Ref#</th><th>Entered By</th><th>Date</th><th></th></tr></thead>
+      <tbody id="tbody-payments"><tr><td colspan="11" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
   <div id="panel-allocations" style="display:none">
@@ -94,14 +113,15 @@ async function loadPayments() {
   const { payments } = await api('/shul-payments?' + currentFilterParams());
   qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => `<tr>
       <td>${esc(p.shul_name||'')}</td>
+      <td>${p.direction === 'out' ? badge('Paid to Shul', 'pending') : badge('Paid In', 'active')}</td>
       <td>${MANUAL_METHOD_LABEL[p.method] || p.method}</td>
-      <td>${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${fmtMoney(p.net_amount)}</td>
+      <td>${p.direction === 'out' ? '-' : ''}${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
       <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
       <td>${esc(p.manual_ref||'')}</td>
       <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
       <td>${fmtDateTime(p.created_at)}</td>
-      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button>` : ''}</td>
-    </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No payments match these filters.</td></tr>';
+      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}<button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button></td>
+    </tr>`).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
 }
 window.approvePayment = async (id) => {
   try { await api(`/shul-payments/${id}/approve`, { method: 'POST' }); toast('Approved'); loadPayments(); } catch (err) { toast(err.message, true); }
@@ -109,6 +129,27 @@ window.approvePayment = async (id) => {
 window.rejectPayment = async (id) => {
   const reason = prompt('Reason for rejecting this payment (optional):') || '';
   try { await api(`/shul-payments/${id}/reject`, { method: 'POST', body: { reason } }); toast('Rejected'); loadPayments(); } catch (err) { toast(err.message, true); }
+};
+window.deletePayment = async (id) => {
+  if (!confirm('Delete this transaction? This removes it permanently, not as a reversal entry.')) return;
+  try {
+    await api(`/shul-payments/${id}`, { method: 'DELETE' });
+    toast('Deleted');
+    loadPayments();
+  } catch (err) {
+    if (err.data?.requiresUndoAll) {
+      const names = err.data.activeAllocations.map(a => `${a.applicant_name || 'Unknown'} (${fmtMoney(a.total_amount)})`).join(', ');
+      if (confirm(`${err.message}\n\nOutstanding: ${names}\n\nUndo all of these now (pulls money back off each applicant's card) and then delete this payment?`)) {
+        try {
+          await api(`/shul-payments/${id}`, { method: 'DELETE', body: { confirmUndoAll: true } });
+          toast('Distributions undone and payment deleted');
+          loadPayments();
+        } catch (err2) { toast(err2.message, true); }
+      }
+      return;
+    }
+    toast(err.message, true);
+  }
 };
 window.submitManualPayment = async () => {
   const shul_id = qs('#mp-shul').value, season_id = qs('#mp-season').value;
@@ -122,6 +163,21 @@ window.submitManualPayment = async () => {
     await api('/shul-payments/manual', { method: 'POST', body });
     toast('Payment added');
     qs('#mp-amount').value = ''; qs('#mp-date').value = ''; qs('#mp-time').value = ''; qs('#mp-ref').value = ''; qs('#mp-notes').value = '';
+    loadPayments();
+  } catch (err) { toast(err.message, true); }
+};
+window.submitPayout = async () => {
+  const shul_id = qs('#po-shul').value, season_id = qs('#po-season').value;
+  if (!shul_id) return toast('Select a shul', true);
+  if (!season_id) return toast('Select a season', true);
+  const body = {
+    shul_id, season_id, method: qs('#po-method').value, amount: +qs('#po-amount').value,
+    manual_date: qs('#po-date').value, manual_time: qs('#po-time').value, manual_ref: qs('#po-ref').value, notes: qs('#po-notes').value,
+  };
+  try {
+    await api('/shul-payments/payout', { method: 'POST', body });
+    toast('Payout recorded');
+    qs('#po-amount').value = ''; qs('#po-date').value = ''; qs('#po-time').value = ''; qs('#po-ref').value = ''; qs('#po-notes').value = '';
     loadPayments();
   } catch (err) { toast(err.message, true); }
 };
@@ -213,6 +269,8 @@ async function populateShulPicker(selectId) {
 }
 populateShulPicker('mp-shul');
 populateSeasonFilter('mp-season');
+populateShulPicker('po-shul');
+populateSeasonFilter('po-season');
 populateShulPicker('al-shul');
 loadRequests();
 </script>

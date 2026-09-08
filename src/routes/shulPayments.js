@@ -60,7 +60,7 @@ router.get('/mine/balance', (req, res) => {
 
 router.get('/mine', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
-  const rows = db.prepare(`SELECT id, method, amount, fee_amount, net_amount, status, manual_date, manual_ref, rejected_reason, created_at, approved_at
+  const rows = db.prepare(`SELECT id, method, amount, fee_amount, net_amount, status, direction, manual_date, manual_ref, rejected_reason, created_at, approved_at
     FROM shul_payments WHERE shul_id = ? ORDER BY created_at DESC`).all(req.user.shul_id);
   res.json({ payments: rows });
 });
@@ -202,6 +202,36 @@ router.post('/manual', requirePermission('shul_payments', 'can_edit'), (req, res
   res.status(201).json({ ok: true, payment: row });
 });
 
+// The org paying money BACK to a shul (a refund/reimbursement, entered by
+// staff after it happened outside this app — no CC/Stripe processing here,
+// same "just a record" nature as the manual 'in' entry above). Stored as a
+// negative net_amount/amount on the SAME shul_payments ledger (direction
+// 'out') so services/shulBalance.js's existing SUM(net_amount) subtracts it
+// with no query changes — reduces the shul's balance exactly like an
+// allocation given to an applicant would, just paid to the shul itself
+// instead. Goes straight to 'approved' like a manual 'in' entry (an admin
+// typing this in has already confirmed the money actually went out).
+router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const { shul_id, season_id, method, amount, manual_date, manual_time, manual_ref, notes } = req.body || {};
+  if (!MANUAL_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of: ${MANUAL_METHODS.join(', ')}` });
+  if (!(+amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  if (!manual_date || !manual_time || !manual_ref) return res.status(400).json({ error: 'Date, time, and Ref#/Check# are all required for a payout entry' });
+  const shul = db.prepare('SELECT id FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
+  if (!shul) return res.status(404).json({ error: 'Shul not found' });
+  const season = db.prepare('SELECT id FROM seasons WHERE id = ? AND org_id = ?').get(season_id, req.user.org_id);
+  if (!season) return res.status(404).json({ error: 'Season not found' });
+  const balance = approvedBalance(shul_id);
+  if (+amount > balance + 1e-9) return res.status(400).json({ error: `Amount ($${(+amount).toFixed(2)}) exceeds this shul's approved balance ($${balance.toFixed(2)}).` });
+  const id = uuid();
+  db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, direction, manual_date, manual_time, manual_ref, entered_by, approved_by, approved_at, notes)
+    VALUES (?,?,?,?,?,?,0,?,'approved','out',?,?,?,?,?,datetime('now'),?)`)
+    .run(id, req.user.org_id, shul_id, season_id, method, +amount, -(+amount), manual_date, manual_time, manual_ref, req.user.id, req.user.id, notes || '');
+  const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
+  logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
+  res.status(201).json({ ok: true, payment: row });
+});
+
 router.post('/:id/approve', requirePermission('shul_payments', 'can_edit'), (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
@@ -258,6 +288,55 @@ router.post('/allocations/:id/reverse', requirePermission('shul_payments', 'can_
     const row = await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip });
     res.json({ ok: true, reversal: row });
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Deletes a shul_payments row outright (not an equal-and-opposite reversal
+// like allocations get — this is correcting a data-entry mistake, not
+// undoing a real event). A pending/rejected entry never funded anything
+// (see services/shulBalance.js's approvedBalance — only status='approved'
+// rows count), so those delete freely. An approved entry's money sits in
+// the shul's pooled balance alongside every other approved payment with no
+// way to prove which dollars a given applicant's allocation actually came
+// from, so the safe rule is shul-wide: if this shul has ANY outstanding
+// (not-yet-reversed) distribution at all, block the delete and offer to
+// undo all of them first (POST again with confirmUndoAll: true) — once none
+// remain (never happened, or already undone), deletion proceeds.
+router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+
+  const deleteRow = () => {
+    logAudit(req.user.org_id, req.user.id, 'delete', 'shul_payment', payment.id, payment, null, req.ip);
+    db.prepare('DELETE FROM shul_payments WHERE id = ?').run(payment.id);
+  };
+
+  if (payment.status !== 'approved') { deleteRow(); return res.json({ ok: true, undone: 0 }); }
+
+  const activeAllocations = db.prepare(`SELECT sa.*, a.first_name, a.last_name FROM shul_allocations sa
+    LEFT JOIN applicants a ON a.id = sa.applicant_id
+    WHERE sa.shul_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL`).all(payment.shul_id);
+
+  if (!activeAllocations.length) { deleteRow(); return res.json({ ok: true, undone: 0 }); }
+
+  if (!req.body?.confirmUndoAll) {
+    return res.status(409).json({
+      error: `This shul has already given out money to applicants — deleting this payment requires undoing all ${activeAllocations.length} outstanding distribution(s) first.`,
+      requiresUndoAll: true,
+      activeAllocations: activeAllocations.map(a => ({ id: a.id, applicant_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(), total_amount: a.total_amount })),
+    });
+  }
+
+  const failures = [];
+  for (const alloc of activeAllocations) {
+    try { await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip }); }
+    catch (e) { failures.push({ id: alloc.id, applicant_name: `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim(), error: e.message }); }
+  }
+  if (failures.length) {
+    return res.status(500).json({ error: 'Some distributions could not be undone, so the payment was not deleted. Any that did succeed stay undone — retry to finish the rest.', failures });
+  }
+  deleteRow();
+  res.json({ ok: true, undone: activeAllocations.length });
 });
 
 router.get('/method-requests', (req, res) => {

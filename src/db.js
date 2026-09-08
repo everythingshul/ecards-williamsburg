@@ -905,6 +905,14 @@ safeAlter(`ALTER TABLE applicants ADD COLUMN provider_deactivate_error TEXT`);
 // tracks that).
 safeAlter(`ALTER TABLE stores ADD COLUMN contract_signed_at TEXT`);
 
+// 'in' (default, every pre-existing row) = the shul paying the org, same as
+// always. 'out' is new: the org paying money BACK to a shul (see routes/
+// shulPayments.js's POST /payout) — a plain transaction record, no card
+// processing, stored as a negative net_amount/amount so the existing
+// approvedBalance() SUM (services/shulBalance.js) subtracts it automatically
+// with no query changes needed anywhere that already reads this table.
+safeAlter(`ALTER TABLE shul_payments ADD COLUMN direction TEXT NOT NULL DEFAULT 'in'`);
+
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to
