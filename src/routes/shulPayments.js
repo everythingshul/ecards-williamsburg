@@ -10,7 +10,58 @@ import { logAudit } from '../services/audit.js';
 
 const router = Router();
 
-const MANUAL_METHODS = ['wire', 'quickpay', 'check', 'cash', 'other'];
+// Was a hardcoded array — now admin-editable (Settings > Shul Payments >
+// Payment Method Options) via the generic settings key/value store, stored
+// as a JSON array of {value, label, active}. `value` is the immutable
+// internal key already written onto historical shul_payments.method /
+// shul_payment_method_requests.requested_method rows — an admin can rename
+// the label or deactivate an option (hides it from new entries without
+// breaking how old rows display), but never changes `value` itself once
+// created, and a brand-new option gets a freshly slugified value. Falls
+// back to the original 5 built-ins, all active, if nothing's been saved —
+// same "missing setting = old default behavior" pattern every other
+// settings-backed toggle in this app already uses.
+const DEFAULT_MANUAL_PAYMENT_METHODS = [
+  { value: 'wire', label: 'Wire Transfer', active: true },
+  { value: 'quickpay', label: 'Quick Pay', active: true },
+  { value: 'check', label: 'Check', active: true },
+  { value: 'cash', label: 'Cash', active: true },
+  { value: 'other', label: 'Other', active: true },
+];
+function getManualPaymentMethods(orgId) {
+  const row = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'manual_payment_methods'`).get(orgId);
+  if (!row?.value) return DEFAULT_MANUAL_PAYMENT_METHODS;
+  try {
+    const parsed = JSON.parse(row.value);
+    return Array.isArray(parsed) && parsed.length ? parsed : DEFAULT_MANUAL_PAYMENT_METHODS;
+  } catch { return DEFAULT_MANUAL_PAYMENT_METHODS; }
+}
+function isActiveManualMethod(orgId, method) {
+  return getManualPaymentMethods(orgId).some(m => m.value === method && m.active !== false);
+}
+
+// Card processing fee formula (Settings > Shul Payments > Card Processing
+// Fee) — a percent + flat $ combo, Stripe-style (e.g. 2.9% + $0.30) —
+// applied automatically to every REAL card charge (the shul's own
+// self-serve payment below, and an admin-initiated one — see POST
+// /admin-charge) at the moment it's charged. Sola's API doesn't hand back a
+// real per-transaction fee the way Stripe's balance_transaction did (see
+// services/sola.js), so this is the app's own best-effort estimate from a
+// configured rate, not something read off the processor — PUT /:id/fee
+// still lets an admin correct it later once they know the real number (e.g.
+// from a Sola statement). Both settings default to 0 (no fee tracked) until
+// an admin sets them, so existing behavior is unchanged until someone opts in.
+function getCardFeeConfig(orgId) {
+  const pct = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'card_fee_percent'`).get(orgId)?.value;
+  const flat = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'card_fee_flat'`).get(orgId)?.value;
+  return { percent: pct != null && pct !== '' ? +pct : 0, flat: flat != null && flat !== '' ? +flat : 0 };
+}
+function computeCardFee(orgId, amount) {
+  const { percent, flat } = getCardFeeConfig(orgId);
+  if (!percent && !flat) return 0;
+  const fee = Math.round((amount * (percent / 100) + flat) * 100) / 100;
+  return Math.max(0, Math.min(fee, amount));
+}
 
 // No webhook here (unlike the old Stripe setup) — Sola's charge is
 // synchronous: the charge result comes back in the same HTTP response as
@@ -46,7 +97,11 @@ router.get('/mine/config', (req, res) => {
   const shul = db.prepare('SELECT stripe_payments_enabled FROM shuls WHERE id = ?').get(req.user.shul_id);
   const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
-  res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode() });
+  // Also handed to the shul portal's "Request a Different Payment Method"
+  // modal — active-only, since that's the one place a shul themselves picks
+  // from the admin-configured list (see getManualPaymentMethods above).
+  const manualPaymentMethods = getManualPaymentMethods(req.user.org_id).filter(m => m.active !== false);
+  res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode(), manualPaymentMethods });
 });
 
 // xCardNum/xCVV/xExp here are the REAL card number/CVV/expiration, typed
@@ -83,10 +138,12 @@ router.post('/mine/sola-charge', async (req, res) => {
       invoice: `${shul.name_en || 'shul'}-${Date.now()}`, comments: 'eCards shul payment',
     });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
+    const fee = computeCardFee(req.user.org_id, amount);
+    const net = Math.round((amount - fee) * 100) / 100;
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by)
-      VALUES (?,?,?,?,'sola_card',?,0,?,'pending_approval',?,?,?)`)
-      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, amount, result.refNum, result.last4 || null, req.user.id);
+      VALUES (?,?,?,?,'sola_card',?,?,?,'pending_approval',?,?,?)`)
+      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, fee, net, result.refNum, result.last4 || null, req.user.id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id), req.ip);
     res.json({ ok: true, mock: !!result.mock });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -174,7 +231,7 @@ router.get('/balance/:shulId', (req, res) => {
 
 router.get('/config', (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
-  res.json(solaPay.solaConfigStatus());
+  res.json({ ...solaPay.solaConfigStatus(), cardFee: getCardFeeConfig(req.user.org_id) });
 });
 
 // Manual entry is inherently admin-vetted (an admin is the one typing it
@@ -186,7 +243,7 @@ router.get('/config', (req, res) => {
 router.post('/manual', requirePermission('shul_payments', 'can_edit'), (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { shul_id, season_id, method, amount, manual_date, manual_time, manual_ref, notes } = req.body || {};
-  if (!MANUAL_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of: ${MANUAL_METHODS.join(', ')}` });
+  if (!isActiveManualMethod(req.user.org_id, method)) return res.status(400).json({ error: 'That payment method is not currently offered — check Settings > Shul Payments.' });
   if (!(+amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   if (!manual_date || !manual_time || !manual_ref) return res.status(400).json({ error: 'Date, time, and Ref#/Check# are all required for a manual payment entry' });
   const shul = db.prepare('SELECT id FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
@@ -216,7 +273,7 @@ router.post('/manual', requirePermission('shul_payments', 'can_edit'), (req, res
 router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { shul_id, season_id, method, amount, manual_date, manual_time, manual_ref, notes } = req.body || {};
-  if (!MANUAL_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of: ${MANUAL_METHODS.join(', ')}` });
+  if (!isActiveManualMethod(req.user.org_id, method)) return res.status(400).json({ error: 'That payment method is not currently offered — check Settings > Shul Payments.' });
   if (!(+amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   if (!manual_date || !manual_time || !manual_ref) return res.status(400).json({ error: 'Date, time, and Ref#/Check# are all required for a payout entry' });
   const shul = db.prepare('SELECT id FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
@@ -232,6 +289,54 @@ router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res
   const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
   logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
   res.status(201).json({ ok: true, payment: row });
+});
+
+// Same real Sola charge as the shul portal's own POST /mine/sola-charge
+// above (see that route's comment for the PCI-scope note — never log
+// req.body here either), but for an admin taking a card charge on a shul's
+// behalf (e.g. over the phone, or entering a payment a shul called in) from
+// Shul Transactions' "Charge Credit Card" form. Goes straight to 'approved'
+// like every other admin-entered payment (POST /manual above), never
+// 'pending_approval' — an admin personally initiating and confirming a real
+// charge already IS the approval step, unlike a shul's own self-serve
+// submission which still needs a human to check it. Deliberately does NOT
+// check the shul's stripe_payments_enabled online-self-service toggle —
+// that toggle only gates the shul's OWN portal form; an admin can always
+// take a card charge on someone's behalf regardless of whether that shul is
+// allowed to self-serve one.
+router.post('/admin-charge', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const { shul_id, season_id } = req.body || {};
+  const amount = +req.body?.amount;
+  const xCardNum = String(req.body?.xCardNum || '').replace(/\s/g, '');
+  const xCVV = String(req.body?.xCVV || '').trim();
+  const xZip = String(req.body?.xZip || '').trim();
+  const xExp = String(req.body?.xExp || '').replace(/\D/g, '');
+  if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  const shul = db.prepare('SELECT id, name_en FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
+  if (!shul) return res.status(404).json({ error: 'Shul not found' });
+  const season = db.prepare('SELECT id FROM seasons WHERE id = ? AND org_id = ?').get(season_id, req.user.org_id);
+  if (!season) return res.status(404).json({ error: 'Season not found' });
+  if (!solaPay.isSolaMockMode()) {
+    if (!xCardNum || !xCVV) return res.status(400).json({ error: 'Card details are required' });
+    if (xExp.length !== 4) return res.status(400).json({ error: 'Expiration date is required' });
+  }
+  try {
+    const result = await solaPay.chargeSale({
+      amount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
+      invoice: `${shul.name_en || 'shul'}-${Date.now()}`, comments: 'eCards admin-entered card charge',
+    });
+    if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
+    const fee = computeCardFee(req.user.org_id, amount);
+    const net = Math.round((amount - fee) * 100) / 100;
+    const id = uuid();
+    db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by, approved_by, approved_at)
+      VALUES (?,?,?,?,'sola_card',?,?,?,'approved',?,?,?,?,datetime('now'))`)
+      .run(id, req.user.org_id, shul_id, season_id, amount, fee, net, result.refNum, result.last4 || null, req.user.id, req.user.id);
+    const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
+    logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
+    res.status(201).json({ ok: true, mock: !!result.mock, payment: row });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // Manually sets/corrects a payment's processing fee — added because Sola's
@@ -375,6 +480,19 @@ router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!payment) return res.status(404).json({ error: 'Not found' });
+  // A card transaction moved real money through a real processor — deleting
+  // the row would just hide that it happened, not undo it. sola_card/
+  // sola_refund go through POST /:id/refund (full or partial, actually
+  // reverses the charge through Sola); a legacy stripe_card row has no live
+  // refund path left in this app (see services/stripe.js) so any refund
+  // that happened directly through Stripe's own dashboard gets recorded via
+  // Pay Shul instead, same as any other non-card method.
+  if (payment.method === 'sola_card' || payment.method === 'sola_refund') {
+    return res.status(400).json({ error: 'A card transaction can\'t be deleted — it charged/refunded a real card. Use Refund instead to reverse it (full or partial).' });
+  }
+  if (payment.method === 'stripe_card') {
+    return res.status(400).json({ error: 'A legacy Stripe card payment can\'t be deleted — it charged a real card. Use Pay Shul to record any refund that happened directly through Stripe.' });
+  }
 
   const deleteRow = () => {
     logAudit(req.user.org_id, req.user.id, 'delete', 'shul_payment', payment.id, payment, null, req.ip);

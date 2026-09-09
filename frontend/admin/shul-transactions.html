@@ -34,7 +34,7 @@ renderShell('/admin/shul-transactions', `
         <div><label style="margin-top:0">Season</label><select id="mp-season"><option value="">Select a season…</option></select></div>
       </div>
       <div class="grid-2" style="margin-top:10px">
-        <div><label style="margin-top:0">Method</label><select id="mp-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+        <div><label style="margin-top:0">Method</label><select id="mp-method"></select></div>
         <div><label style="margin-top:0">Amount ($)</label><input id="mp-amount" type="number" min="0.01" step="0.01"></div>
       </div>
       <div class="grid-2" style="margin-top:10px">
@@ -46,6 +46,27 @@ renderShell('/admin/shul-transactions', `
       <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitManualPayment()">Add Payment</button>
     </div>
     <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-top:0">Charge Credit Card</h3>
+      <p class="small-muted" id="ac-mock-note" style="display:none">Test mode — no real charge will be made.</p>
+      <!-- Same plain (non-iframe) card fields as the shul portal's own
+           payment form, POSTed straight to this app's backend and forwarded
+           to Sola — see services/sola.js's file-level PCI-scope comment.
+           Never logged. -->
+      <div class="grid-2">
+        <div><label style="margin-top:0">Shul</label><select id="ac-shul"><option value="">Select a shul…</option></select></div>
+        <div><label style="margin-top:0">Season</label><select id="ac-season"><option value="">Select a season…</option></select></div>
+      </div>
+      <label style="margin-top:10px">Amount ($)</label><input id="ac-amount" type="number" min="0.01" step="0.01" style="max-width:220px">
+      <label style="margin-top:10px">Card Number</label><input id="ac-card-num" placeholder="1234 1234 1234 1234" maxlength="19" style="max-width:420px" autocomplete="cc-number" inputmode="numeric">
+      <div class="grid-2" style="max-width:420px">
+        <div><label style="margin-top:0">Expiration (MM/YY)</label><input id="ac-exp" placeholder="MM/YY" maxlength="5" autocomplete="cc-exp" inputmode="numeric"></div>
+        <div><label style="margin-top:0">CVV</label><input id="ac-cvv" placeholder="123" maxlength="4" autocomplete="cc-csc" inputmode="numeric"></div>
+      </div>
+      <label style="margin-top:10px">Billing ZIP</label><input id="ac-zip" maxlength="10" style="max-width:140px" autocomplete="postal-code">
+      <button class="btn btn-sm btn-primary" style="margin-top:12px" id="btn-ac" onclick="submitAdminCharge()">Charge</button>
+      <div id="ac-status" class="small-muted" style="margin-top:8px"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
       <h3 style="margin-top:0">Pay Shul</h3>
       <p class="small-muted">Records money the org paid BACK to a shul (e.g. a refund) — just a transaction record, no card processing. Reduces the shul's Approved Balance by this amount.</p>
       <div class="grid-2">
@@ -53,7 +74,7 @@ renderShell('/admin/shul-transactions', `
         <div><label style="margin-top:0">Season</label><select id="po-season"><option value="">Select a season…</option></select></div>
       </div>
       <div class="grid-2" style="margin-top:10px">
-        <div><label style="margin-top:0">Method</label><select id="po-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+        <div><label style="margin-top:0">Method</label><select id="po-method"></select></div>
         <div><label style="margin-top:0">Amount ($)</label><input id="po-amount" type="number" min="0.01" step="0.01"></div>
       </div>
       <div class="grid-2" style="margin-top:10px">
@@ -97,7 +118,22 @@ renderShell('/admin/shul-transactions', `
   </div>
 `);
 
-const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other', stripe_card: 'Card (Stripe, legacy)', sola_card: 'Card (Sola)', sola_refund: 'Refund (Sola)' };
+// Populated by loadMethodOptions() below from Settings > Shul Payments >
+// Payment Method Options (admin-editable — see app.js's
+// loadManualPaymentMethods) — starts with the same fallback defaults so the
+// page renders sensibly before that call resolves. sola_card/sola_refund/
+// stripe_card are never admin-editable (they're not manual methods at all,
+// just how a real card charge/refund/legacy-Stripe row is labeled).
+let MANUAL_METHOD_LABEL = { stripe_card: 'Card (Stripe, legacy)', sola_card: 'Card (Sola)', sola_refund: 'Refund (Sola)' };
+DEFAULT_MANUAL_PAYMENT_METHODS.forEach(m => { MANUAL_METHOD_LABEL[m.value] = m.label; });
+async function loadMethodOptions() {
+  const methods = await loadManualPaymentMethods();
+  methods.forEach(m => { MANUAL_METHOD_LABEL[m.value] = m.label; });
+  const active = methods.filter(m => m.active !== false);
+  const optionsHtml = active.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('');
+  qs('#mp-method').innerHTML = optionsHtml;
+  qs('#po-method').innerHTML = optionsHtml;
+}
 const state = { shul_id: '', season_id: '', status: '' };
 let activeTab = 'payments';
 
@@ -122,6 +158,12 @@ async function loadPayments() {
   qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => {
     const refunded = refundedByPaymentId[p.id] || 0;
     const refundable = p.method === 'sola_card' && p.direction === 'in' && p.status === 'approved' ? Math.round((p.amount - refunded) * 100) / 100 : 0;
+    // A real card transaction (a Sola charge/refund, or a legacy Stripe
+    // charge) moved actual money through a processor — it can never be
+    // deleted, only reversed for real (Refund) or, for the legacy Stripe
+    // case with no live refund path left, recorded via Pay Shul. See the
+    // server's identical DELETE /:id check.
+    const isCardMethod = p.method === 'sola_card' || p.method === 'sola_refund' || p.method === 'stripe_card';
     return `<tr>
       <td>${esc(p.shul_name||'')}</td>
       <td>${p.direction === 'out' ? badge('Paid to Shul', 'pending') : badge('Paid In', 'active')}</td>
@@ -133,7 +175,7 @@ async function loadPayments() {
       <td>${esc(p.manual_ref||'')}</td>
       <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
       <td>${fmtDateTime(p.created_at)}</td>
-      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}<button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button></td>
+      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}${isCardMethod ? '' : `<button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button>`}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
 }
@@ -227,6 +269,54 @@ window.submitManualPayment = async () => {
     loadPayments();
   } catch (err) { toast(err.message, true); }
 };
+// Same light cosmetic formatting as the shul portal's own card form (see
+// shul-portal/payments.html) — spaces every 4 digits, auto-inserts the "/"
+// in MM/YY — both stripped back to plain digits before being sent.
+qs('#ac-card-num')?.addEventListener('input', () => {
+  const el = qs('#ac-card-num');
+  el.value = el.value.replace(/[^\d ]/g, '').replace(/\s/g, '').replace(/(.{4})/g, '$1 ').trim();
+});
+qs('#ac-exp')?.addEventListener('input', () => {
+  const el = qs('#ac-exp');
+  let v = el.value.replace(/\D/g, '').slice(0, 4);
+  if (v.length > 2) v = v.slice(0, 2) + '/' + v.slice(2);
+  el.value = v;
+});
+let acMockMode = false;
+async function loadAdminChargeConfig() {
+  try {
+    const cfg = await api('/shul-payments/config');
+    acMockMode = !!cfg.mockMode;
+    qs('#ac-mock-note').style.display = acMockMode ? 'block' : 'none';
+  } catch { /* best-effort — the form still works, just without the mock-mode note */ }
+}
+// Card number/CVV are read straight from this page's own inputs and POSTed
+// to this app's backend, which forwards them to Sola — no hosted iframe.
+// Never logged. See services/sola.js for the PCI-scope tradeoff.
+window.submitAdminCharge = async () => {
+  const shul_id = qs('#ac-shul').value, season_id = qs('#ac-season').value;
+  const amount = +qs('#ac-amount').value;
+  const xCardNum = qs('#ac-card-num').value.replace(/\s/g, '');
+  const xCVV = qs('#ac-cvv').value.trim();
+  const xExp = qs('#ac-exp').value.replace(/\D/g, '');
+  const xZip = qs('#ac-zip').value.trim();
+  if (!shul_id) return toast('Select a shul', true);
+  if (!season_id) return toast('Select a season', true);
+  if (!(amount > 0)) { qs('#ac-status').textContent = 'Enter a valid amount'; return; }
+  if (!acMockMode) {
+    if (!xCardNum || !xCVV) { qs('#ac-status').textContent = 'Enter the card number and CVV'; return; }
+    if (xExp.length !== 4) { qs('#ac-status').textContent = 'Enter the card expiration date (MM/YY)'; return; }
+  }
+  qs('#btn-ac').disabled = true;
+  qs('#ac-status').textContent = '';
+  try {
+    const { mock } = await api('/shul-payments/admin-charge', { method: 'POST', body: { shul_id, season_id, amount, xCardNum, xCVV, xExp, xZip } });
+    qs('#ac-status').textContent = mock ? 'Test mode: charge simulated.' : 'Charged and approved.';
+    qs('#ac-amount').value = ''; qs('#ac-card-num').value = ''; qs('#ac-cvv').value = ''; qs('#ac-exp').value = ''; qs('#ac-zip').value = '';
+    loadPayments();
+  } catch (err) { qs('#ac-status').textContent = err.message; }
+  qs('#btn-ac').disabled = false;
+};
 window.submitPayout = async () => {
   const shul_id = qs('#po-shul').value, season_id = qs('#po-season').value;
   if (!shul_id) return toast('Select a shul', true);
@@ -310,10 +400,14 @@ qs('#f-shul').addEventListener('change', () => { state.shul_id = qs('#f-shul').v
 qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; populateShulFilter('f-shul', state.season_id); TAB_LOADERS[activeTab](); });
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; TAB_LOADERS[activeTab](); });
 
-populateSeasonFilter('f-season').then(activeId => {
-  state.season_id = activeId;
-  populateShulFilter('f-shul', activeId);
-  loadPayments();
+// Loaded first so the Payments table's very first render already has real
+// (possibly admin-renamed) method labels instead of the fallback defaults.
+loadMethodOptions().then(() => {
+  populateSeasonFilter('f-season').then(activeId => {
+    state.season_id = activeId;
+    populateShulFilter('f-shul', activeId);
+    loadPayments();
+  });
 });
 // The manual-payment / allocate forms' own shul dropdowns are deliberately
 // NOT scoped to the season filter above (an admin might be entering a
@@ -332,6 +426,9 @@ populateShulPicker('mp-shul');
 populateSeasonFilter('mp-season');
 populateShulPicker('po-shul');
 populateSeasonFilter('po-season');
+populateShulPicker('ac-shul');
+populateSeasonFilter('ac-season');
+loadAdminChargeConfig();
 populateShulPicker('al-shul');
 loadRequests();
 </script>

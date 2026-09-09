@@ -73,6 +73,27 @@ export function providerSyncStatus(a) {
   return 'missing';
 }
 
+// Resolves which real disccardpromos identity a FUNDS WRITE for this
+// applicant must target — the merge group's PRIMARY member's own
+// provider_account_id/external_id, never a secondary's, even when the
+// secondary carries its own (pre-merge) provider_account_id. Every write
+// that loads or removes money for an applicant who might be part of a merge
+// group must resolve through this, not use the applicant's own row
+// directly: a secondary very often already has its own separate
+// disccardpromos customer from before the duplicate was ever caught/merged
+// (approval isn't blocked on duplicate resolution), and ensureProviderAccount
+// itself only reconciles onto the shared account the first time a member
+// gets ITS OWN provider_account_id assigned — once a row already has one set
+// (from before the merge), ensureProviderAccount's own early-return skips
+// the merge-group check entirely, so that stale, separate account id must
+// never be trusted for a write. Read fresh from the DB (not off a possibly-
+// stale in-memory `applicant`) since ensureProviderAccount may have just
+// updated the primary's row moments earlier in the same request.
+export function resolveFundingAnchor(applicant) {
+  if (!applicant.merge_group_id || applicant.merge_group_id === applicant.id) return applicant;
+  return db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant;
+}
+
 // The single shared entry point for getting an applicant a real
 // disccardpromos account — replaces the ad hoc create-or-link logic that
 // used to be duplicated inline in every approve path. A merge-group member
@@ -325,8 +346,14 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     for (const applicantId of createdApplicantIds) {
       const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
       if (!(a.card_amount > 0) || !a.provider_account_id) continue;
+      // A newly-created account for a merge secondary is created under the
+      // group's PRIMARY identity (see ensureProviderAccount's `anchor`
+      // resolution above) — so the external_id on this PATCH must be the
+      // primary's, not this member's own, or the just-correctly-set
+      // external_id gets silently overwritten right back to the wrong value.
+      const anchor = resolveFundingAnchor(a);
       try {
-        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, externalId: a.external_id, discountId, amount: a.card_amount });
+        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, amount: a.card_amount });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }

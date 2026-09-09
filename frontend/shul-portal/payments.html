@@ -157,10 +157,15 @@ window.promptPay = () => {
   toast(`Enter your card details below and click Pay to charge ${fmtMoney(amount)}.`);
 };
 
+// Options come from Settings > Shul Payments > Payment Method Options
+// (admin-editable, see payConfig.manualPaymentMethods from loadPayForm's
+// GET /mine/config) — falls back to the same defaults every other page
+// uses if payConfig somehow hasn't loaded yet.
 window.openRequestMethodModal = () => {
+  const methods = payConfig?.manualPaymentMethods?.length ? payConfig.manualPaymentMethods : DEFAULT_MANUAL_PAYMENT_METHODS;
   const body = `
     <label>Requested Method</label>
-    <select id="rm-method"><option value="wire">Wire Transfer</option><option value="quickpay">Quick Pay</option><option value="check">Check</option><option value="cash">Cash</option><option value="other">Other</option></select>
+    <select id="rm-method">${methods.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('')}</select>
     <label>Message (optional)</label><textarea id="rm-message" rows="3"></textarea>
   `;
   openModal('Request a Different Payment Method', body, `<button class="btn btn-primary btn-sm" onclick="submitMethodRequest()">Send Request</button>`);

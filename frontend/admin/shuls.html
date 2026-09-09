@@ -420,7 +420,20 @@ window.saveShul = async (id) => {
   body.min_contribution_default = minContrib === '' ? null : +minContrib;
   try { await api(`/shuls/${id}`, { method: 'PUT', body }); toast('Saved'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
-const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other' };
+// Populated (all methods, active or not — used for display labels) and
+// mpMethodOptionsHtml (active only — used for the "Add Manual Payment"
+// select) by loadMethodOptions() below, called once at page load; a shul's
+// Payments tab modal can open well before or after that resolves, so both
+// start with the same fallback defaults every admin page uses (app.js's
+// DEFAULT_MANUAL_PAYMENT_METHODS) rather than staying empty.
+let MANUAL_METHOD_LABEL = Object.fromEntries(DEFAULT_MANUAL_PAYMENT_METHODS.map(m => [m.value, m.label]));
+let mpMethodOptionsHtml = DEFAULT_MANUAL_PAYMENT_METHODS.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('');
+async function loadMethodOptions() {
+  const methods = await loadManualPaymentMethods();
+  MANUAL_METHOD_LABEL = Object.fromEntries(methods.map(m => [m.value, m.label]));
+  mpMethodOptionsHtml = methods.filter(m => m.active !== false).map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('');
+}
+loadMethodOptions();
 async function loadPaymentsTab(shulId, shul) {
   const el = qs('#tab-payments-content');
   try {
@@ -453,7 +466,7 @@ async function loadPaymentsTab(shulId, shul) {
       <h4 style="margin-bottom:4px">Add Manual Payment</h4>
       <div class="grid-2">
         <div><label style="margin-top:0">Method</label>
-          <select id="mp-method">${Object.entries(MANUAL_METHOD_LABEL).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+          <select id="mp-method">${mpMethodOptionsHtml}</select></div>
         <div><label style="margin-top:0">Amount ($)</label><input id="mp-amount" type="number" min="0.01" step="0.01"></div>
       </div>
       <div class="grid-2">

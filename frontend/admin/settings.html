@@ -140,6 +140,20 @@ renderShell('/admin/settings', `
       <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="sola-enabled-default"><label style="margin:0">Online card payment (Sola) is available to shuls by default</label></div>
       <p class="small-muted">A specific shul can be turned on/off individually from their profile's Payments tab regardless of this default.</p>
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveSolaEnabledDefault()">Save</button>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Card Processing Fee</h4>
+      <p class="small-muted">Sola doesn't hand back a real per-transaction fee the way Stripe used to, so this is an estimate the app computes and records automatically on every real card charge (fee = amount &times; percent + flat). Leave both at 0 to track no fee automatically — an admin can still set/correct one on any individual payment from its Edit link on Shul Transactions.</p>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Percent (%)</label><input id="card-fee-percent" type="number" min="0" max="100" step="0.01" style="max-width:160px" placeholder="e.g. 2.9"></div>
+        <div><label style="margin-top:0">Flat ($)</label><input id="card-fee-flat" type="number" min="0" step="0.01" style="max-width:160px" placeholder="e.g. 0.30"></div>
+      </div>
+      <button class="btn btn-sm btn-primary" style="margin-top:10px" onclick="saveCardFee()">Save</button>
+      <div class="divider"></div>
+      <h4 style="margin-bottom:4px">Payment Method Options</h4>
+      <p class="small-muted">The choices offered wherever a manual payment method is picked — a shul's "Request a Different Payment Method" list, and Add Manual Payment / Pay Shul on Shul Transactions. Renaming a method here updates its label everywhere, including on past payments already using it. Deactivating one hides it from new entries without touching payments that already used it.</p>
+      <div id="payment-methods-list"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="addPaymentMethodRow()">+ Add Method</button>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px;margin-left:8px" onclick="savePaymentMethods()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Full System Export</h3>
@@ -480,9 +494,54 @@ async function loadSolaEnabledDefault() {
   qs('#sola-status-note').innerHTML = status.mockMode
     ? '<strong>MOCK MODE</strong> — SOLA_TRANSACTION_KEY isn\'t set, so no real charges happen; shuls can still test the whole payment flow.'
     : `<span style="color:var(--success,#1b5e20)">Live</span> — connected to Sola.`;
+  qs('#card-fee-percent').value = status.cardFee?.percent || '';
+  qs('#card-fee-flat').value = status.cardFee?.flat || '';
 }
+window.saveCardFee = async () => {
+  const percent = qs('#card-fee-percent').value.trim();
+  const flat = qs('#card-fee-flat').value.trim();
+  try {
+    await api('/settings', { method: 'PUT', body: { card_fee_percent: percent, card_fee_flat: flat } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
 window.saveSolaEnabledDefault = async () => {
   try { await api('/settings', { method: 'PUT', body: { sola_payments_enabled_default: qs('#sola-enabled-default').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
+
+// `value` is the immutable internal key already stamped onto historical
+// shul_payments.method / shul_payment_method_requests.requested_method rows
+// — editable here as a read-only label next to the (editable) display Label
+// and an Active checkbox, so renaming/deactivating never silently changes
+// what a past record's own method value actually is. New rows get a value
+// slugified from the label the first time they're saved.
+let paymentMethods = [];
+async function loadPaymentMethods() {
+  paymentMethods = await loadManualPaymentMethods();
+  renderPaymentMethods();
+}
+function renderPaymentMethods() {
+  qs('#payment-methods-list').innerHTML = paymentMethods.map((m, i) => `
+    <div class="grid-2" style="grid-template-columns:1fr auto auto;gap:8px;align-items:center;margin-top:6px">
+      <input value="${esc(m.label)}" oninput="paymentMethods[${i}].label = this.value" placeholder="Label">
+      <label class="checkbox-row" style="margin:0"><input type="checkbox" ${m.active !== false ? 'checked' : ''} onchange="paymentMethods[${i}].active = this.checked"> Active</label>
+      <span class="small-muted" title="Internal key — never changes">${esc(m.value)}</span>
+    </div>
+  `).join('');
+}
+window.addPaymentMethodRow = () => {
+  const label = prompt('New payment method label (e.g. "Zelle"):');
+  if (!label?.trim()) return;
+  let value = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'method';
+  // Keep it unique against every existing value, including a re-added
+  // deactivated one, by suffixing -2/-3/... rather than colliding.
+  let n = 2, base = value;
+  while (paymentMethods.some(m => m.value === value)) value = `${base}_${n++}`;
+  paymentMethods.push({ value, label: label.trim(), active: true });
+  renderPaymentMethods();
+};
+window.savePaymentMethods = async () => {
+  try { await api('/settings', { method: 'PUT', body: { manual_payment_methods: JSON.stringify(paymentMethods) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
 window.downloadFullExport = () => downloadAuthed('/system-export', 'ecards-full-export.xlsx');
 
@@ -561,7 +620,7 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods();
 </script>
 </body>
 </html>

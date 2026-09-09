@@ -2,6 +2,7 @@ import { db, uuid } from '../db.js';
 import * as giftcard from './giftcard.js';
 import { approvedBalance } from './shulBalance.js';
 import { logAudit } from './audit.js';
+import { resolveFundingAnchor } from './providerAccount.js';
 
 // Most-specific-wins, consistent with every other override chain in this
 // app (min_contribution, required-field overrides, ...): an applicant's own
@@ -119,10 +120,10 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   // identity — addFunds under a secondary's own external_id/account would
   // either fail (no such customer) or create a second, duplicate one. This
   // shul's real base_amount still gets pushed in full either way; only
-  // WHICH identity the write targets changes.
-  const fundingAnchor = (applicant.merge_group_id && applicant.merge_group_id !== applicant.id)
-    ? (db.prepare('SELECT external_id, provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
-    : applicant;
+  // WHICH identity the write targets changes. See services/providerAccount.js's
+  // resolveFundingAnchor for why this must never trust a secondary's own
+  // (possibly stale, pre-merge) provider_account_id.
+  const fundingAnchor = resolveFundingAnchor(applicant);
 
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   let giftcardStatus = 'ok', giftcardError = null;
@@ -170,9 +171,7 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // Same merge-group anchor reasoning as createAllocation above — the
   // shared customer is only ever known to disccard under the group's
   // PRIMARY member's identity.
-  const fundingAnchor = (applicant?.merge_group_id && applicant.merge_group_id !== applicant.id)
-    ? (db.prepare('SELECT external_id, provider_account_id FROM applicants WHERE id = ?').get(applicant.merge_group_id) || applicant)
-    : applicant;
+  const fundingAnchor = applicant ? resolveFundingAnchor(applicant) : null;
   const fundingExternalId = fundingAnchor?.external_id;
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   // getCustomerByExternalId (not getCardBalance, which needs a real 16-digit

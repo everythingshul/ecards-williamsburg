@@ -706,6 +706,28 @@ async function populateShulFilter(selectId, seasonId = '') {
   } catch { /* leave the dropdown with just "All Shuls" if the list fails to load */ }
 }
 
+// Mirrors src/routes/shulPayments.js's own DEFAULT_MANUAL_PAYMENT_METHODS —
+// what every admin page's method dropdowns/labels fall back to before the
+// real (Settings > Shul Payments > Payment Method Options) list loads, or
+// if nothing's ever been saved there.
+const DEFAULT_MANUAL_PAYMENT_METHODS = [
+  { value: 'wire', label: 'Wire Transfer', active: true },
+  { value: 'quickpay', label: 'Quick Pay', active: true },
+  { value: 'check', label: 'Check', active: true },
+  { value: 'cash', label: 'Cash', active: true },
+  { value: 'other', label: 'Other', active: true },
+];
+// Admin-only (needs 'settings' view access, which every internal-team role
+// has) — the shul portal instead gets its own active-only slice from
+// GET /shul-payments/mine/config, since a shul login can't call /settings.
+async function loadManualPaymentMethods() {
+  try {
+    const { settings } = await api('/settings');
+    const parsed = JSON.parse(settings.manual_payment_methods || 'null');
+    return Array.isArray(parsed) && parsed.length ? parsed : DEFAULT_MANUAL_PAYMENT_METHODS;
+  } catch { return DEFAULT_MANUAL_PAYMENT_METHODS; }
+}
+
 // Shared "View Other Seasons" popup for shul/applicant/store detail views.
 // Shuls and applicants get a fresh record each season, so `endpoint` returns
 // likely matches in other seasons by identifying field; stores are one

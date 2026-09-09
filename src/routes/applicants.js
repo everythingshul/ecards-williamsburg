@@ -20,7 +20,7 @@ import { lockApplicantCards } from '../services/cardSync.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
-  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts } from '../services/providerAccount.js';
+  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, resolveFundingAnchor } from '../services/providerAccount.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -993,8 +993,18 @@ router.post('/:id/approve', requirePermission('applicants', 'can_edit'), async (
         if (!discountId) {
           providerFundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — card amount was not loaded.';
         } else {
+          // Must target the merge group's PRIMARY identity, not this
+          // applicant's own — acctResult.accountId already resolves to the
+          // shared account for the common case, but a secondary that
+          // already carried its own separate provider_account_id from
+          // before the merge (ensureProviderAccount only reconciles a row
+          // that had NO account yet) would otherwise still get its money
+          // routed to that stale, separate disccardpromos customer instead
+          // of being summed onto the group's real one. See
+          // services/providerAccount.js's resolveFundingAnchor.
+          const fundingAnchor = resolveFundingAnchor(applicant);
           try {
-            await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount });
+            await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, amount });
           } catch (e) {
             providerFundsError = e.message;
             console.error('[giftcard] failed to load funds on approval:', e.message);
@@ -1218,7 +1228,12 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
         scheduleProviderEnforceSoon(req.user.org_id, `account write failed on mass-approve for applicant ${applicant.id}`);
       }
       if (accountOk && amount > 0 && discountId) {
-        try { await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount }); }
+        // See the single /:id/approve route's identical comment — must
+        // target the merge group's PRIMARY identity, not this applicant's
+        // own, or a secondary with a stale pre-merge account gets its money
+        // routed to a separate disccardpromos customer instead of summed.
+        const fundingAnchor = resolveFundingAnchor(applicant);
+        try { await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, amount }); }
         catch (e) {
           providerErrors++;
           providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: card not loaded — ${e.message}`);
@@ -1566,7 +1581,10 @@ router.post('/:id/retry-provider-sync', requireSuperAdmin, async (req, res) => {
     const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
     if (!discountId) fundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
     else {
-      try { await giftcard.addFunds(applicant.season_id, { customerId: acctResult.accountId, externalId: applicant.external_id, discountId, amount: applicant.card_amount }); }
+      // See the /:id/approve route's identical comment — must target the
+      // merge group's PRIMARY identity, not this applicant's own.
+      const fundingAnchor = resolveFundingAnchor(applicant);
+      try { await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, amount: applicant.card_amount }); }
       catch (e) { fundsError = e.message; }
     }
   }
