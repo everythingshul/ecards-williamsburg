@@ -157,7 +157,12 @@ async function loadPayments() {
   payments.forEach(p => { if (p.refund_of) refundedByPaymentId[p.refund_of] = (refundedByPaymentId[p.refund_of] || 0) + (-p.net_amount); });
   qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => {
     const refunded = refundedByPaymentId[p.id] || 0;
-    const refundable = p.method === 'sola_card' && p.direction === 'in' && p.status === 'approved' ? Math.round((p.amount - refunded) * 100) / 100 : 0;
+    // Refundable regardless of approval status — the real Sola charge
+    // happened the instant the shul submitted it, before any admin review,
+    // so a still-pending or already-rejected charge is just as real and
+    // just as refundable as an approved one (see the server's identical
+    // POST /:id/refund comment for why it doesn't check status either).
+    const refundable = p.method === 'sola_card' && p.direction === 'in' ? Math.round((p.amount - refunded) * 100) / 100 : 0;
     // A real card transaction (a Sola charge/refund, or a legacy Stripe
     // charge) moved actual money through a processor — it can never be
     // deleted, only reversed for real (Refund) or, for the legacy Stripe

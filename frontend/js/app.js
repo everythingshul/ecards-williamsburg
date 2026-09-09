@@ -335,7 +335,7 @@ const NAV_ITEMS = [
   // isn't in PERMISSION_RESOURCES (middleware/permissions.js) at all
   // anymore, specifically so no Users & Permissions toggle could ever grant
   // this to an org_admin/staff member.
-  { href: '/admin/audit', label: 'Recent Actions', icon: '&#9670;', roles: ['super_admin'] },
+  { href: '/admin/audit', label: 'Logs', icon: '&#9670;', roles: ['super_admin'] },
   // Kept at the very end of the nav on purpose: Analytics is a secondary,
   // drill-down view (the primary numbers already live on Dashboard), and
   // Forms/Documents/E-Signatures (merged into one page as three tabs — see

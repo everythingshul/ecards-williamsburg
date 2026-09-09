@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recent Actions · Kupes Hair Williamsburg</title>
+<title>Logs · Kupes Hair Williamsburg</title>
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
@@ -17,16 +17,42 @@ Auth.requireRole('super_admin');
 // without the role can't reach this page directly by URL either. The
 // actual API (routes/audit.js) independently re-checks the same way.
 renderShell('/admin/audit', `
-  <div class="flex-between">
-    <h2>Recent Actions</h2>
-    <select id="f-hours">
-      <option value="24">Last 24 hours</option>
-      <option value="48" selected>Last 48 hours</option>
-      <option value="168">Last 7 days</option>
-    </select>
+  <h2>Logs</h2>
+  <div class="tabs">
+    <button class="active" id="tab-actions-btn">Actions</button>
+    <button id="tab-apirequests-btn">API Requests</button>
   </div>
-  <p class="small-muted">Every create/update/approve/reject across the system, who did it, and what changed. Undoing restores exactly the fields that action changed; an undone action shows a Redo button to bring it back.</p>
-  <div id="actions-list">Loading…</div>
+  <div id="panel-actions">
+    <div class="flex-between">
+      <p class="small-muted" style="margin:0">Every create/update/approve/reject across the system, who did it, and what changed. Undoing restores exactly the fields that action changed; an undone action shows a Redo button to bring it back.</p>
+      <select id="f-hours">
+        <option value="24">Last 24 hours</option>
+        <option value="48" selected>Last 48 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+    </div>
+    <div id="actions-list">Loading…</div>
+  </div>
+  <div id="panel-apirequests" style="display:none">
+    <p class="small-muted">Every request this app's own API received — method, path, status, timing, and who made it (blank when unauthenticated). Never includes request/response bodies — no card numbers, passwords, or other submitted data are ever logged here. Rows older than 30 days are pruned automatically.</p>
+    <div class="toolbar">
+      <select id="al-method"><option value="">All Methods</option><option value="GET">GET</option><option value="POST">POST</option><option value="PUT">PUT</option><option value="DELETE">DELETE</option></select>
+      <input id="al-path" placeholder="Path contains…" style="max-width:220px">
+      <select id="al-status"><option value="">All Statuses</option><option value="200">200</option><option value="201">201</option><option value="400">400</option><option value="401">401</option><option value="403">403</option><option value="404">404</option><option value="500">500</option></select>
+      <select id="al-hours">
+        <option value="1">Last hour</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadApiRequests()">Filter</button>
+      <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/logs/export?' + apiRequestParams(), 'api-logs.xlsx')">Export</button>
+    </div>
+    <p class="small-muted">Showing the most recent 500 matching requests — narrow the filters or use Export for a full range.</p>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>User</th><th>IP</th></tr></thead>
+      <tbody id="tbody-apirequests"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
 `);
 
 const ENTITY_LABELS = { shul: 'shul', applicant: 'applicant', store: 'store', season: 'season', task: 'task', user: 'user', card: 'card', shul_allocation: 'allocation' };
@@ -194,8 +220,8 @@ window.undoAction = async (id, isRedo, action) => {
 // applicant's live card balance via disccardpromos and only pulls back
 // whatever's still there, writing off the rest — see services/matching.js
 // reverseAllocation) already wired up for the admin
-// Shuls > Payments tab; this just gives Recent Actions a button to the same
-// endpoint instead of duplicating that logic.
+// Shuls > Payments tab; this just gives the Actions tab a button to the
+// same endpoint instead of duplicating that logic.
 window.reverseShulAllocation = async (allocationId) => {
   if (!confirm("Undo this allocation? This pulls the money back off the applicant's card and restores the shul's balance. If some of it has already been spent, only what's left comes back — the rest is written off, not restored to the shul's balance.")) return;
   try {
@@ -206,6 +232,39 @@ window.reverseShulAllocation = async (allocationId) => {
 };
 qs('#f-hours').addEventListener('change', load);
 load();
+
+// ============================= API Requests tab =============================
+function apiRequestParams() {
+  const p = {};
+  const method = qs('#al-method').value, status = qs('#al-status').value, path = qs('#al-path').value.trim(), hours = qs('#al-hours').value;
+  if (method) p.method = method;
+  if (status) p.status = status;
+  if (path) p.path = path;
+  if (hours) p.hours = hours;
+  return new URLSearchParams(p).toString();
+}
+window.loadApiRequests = async () => {
+  qs('#tbody-apirequests').innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
+  try {
+    const { logs } = await api('/logs?' + apiRequestParams());
+    qs('#tbody-apirequests').innerHTML = logs.length ? logs.map(l => `<tr>
+      <td>${fmtDateTime(l.created_at)}</td>
+      <td>${esc(l.method)}</td>
+      <td style="max-width:320px;overflow-wrap:anywhere">${esc(l.path)}</td>
+      <td>${badge(String(l.status_code), l.status_code >= 500 ? 'rejected' : (l.status_code >= 400 ? 'pending' : 'active'))}</td>
+      <td>${l.duration_ms != null ? l.duration_ms + ' ms' : '—'}</td>
+      <td>${esc(l.user_email || 'Unauthenticated')}${l.user_role ? `<div class="small-muted">${esc(l.user_role)}</div>` : ''}</td>
+      <td>${esc(l.ip_address || '')}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No requests match these filters.</td></tr>';
+  } catch (err) { qs('#tbody-apirequests').innerHTML = `<tr><td colspan="7" class="empty-state">${esc(err.message)}</td></tr>`; }
+};
+
+const LOG_TABS = ['actions', 'apirequests'];
+function switchLogTab(t) {
+  LOG_TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
+  if (t === 'apirequests') loadApiRequests();
+}
+LOG_TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switchLogTab(t)));
 </script>
 </body>
 </html>

@@ -19,7 +19,8 @@ import { syncAllCards } from './services/cardSync.js';
 import { startProviderEnforceScheduler } from './services/providerAccount.js';
 import { syncInboundSms, getOwnSmsNumber } from './services/sms.js';
 import { runBackup } from './services/backup.js';
-import { DEFAULT_ORG_ID } from './db.js';
+import { db, DEFAULT_ORG_ID } from './db.js';
+import { requestLog, startRequestLogPruning } from './middleware/requestLog.js';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -42,6 +43,7 @@ import emailRoutes from './routes/emails.js';
 import smsRoutes from './routes/sms.js';
 import updateRoutes from './routes/updates.js';
 import auditRoutes from './routes/audit.js';
+import apiLogsRoutes from './routes/apiLogs.js';
 import preferencesRoutes from './routes/preferences.js';
 import contactRoutes from './routes/contact.js';
 import analyticsRoutes from './routes/analytics.js';
@@ -91,6 +93,13 @@ app.use(cors({ origin: process.env.ALLOWED_ORIGIN || process.env.APP_URL || '*',
 app.use(express.json({ limit: '15mb', verify: (req, res, buf) => { req.rawBody = buf; } })); // e-signature PNGs are base64 in JSON bodies
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 2000 }));
+// Request-level trace for Admin > Logs' "API Requests" tab (see
+// middleware/requestLog.js) — mounted once, early, ahead of every router.
+// It listens on res.on('finish') rather than logging synchronously, so
+// req.user (set by whichever router's own `auth` middleware runs downstream)
+// is reliably populated by the time it actually writes a row, regardless of
+// this early mount point.
+app.use(requestLog(db));
 // Auth endpoints get their own much tighter limit — the blanket 2000/15min
 // above is sized for normal app usage (list pages, dashboards polling), not
 // for how many password/token guesses one IP should get. GET /me is
@@ -158,6 +167,7 @@ app.use('/api/emails', emailRoutes);
 app.use('/api/sms', smsRoutes);
 app.use('/api/updates', updateRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/logs', apiLogsRoutes);
 app.use('/api/preferences', preferencesRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/analytics', analyticsRoutes);
@@ -223,6 +233,10 @@ setTimeout(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardS
 // approval/reject flow (see services/providerAccount.js's
 // scheduleProviderEnforceSoon, called from those catch blocks directly).
 startProviderEnforceScheduler(DEFAULT_ORG_ID);
+
+// Prunes api_request_logs (see middleware/requestLog.js) daily — one row
+// per API request grows fast, so nothing keeps it forever.
+startRequestLogPruning(db);
 
 // Automatic inbound-SMS sync — SimpleSender doesn't support webhooks yet, so
 // this polls GET /v1/messages for new incoming replies instead. No-ops

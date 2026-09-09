@@ -538,6 +538,30 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Every request that reaches the Express app (see middleware/requestLog.js),
+-- distinct from audit_log above: this is a request-level trace (method,
+-- path, status, timing, who) with no before/after diff, while audit_log is
+-- a meaningful-change trail. Never carries a request/response body — some
+-- routes handle raw card data (services/sola.js's payment flow) and this
+-- app has a standing rule that that data is never logged anywhere, in any
+-- form. Admin > Logs' "API Requests" tab reads this; pruned automatically
+-- (see index.js) since one row per request grows fast.
+CREATE TABLE IF NOT EXISTS api_request_logs (
+  id TEXT PRIMARY KEY,
+  org_id TEXT,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status_code INTEGER,
+  duration_ms INTEGER,
+  user_id TEXT,
+  user_email TEXT,
+  user_role TEXT,
+  ip_address TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_org ON api_request_logs(org_id, created_at);
+
 CREATE TABLE IF NOT EXISTS settings (
   org_id TEXT NOT NULL,
   key TEXT NOT NULL,

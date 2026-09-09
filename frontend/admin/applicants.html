@@ -280,7 +280,7 @@ const MASS_ACTIONS = {
         // the first few are shown inline (a large batch could otherwise
         // produce an unreadably long toast); providerErrorsHint still covers
         // the single most common case (no Package/Discount ID configured).
-        if (r.providerErrorDetails?.length) msg += `: ${r.providerErrorDetails.slice(0, 3).join('; ')}${r.providerErrorDetails.length > 3 ? `; +${r.providerErrorDetails.length - 3} more (see Recent Actions for the full list)` : ''}`;
+        if (r.providerErrorDetails?.length) msg += `: ${r.providerErrorDetails.slice(0, 3).join('; ')}${r.providerErrorDetails.length > 3 ? `; +${r.providerErrorDetails.length - 3} more (see Logs for the full list)` : ''}`;
         else if (r.providerErrorsHint) msg += `: ${r.providerErrorsHint}`;
       }
       // Not an "error" (an intentionally-comped applicant looks identical),

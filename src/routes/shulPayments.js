@@ -372,6 +372,29 @@ router.put('/:id/fee', requirePermission('shul_payments', 'can_edit'), (req, res
 // already been refunded" is a plain SUM query, and the refund can never
 // exceed what hasn't already gone back.
 //
+// Works regardless of the ORIGINAL charge's approval-workflow status —
+// deliberately NOT restricted to status='approved'. A real Sola charge
+// happens the instant the shul submits it (see POST /mine/sola-charge
+// above), before any admin review — a still-pending or already-rejected
+// charge is still a REAL charge that took a shul's real money, and
+// rejecting it never refunds it on its own (see POST /:id/reject below,
+// unchanged). Blocking Refund on anything but 'approved' would leave a
+// rejected card charge with no way to actually give the money back except
+// the removed Delete button, which never touched the processor either —
+// exactly the gap this route exists to close.
+//
+// services/shulBalance.js's approvedBalance sums ALL status='approved'
+// shul_payments rows (any direction) — so the refund row this inserts must
+// only carry status='approved' when the ORIGINAL charge itself was
+// 'approved' (i.e. actually counted toward the shul's balance already);
+// otherwise inserting an 'approved' negative row would subtract money from
+// the balance that was never added to it in the first place. For a
+// never-approved original, the refund row goes in as 'rejected' instead —
+// same bucket the original itself is in, so it never touches any balance
+// SUM, while still showing in the payments list and still counting toward
+// "how much of this charge has already been refunded" below (that query
+// has no status filter).
+//
 // fee_amount is NEVER backed out here — see services/sola.js's file-level
 // comment on why fee_amount stays 0 for sola_card rows for now, and more
 // generally: even where a real fee IS known (a legacy stripe_card row),
@@ -382,7 +405,7 @@ router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!payment) return res.status(404).json({ error: 'Not found' });
-  if (payment.direction !== 'in' || payment.status !== 'approved') return res.status(400).json({ error: 'Only an approved payment can be refunded' });
+  if (payment.direction !== 'in') return res.status(400).json({ error: 'Only a payment the shul made can be refunded, not a payout/refund itself' });
   if (payment.method !== 'sola_card' || !payment.sola_ref_num) return res.status(400).json({ error: 'Only a Sola card payment can be refunded here — for any other method, use Pay Shul to record money sent back manually.' });
 
   const alreadyRefunded = db.prepare(`SELECT COALESCE(SUM(-net_amount),0) t FROM shul_payments WHERE refund_of = ?`).get(payment.id).t;
@@ -397,10 +420,11 @@ router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async
     const feeNote = payment.fee_amount > 0
       ? ` Note for admin: this payment had a $${payment.fee_amount.toFixed(2)} processing fee that is NOT automatically refunded/removed from the shul's balance — only the $${amount.toFixed(2)} principal is reflected here.`
       : '';
+    const refundStatus = payment.status === 'approved' ? 'approved' : 'rejected';
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, direction, sola_ref_num, refund_of, entered_by, approved_by, approved_at, notes)
-      VALUES (?,?,?,?,'sola_refund',?,0,?,'approved','out',?,?,?,?,datetime('now'),?)`)
-      .run(id, req.user.org_id, payment.shul_id, payment.season_id, amount, -amount, result.refNum, payment.id, req.user.id, req.user.id, `Refund of payment ${payment.id}.${feeNote}`.trim());
+      VALUES (?,?,?,?,'sola_refund',?,0,?,?,'out',?,?,?,?,datetime('now'),?)`)
+      .run(id, req.user.org_id, payment.shul_id, payment.season_id, amount, -amount, refundStatus, result.refNum, payment.id, req.user.id, req.user.id, `Refund of payment ${payment.id}.${feeNote}`.trim());
     const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
     res.status(201).json({ ok: true, payment: row, feeNote: feeNote || null });
@@ -412,6 +436,11 @@ router.post('/:id/approve', requirePermission('shul_payments', 'can_edit'), (req
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!payment) return res.status(404).json({ error: 'Not found' });
   if (payment.status !== 'pending_approval') return res.status(400).json({ error: `This payment is already ${payment.status}` });
+  // A pending sola_card charge can be refunded before ever being approved
+  // (see POST /:id/refund above) — approving it afterward would count real
+  // money that's already been given back toward the shul's balance.
+  const alreadyRefunded = db.prepare(`SELECT COALESCE(SUM(-net_amount),0) t FROM shul_payments WHERE refund_of = ?`).get(payment.id).t;
+  if (alreadyRefunded > 0.005) return res.status(400).json({ error: 'This payment has already been refunded and can\'t be approved.' });
   db.prepare(`UPDATE shul_payments SET status = 'approved', approved_by = ?, approved_at = datetime('now') WHERE id = ?`).run(req.user.id, payment.id);
   const updated = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(payment.id);
   logAudit(req.user.org_id, req.user.id, 'approve', 'shul_payment', payment.id, payment, updated, req.ip);
