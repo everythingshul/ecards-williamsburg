@@ -3,6 +3,7 @@ import * as giftcard from './giftcard.js';
 import { approvedBalance } from './shulBalance.js';
 import { logAudit } from './audit.js';
 import { resolveFundingAnchor } from './providerAccount.js';
+import { getApplicantBalances } from './applicantBalance.js';
 
 // Most-specific-wins, consistent with every other override chain in this
 // app (min_contribution, required-field overrides, ...): an applicant's own
@@ -134,8 +135,24 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
+    // The correct new package total is THIS applicant's own ledger (merge-
+    // group aware — see getApplicantBalances) BEFORE this allocation, plus
+    // what's being given right now — computed from our own records, never
+    // from a live disccardpromos read (see giftcard.js's syncPackageAmount
+    // for why: a live-read-then-add is a lost-update race when two shuls
+    // give to the same merged applicant close together, which is exactly
+    // the bug this replaced).
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
+    const newTotal = Math.round((existing.remaining + totalAmount) * 100) / 100;
+    // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
+    // on the actual write. This one shows the INPUT side: what our own
+    // ledger said was already there before this allocation, and what
+    // (base+match) is being added — so a wrong result can be traced to
+    // either "the ledger read the wrong existing total" or "the write
+    // itself didn't take", instead of just seeing the final number.
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} existingRemaining=$${existing.remaining} + thisGive=$${totalAmount} -> newTotal=$${newTotal}`);
     try {
-      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, amount: totalAmount });
+      await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, totalAmount: newTotal });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -190,7 +207,17 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   }
 
   if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
-    await giftcard.addFunds(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, amount: -retrievable });
+    // Same reasoning as createAllocation above — the live GET just above
+    // this is only for the retrievable/shortfall spend-protection check
+    // (a legitimate real-time question: "is the money actually still
+    // there to pull back"), never as the baseline for the WRITE. The write
+    // target is our own ledger's remaining total (merge-group aware) minus
+    // what's being pulled back, computed independently of that live read,
+    // so a concurrent contribution from another shul can't get silently
+    // overwritten by this reversal the way a live-read-then-subtract could.
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
+    const newTotal = Math.max(0, Math.round((existing.remaining - retrievable) * 100) / 100);
+    await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
   }
 
   // Split the retrievable amount between base/match in the same proportion

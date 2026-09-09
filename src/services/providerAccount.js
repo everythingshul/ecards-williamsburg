@@ -7,6 +7,7 @@ import { db } from '../db.js';
 import * as giftcard from '../services/giftcard.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { lockApplicantCards } from './cardSync.js';
+import { getApplicantBalances } from './applicantBalance.js';
 
 // Old rows can carry a corrupted "74421.0" id (see giftcard.js's
 // normalizeCustomerId) — stripped here too so a comparison against a clean
@@ -352,8 +353,16 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       // primary's, not this member's own, or the just-correctly-set
       // external_id gets silently overwritten right back to the wrong value.
       const anchor = resolveFundingAnchor(a);
+      // Absolute total from our own ledger (merge-group aware), never a
+      // live-read-then-add — see giftcard.js's syncPackageAmount for why
+      // (the lost-update race that was undercounting a second shul's
+      // contribution). This is the first-ever fund load for a JUST-created
+      // account, so the ledger's remaining figure already IS the correct
+      // total to set (this applicant's own approved card_amount, plus
+      // anything else already on file for the group).
+      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
       try {
-        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, amount: a.card_amount });
+        await giftcard.syncPackageAmount(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, totalAmount: ledger.remaining });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }

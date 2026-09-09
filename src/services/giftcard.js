@@ -182,41 +182,64 @@ export async function refundCard(seasonId, { cardNum, amount }) {
   return call(seasonId, '/v1/refund/', { method: 'POST', body: JSON.stringify({ cardNum, amount }) });
 }
 
-// Credits (or debits, for a negative `amount`) a customer's balance against
-// one of their `packages` (discountId) — this is what actually loads money
-// onto a card. Wired into applicant approval and every shul allocation
-// (routes/applicants.js, services/matching.js) — per-season/package mapping
-// was explicitly ruled out; there's one org-wide Package/Discount ID
-// (Settings > Organization > Gift Card Loading, settings key
+// Sets a customer's package balance to an ABSOLUTE total — this is what
+// actually loads (or reduces) money on a card. Wired into applicant
+// approval and every shul allocation (routes/applicants.js,
+// services/matching.js, services/providerAccount.js) — per-season/package
+// mapping was explicitly ruled out; there's one org-wide Package/Discount
+// ID (Settings > Organization > Gift Card Loading, settings key
 // disccardpromos_discount_id) used for every approval regardless of season.
 //
 // CORRECTED (2026-09): there is NO separate /v1/add-funds/ endpoint — that
 // was the earlier best-guess described in this file's header, and it does
 // not match the real API. The only write path for a customer's balance is
 // PATCHing the customer record directly, and that PATCH's own `amount`
-// field is the CUSTOMER'S ENTIRE NEW TOTAL for that package, not a delta —
-// to "add" $100 on top of an existing $100 balance, the real PATCH must be
-// sent with amount: 200. Every caller of this function still thinks in
-// deltas (how much to add, or a negative amount to subtract for a partial/
-// full reversal — see services/matching.js's createAllocation/
-// reverseAllocation), so this function does the fetch-current-then-PATCH-
-// new-total translation internally, once, here — no caller has to reason
-// about the provider's "total, not delta" quirk itself.
+// field is the CUSTOMER'S ENTIRE NEW TOTAL for that package, not a delta.
+//
+// SECOND CORRECTION (2026-09, task: merge-group cumulative-total bug): this
+// function used to be delta-based from the CALLER's side too — it read the
+// customer's current live balance from disccardpromos, added the caller's
+// own delta to it, and PATCHed that computed total. That "read live, add,
+// write" pattern is a classic lost-update race: when two contributions
+// land close together (e.g. two different shuls giving to the same merged
+// applicant within the same sync window), each one can read the SAME
+// "before" balance and independently compute "before + my own delta" — so
+// whichever write lands second silently overwrites the first instead of
+// summing, and disccardpromos ends up showing only the LAST contribution
+// instead of the combined total, even though this app's own ledger has
+// both rows and knows the real combined figure. Every caller now computes
+// the correct ABSOLUTE total itself, from THIS APP'S OWN ledger
+// (services/applicantBalance.js's getApplicantBalances — merge-group
+// aware, already the same figure services/cardSync.js's balance-mismatch
+// reconciliation treats as ground truth) rather than from a live read of
+// disccardpromos' own state, which removes the race entirely: this app is
+// always the one source of truth for what the total SHOULD be, and every
+// write just makes disccardpromos match it.
 //
 // customerId (disccardpromos' own numeric id — our provider_account_id) is
 // required: a Customer PATCH has no by-external-id write path, only the
 // by-external-id READ endpoints elsewhere in this file. externalId is still
 // always included on the PATCH body too, since ANY PATCH that omits it
 // silently clears the field (see linkCardToCustomer's identical note).
-export async function addFunds(seasonId, { customerId, externalId, discountId, amount }) {
+export async function syncPackageAmount(seasonId, { customerId, externalId, discountId, totalAmount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
-  const customer = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/?balances=true`);
-  const pkg = (customer.packages || []).find(p => String(p.id) === String(discountId));
-  const currentAmount = pkg ? Number(pkg.amount) || 0 : 0;
-  const newTotal = Math.max(0, Math.round((currentAmount + amount) * 100) / 100);
-  return call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'PATCH', body: JSON.stringify({
+  const newTotal = Math.max(0, Math.round(totalAmount * 100) / 100);
+  // Diagnostic, always-on (not gated behind a debug flag) — this is the
+  // one write in the whole app responsible for a merge group's combined
+  // balance actually landing on disccardpromos correctly, and it's been
+  // wrong before in ways that were invisible until someone dug through
+  // server logs after the fact. No card/PII data here (just an internal
+  // customer id and a dollar figure, same as what the admin UI already
+  // shows), safe to log unconditionally. If a "should be $200, shows $100"
+  // report ever comes in again, this line is the first thing to check —
+  // it shows exactly what THIS app computed and sent, which tells you
+  // immediately whether the bug is in our own math or somewhere after.
+  console.log(`[giftcard] syncPackageAmount customerId=${normalizeCustomerId(customerId)} discountId=${discountId} externalId=${externalId} -> setting package amount to $${newTotal}`);
+  const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'PATCH', body: JSON.stringify({
     amount: newTotal, discount_id: discountId, external_id: externalId,
   }) });
+  console.log(`[giftcard] syncPackageAmount customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
