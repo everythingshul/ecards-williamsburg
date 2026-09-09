@@ -50,3 +50,11 @@ services:
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      # Sola Payments (services/sola.js) — replaces Stripe above for shul
+      # card payments; the STRIPE_* vars above are no longer read by the
+      # app but are left here since historical shul_payments rows still
+      # reference method='stripe_card'.
+      - key: SOLA_TRANSACTION_KEY
+        sync: false
+      - key: SOLA_IFIELDS_KEY
+        sync: false

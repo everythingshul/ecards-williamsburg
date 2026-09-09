@@ -61,7 +61,7 @@ async function loadSeasons() {
       </div>
       <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="s-fee-${s.id}" ${s.shul_pays_processing_fee?'checked':''} onchange="updateSeason('${s.id}',{shul_pays_processing_fee:this.checked})">
         <label for="s-fee-${s.id}" style="margin:0">Shul pays the card processing fee</label></div>
-      <p class="small-muted">When on, Stripe's actual fee for that charge is deducted before the payment ever shows up as pending balance.</p>
+      <p class="small-muted">When on, the processor's actual fee for that charge (when known) is deducted before the payment ever shows up as pending balance. Sola's charge API doesn't currently return a per-transaction fee figure, so this has no effect on new card payments until that's confirmed with Sola — it still applies to historical Stripe-processed payments.</p>
       <div class="divider"></div>
       <button class="btn btn-sm btn-outline" onclick="openSeasonNotes('${s.id}','${esc(s.name).replace(/'/g,"\\'")}')">Notes</button>
       <button class="btn btn-sm btn-outline" onclick="openSeasonGiftCardApi('${s.id}','${esc(s.name).replace(/'/g,"\\'")}', ${JSON.stringify(s.disccardpromos_api_base||'')}, ${!!s.has_disccardpromos_api_key})">Gift Card API${s.disccardpromos_api_base && s.has_disccardpromos_api_key ? ' ' + badge('configured','active') : ''}</button>

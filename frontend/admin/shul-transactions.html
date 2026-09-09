@@ -97,7 +97,7 @@ renderShell('/admin/shul-transactions', `
   </div>
 `);
 
-const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other', stripe_card: 'Card' };
+const MANUAL_METHOD_LABEL = { wire: 'Wire Transfer', quickpay: 'Quick Pay', check: 'Check', cash: 'Cash', other: 'Other', stripe_card: 'Card (Stripe, legacy)', sola_card: 'Card (Sola)', sola_refund: 'Refund (Sola)' };
 const state = { shul_id: '', season_id: '', status: '' };
 let activeTab = 'payments';
 
@@ -109,19 +109,31 @@ function currentFilterParams() {
   return new URLSearchParams(p).toString();
 }
 
+let lastPayments = [];
 async function loadPayments() {
   const { payments } = await api('/shul-payments?' + currentFilterParams());
-  qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => `<tr>
+  lastPayments = payments;
+  // Refunds are their own rows (method sola_refund, refund_of pointing back
+  // at the original charge) — summed here just to know how much of each
+  // charge is still refundable and to show a small "Refunded: $X" note;
+  // the server independently enforces the real cap on every refund request.
+  const refundedByPaymentId = {};
+  payments.forEach(p => { if (p.refund_of) refundedByPaymentId[p.refund_of] = (refundedByPaymentId[p.refund_of] || 0) + (-p.net_amount); });
+  qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => {
+    const refunded = refundedByPaymentId[p.id] || 0;
+    const refundable = p.method === 'sola_card' && p.direction === 'in' && p.status === 'approved' ? Math.round((p.amount - refunded) * 100) / 100 : 0;
+    return `<tr>
       <td>${esc(p.shul_name||'')}</td>
       <td>${p.direction === 'out' ? badge('Paid to Shul', 'pending') : badge('Paid In', 'active')}</td>
       <td>${MANUAL_METHOD_LABEL[p.method] || p.method}</td>
-      <td>${p.direction === 'out' ? '-' : ''}${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
+      <td>${p.direction === 'out' ? '-' : ''}${fmtMoney(p.amount)}${refunded > 0 ? `<div class="small-muted">Refunded: ${fmtMoney(refunded)}</div>` : ''}</td><td>${fmtMoney(p.fee_amount)}</td><td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
       <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
       <td>${esc(p.manual_ref||'')}</td>
       <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
       <td>${fmtDateTime(p.created_at)}</td>
-      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}<button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button></td>
-    </tr>`).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
+      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}<button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
 }
 window.approvePayment = async (id) => {
   try { await api(`/shul-payments/${id}/approve`, { method: 'POST' }); toast('Approved'); loadPayments(); } catch (err) { toast(err.message, true); }
@@ -129,6 +141,31 @@ window.approvePayment = async (id) => {
 window.rejectPayment = async (id) => {
   const reason = prompt('Reason for rejecting this payment (optional):') || '';
   try { await api(`/shul-payments/${id}/reject`, { method: 'POST', body: { reason } }); toast('Rejected'); loadPayments(); } catch (err) { toast(err.message, true); }
+};
+window.openRefundModal = (id) => {
+  const p = lastPayments.find(x => x.id === id);
+  if (!p) return;
+  const refunded = lastPayments.filter(x => x.refund_of === id).reduce((s, x) => s + (-x.net_amount), 0);
+  const refundable = Math.round((p.amount - refunded) * 100) / 100;
+  const feeWarning = p.fee_amount > 0
+    ? `<p class="small-muted" style="color:var(--danger,#b91c1c)">This payment had a ${fmtMoney(p.fee_amount)} processing fee. Refunding does NOT automatically return that fee — it stays collected regardless of how much of the principal you refund here.</p>`
+    : '';
+  const body = `
+    <p class="small-muted">Refunding ${esc(p.shul_name || '')}'s ${fmtMoney(p.amount)} card payment. Up to ${fmtMoney(refundable)} can still be refunded.</p>
+    ${feeWarning}
+    <label>Refund Amount ($)</label><input id="rf-amount" type="number" min="0.01" max="${refundable}" step="0.01" value="${refundable}">
+  `;
+  openModal('Refund Payment', body, `<button class="btn btn-primary btn-sm" onclick="submitRefund('${id}')">Refund</button>`);
+};
+window.submitRefund = async (id) => {
+  const amount = +qs('#rf-amount').value;
+  if (!(amount > 0)) return toast('Enter a valid amount', true);
+  try {
+    const { feeNote } = await api(`/shul-payments/${id}/refund`, { method: 'POST', body: { amount } });
+    toast(feeNote ? `Refunded — ${feeNote}` : 'Refunded');
+    closeModal();
+    loadPayments();
+  } catch (err) { toast(err.message, true); }
 };
 window.deletePayment = async (id) => {
   if (!confirm('Delete this transaction? This removes it permanently, not as a reversal entry.')) return;

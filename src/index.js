@@ -83,9 +83,11 @@ app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: false }));
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || process.env.APP_URL || '*', credentials: true }));
 // verify: stashes the raw request bytes on req.rawBody alongside the normal
-// parsed body — Stripe's webhook signature check (routes/shulPayments.js)
-// needs the exact raw bytes, and this is the standard way to get both
-// without a second body-parsing pass or reordering route registration.
+// parsed body — needed by Stripe's webhook signature check (services/
+// stripe.js), unused now that shul card payments run through Sola instead
+// (routes/shulPayments.js no longer has a webhook route; Sola's iFields +
+// direct charge is synchronous, no signed callback to verify). Left in
+// place since it's harmless and stripe.js itself is kept for reference.
 app.use(express.json({ limit: '15mb', verify: (req, res, buf) => { req.rawBody = buf; } })); // e-signature PNGs are base64 in JSON bodies
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 2000 }));

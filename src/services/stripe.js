@@ -1,12 +1,19 @@
 // ---------------------------------------------------------------------------
-// Stripe — card/debit payments only for now (ACH deferred to a later pass,
-// see CLAUDE.md). MOCK MODE (no real charges, a fake client_secret so the
-// whole embedded-Elements flow is testable end to end) until
-// STRIPE_SECRET_KEY is set in the deploy environment — same pattern as
-// every other integration in this app (Brevo, disccardpromos, SimpleSender).
-// STRIPE_PUBLISHABLE_KEY is safe to expose to the frontend (see /api/config
-// in index.js). STRIPE_WEBHOOK_SECRET verifies that a webhook call actually
-// came from Stripe (routes/shulPayments.js's POST /stripe/webhook).
+// UNUSED — kept for reference only. Shul card payments were migrated from
+// Stripe to Sola Payments (see services/sola.js); nothing in routes/
+// shulPayments.js calls into this file anymore. Historical shul_payments
+// rows created while Stripe was live still carry method='stripe_card' and a
+// real stripe_payment_intent_id, which is the only reason this file (and
+// those two columns) are still around.
+//
+// Stripe — card/debit payments only (ACH deferred to a later pass, see
+// CLAUDE.md). MOCK MODE (no real charges, a fake client_secret so the whole
+// embedded-Elements flow was testable end to end) until STRIPE_SECRET_KEY
+// was set in the deploy environment — same pattern as every other
+// integration in this app (Brevo, disccardpromos, SimpleSender, and now
+// Sola). STRIPE_WEBHOOK_SECRET verified that a webhook call actually came
+// from Stripe — that webhook route no longer exists (Sola's charge flow is
+// synchronous, no webhook needed).
 // ---------------------------------------------------------------------------
 
 import Stripe from 'stripe';

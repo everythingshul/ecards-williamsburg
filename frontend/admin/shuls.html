@@ -437,7 +437,7 @@ async function loadPaymentsTab(shulId, shul) {
       <div class="divider"></div>
       <h4 style="margin-bottom:4px">Overrides</h4>
       <div class="grid-2">
-        <div><label style="margin-top:0">Online Card Payment (Stripe)</label>
+        <div><label style="margin-top:0">Online Card Payment (Sola)</label>
           <select id="e-stripe_payments_enabled">
             <option value="" ${shul.stripe_payments_enabled == null ? 'selected' : ''}>Use org default</option>
             <option value="1" ${shul.stripe_payments_enabled === 1 ? 'selected' : ''}>Always on for this shul</option>
@@ -467,7 +467,7 @@ async function loadPaymentsTab(shulId, shul) {
       <h4 style="margin-bottom:4px">Payment History</h4>
       ${payments.length ? `<table><thead><tr><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>
         ${payments.map(p => `<tr>
-          <td>${p.method === 'stripe_card' ? 'Card (Stripe)' : (MANUAL_METHOD_LABEL[p.method] || p.method)}</td>
+          <td>${p.method === 'sola_card' ? 'Card (Sola)' : p.method === 'sola_refund' ? 'Refund (Sola)' : p.method === 'stripe_card' ? 'Card (Stripe, legacy)' : (MANUAL_METHOD_LABEL[p.method] || p.method)}</td>
           <td>${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${fmtMoney(p.net_amount)}</td>
           <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}${p.manual_ref ? `<div class="small-muted">Ref: ${esc(p.manual_ref)}</div>` : ''}${p.entered_by_first ? `<div class="small-muted">By ${esc(p.entered_by_first)} ${esc(p.entered_by_last||'')}</div>` : ''}</td>
           <td>${fmtDateTime(p.created_at)}</td>

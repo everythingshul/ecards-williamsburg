@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { pendingBalance, approvedBalance, shulBalances } from '../services/shulBalance.js';
 import { createAllocation, reverseAllocation, shulDisplayMatch } from '../services/matching.js';
-import * as stripePay from '../services/stripe.js';
+import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
 
@@ -12,42 +12,10 @@ const router = Router();
 
 const MANUAL_METHODS = ['wire', 'quickpay', 'check', 'cash', 'other'];
 
-// ============================= PUBLIC (Stripe only) =============================
-// No auth — Stripe calls this directly. Registered before the auth gate
-// below, same pattern as every other public route in this app.
-// index.js's express.json({ verify }) stashes the exact raw bytes on
-// req.rawBody, which the signature check needs (a re-serialized JSON body
-// won't byte-for-byte match what Stripe signed).
-router.post('/stripe/webhook', async (req, res) => {
-  let event;
-  try {
-    event = stripePay.constructWebhookEvent(req.rawBody, req.headers['stripe-signature']);
-  } catch (e) {
-    console.error('[stripe] webhook signature verification failed:', e.message);
-    return res.status(400).json({ error: 'Invalid signature' });
-  }
-  if (event.type !== 'payment_intent.succeeded') return res.json({ received: true });
-
-  const intent = event.data.object;
-  const { shulId, seasonId, orgId, userId } = intent.metadata || {};
-  if (!shulId || !seasonId || !orgId) return res.json({ received: true });
-  // Idempotent — Stripe retries webhook delivery, and this same event could
-  // arrive more than once.
-  const already = db.prepare('SELECT id FROM shul_payments WHERE stripe_payment_intent_id = ?').get(intent.id);
-  if (already) return res.json({ received: true });
-
-  const season = db.prepare('SELECT shul_pays_processing_fee FROM seasons WHERE id = ?').get(seasonId);
-  const amount = intent.amount_received / 100;
-  const fee = season?.shul_pays_processing_fee ? await stripePay.getPaymentIntentFee(intent.id).catch(() => 0) : 0;
-  const netAmount = Math.round((amount - fee) * 100) / 100;
-
-  const id = uuid();
-  db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, stripe_payment_intent_id, entered_by)
-    VALUES (?,?,?,?,'stripe_card',?,?,?,'pending_approval',?,?)`)
-    .run(id, orgId, shulId, seasonId, amount, fee, netAmount, intent.id, userId || null);
-  logAudit(orgId, userId || null, 'create', 'shul_payment', id, null, db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id), null);
-  res.json({ received: true });
-});
+// No webhook here (unlike the old Stripe setup) — Sola's iFields + direct
+// charge is synchronous: the charge result comes back in the same HTTP
+// response as POST /mine/sola-charge below, so there's no async event to
+// wait on and nothing for Sola to call back into this app about.
 
 router.use(auth, requirePermission('shul_payments'));
 
@@ -65,30 +33,50 @@ router.get('/mine', (req, res) => {
   res.json({ payments: rows });
 });
 
-// Public config a shul's payment page needs before it can render Stripe
-// Elements at all: whether Stripe is enabled for them (org default,
-// shul-level override) and the publishable key. No secret ever reaches here.
+// Public config a shul's payment page needs before it can render Sola's
+// iFields at all: whether online card payment is enabled for them (org
+// default, shul-level override) and the iFields key (public — only lets a
+// browser tokenize card data via Sola's own hosted iframes, never charge
+// anything on its own). shuls.stripe_payments_enabled is the same tri-state
+// on/off/use-default column from the earlier Stripe setup, reused as-is —
+// it was always "is online card payment enabled for this shul", never
+// actually processor-specific despite the name (renaming the column isn't
+// worth the migration risk on a live table for what's purely an internal
+// identifier).
 router.get('/mine/config', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const shul = db.prepare('SELECT stripe_payments_enabled FROM shuls WHERE id = ?').get(req.user.shul_id);
-  const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'stripe_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
+  const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
-  res.json({ stripeEnabled: enabled, publishableKey: stripePay.stripePublishableKey(), mockMode: stripePay.isStripeMockMode() });
+  res.json({ solaEnabled: enabled, ifieldsKey: solaPay.solaIfieldsKey(), mockMode: solaPay.isSolaMockMode() });
 });
 
-router.post('/mine/stripe-intent', async (req, res) => {
+// xCardNum/xCVV here are the single-use tokens iFields handed the browser —
+// real card data never reaches this server (see services/sola.js). The
+// charge itself is synchronous: chargeSale() either comes back approved
+// (and this inserts the shul_payments row right here, same
+// 'pending_approval'-until-admin-approves status the old webhook-created
+// rows used) or declined (nothing is written, the shul sees why immediately
+// instead of waiting on a webhook that may never fire).
+router.post('/mine/sola-charge', async (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const amount = +req.body?.amount;
+  const { xCardNum, xCVV } = req.body || {};
   if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
-  const shul = db.prepare('SELECT stripe_payments_enabled, season_id FROM shuls WHERE id = ?').get(req.user.shul_id);
-  const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'stripe_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
+  const shul = db.prepare('SELECT stripe_payments_enabled, season_id, name_en FROM shuls WHERE id = ?').get(req.user.shul_id);
+  const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
   if (!enabled) return res.status(403).json({ error: 'Online card payment is not enabled for your shul. Use "Request a Different Payment Method" instead.' });
+  if (!solaPay.isSolaMockMode() && (!xCardNum || !xCVV)) return res.status(400).json({ error: 'Card details are required' });
   try {
-    const intent = await stripePay.createPaymentIntent({
-      amountCents: Math.round(amount * 100), shulId: req.user.shul_id, seasonId: shul.season_id, orgId: req.user.org_id, userId: req.user.id,
-    });
-    res.json({ clientSecret: intent.client_secret, mock: !!intent.mock });
+    const result = await solaPay.chargeSale({ amount, xCardNum, xCVV, invoice: `${shul.name_en || 'shul'}-${Date.now()}`, description: 'eCards shul payment' });
+    if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
+    const id = uuid();
+    db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, entered_by)
+      VALUES (?,?,?,?,'sola_card',?,0,?,'pending_approval',?,?)`)
+      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, amount, result.refNum, req.user.id);
+    logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id), req.ip);
+    res.json({ ok: true, mock: !!result.mock });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -174,12 +162,12 @@ router.get('/balance/:shulId', (req, res) => {
 
 router.get('/config', (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
-  res.json(stripePay.stripeConfigStatus());
+  res.json(solaPay.solaConfigStatus());
 });
 
 // Manual entry is inherently admin-vetted (an admin is the one typing it
 // in, having already confirmed the money was actually received) — it goes
-// straight to 'approved', unlike a shul's own Stripe payment which always
+// straight to 'approved', unlike a shul's own Sola card payment which always
 // needs a separate admin approval step. entered_by doubles as both the
 // audit trail and the "signed with the name of the account adding it"
 // requirement — always the logged-in admin, never a free-text name field.
@@ -203,8 +191,10 @@ router.post('/manual', requirePermission('shul_payments', 'can_edit'), (req, res
 });
 
 // The org paying money BACK to a shul (a refund/reimbursement, entered by
-// staff after it happened outside this app — no CC/Stripe processing here,
-// same "just a record" nature as the manual 'in' entry above). Stored as a
+// staff after it happened outside this app — no CC processing here, same
+// "just a record" nature as the manual 'in' entry above; for an actual
+// processor-side refund of a real Sola card payment, see POST /:id/refund
+// below instead). Stored as a
 // negative net_amount/amount on the SAME shul_payments ledger (direction
 // 'out') so services/shulBalance.js's existing SUM(net_amount) subtracts it
 // with no query changes — reduces the shul's balance exactly like an
@@ -230,6 +220,51 @@ router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res
   const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
   logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
   res.status(201).json({ ok: true, payment: row });
+});
+
+// Refunds (full or partial) a Sola card payment through the actual
+// processor — cc:Refund, linked to the original sale via sola_ref_num (see
+// services/sola.js). Recorded the same way POST /payout above records money
+// paid back to a shul: a new shul_payments row (direction='out', negative
+// net_amount) rather than mutating the original row, so the balance SUM
+// picks it up automatically and the original charge's own history stays
+// intact. refund_of links the two rows so "how much of this charge has
+// already been refunded" is a plain SUM query, and the refund can never
+// exceed what hasn't already gone back.
+//
+// fee_amount is NEVER backed out here — see services/sola.js's file-level
+// comment on why fee_amount stays 0 for sola_card rows for now, and more
+// generally: even where a real fee IS known (a legacy stripe_card row),
+// refunding the principal never gets the processor's cut back either. The
+// notes on the refund row spell this out explicitly so it isn't a silent
+// surprise the next time someone reconciles the shul's balance.
+router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+  if (payment.direction !== 'in' || payment.status !== 'approved') return res.status(400).json({ error: 'Only an approved payment can be refunded' });
+  if (payment.method !== 'sola_card' || !payment.sola_ref_num) return res.status(400).json({ error: 'Only a Sola card payment can be refunded here — for any other method, use Pay Shul to record money sent back manually.' });
+
+  const alreadyRefunded = db.prepare(`SELECT COALESCE(SUM(-net_amount),0) t FROM shul_payments WHERE refund_of = ?`).get(payment.id).t;
+  const refundable = Math.round((payment.amount - alreadyRefunded) * 100) / 100;
+  const amount = +req.body?.amount;
+  if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  if (amount > refundable + 1e-9) return res.status(400).json({ error: `Amount ($${amount.toFixed(2)}) exceeds what's left to refund on this payment ($${refundable.toFixed(2)}).` });
+
+  try {
+    const result = await solaPay.refundTransaction({ refNum: payment.sola_ref_num, amount });
+    if (!result.approved) return res.status(400).json({ error: result.error || 'Refund failed' });
+    const feeNote = payment.fee_amount > 0
+      ? ` Note for admin: this payment had a $${payment.fee_amount.toFixed(2)} processing fee that is NOT automatically refunded/removed from the shul's balance — only the $${amount.toFixed(2)} principal is reflected here.`
+      : '';
+    const id = uuid();
+    db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, direction, sola_ref_num, refund_of, entered_by, approved_by, approved_at, notes)
+      VALUES (?,?,?,?,'sola_refund',?,0,?,'approved','out',?,?,?,?,datetime('now'),?)`)
+      .run(id, req.user.org_id, payment.shul_id, payment.season_id, amount, -amount, result.refNum, payment.id, req.user.id, req.user.id, `Refund of payment ${payment.id}.${feeNote}`.trim());
+    const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
+    logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
+    res.status(201).json({ ok: true, payment: row, feeNote: feeNote || null });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 router.post('/:id/approve', requirePermission('shul_payments', 'can_edit'), (req, res) => {

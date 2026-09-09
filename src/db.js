@@ -604,13 +604,17 @@ CREATE TABLE IF NOT EXISTS shul_payments (
   org_id TEXT NOT NULL REFERENCES organizations(id),
   shul_id TEXT NOT NULL REFERENCES shuls(id),
   season_id TEXT NOT NULL REFERENCES seasons(id),
-  method TEXT NOT NULL,              -- stripe_card | wire | quickpay | check | cash | other
+  method TEXT NOT NULL,              -- sola_card | sola_refund | wire | quickpay | check | cash | other
+                                      -- (stripe_card also exists on historical rows from before
+                                      -- the Sola migration — see services/sola.js)
   amount REAL NOT NULL,              -- gross amount paid
-  fee_amount REAL NOT NULL DEFAULT 0,-- Stripe's processing fee, only ever nonzero for stripe_card
-                                      -- when the season has shul_pays_processing_fee on
+  fee_amount REAL NOT NULL DEFAULT 0,-- the processor's real fee, when known; always 0 for sola_card
+                                      -- rows for now (Sola's API doesn't return a per-transaction
+                                      -- fee figure — see services/sola.js's file-level comment).
+                                      -- Still populated for legacy stripe_card rows.
   net_amount REAL NOT NULL,          -- amount - fee_amount; what actually reaches pending balance
   status TEXT NOT NULL DEFAULT 'pending_approval', -- pending_approval | approved | rejected
-  stripe_payment_intent_id TEXT,
+  stripe_payment_intent_id TEXT,     -- legacy Stripe rows only; sola_card rows use sola_ref_num instead
   -- Required together for every manual method (wire/quickpay/check/cash/other);
   -- entered_by is the "signed with the name of the account adding it" requirement.
   manual_date TEXT,
@@ -917,6 +921,16 @@ safeAlter(`ALTER TABLE shul_payments ADD COLUMN direction TEXT NOT NULL DEFAULT 
 // pages) — JSON object keyed by a short page key, e.g. {"applicants":50}.
 // See PUT /api/auth/preferences and app.js's Auth.pageSize/savePageSize.
 safeAlter(`ALTER TABLE users ADD COLUMN page_size_prefs TEXT`);
+
+// Sola Payments migration (services/sola.js) — sola_ref_num is the Sola/
+// Cardknox xRefNum for a sale, what a later refund/void links back to
+// (the stripe_payment_intent_id equivalent for the old Stripe flow).
+// refund_of points a refund row (direction='out', method='sola_refund')
+// back at the original sale it refunds, so "how much of this charge has
+// already been refunded" is a plain SUM(net_amount) WHERE refund_of = ?
+// query — same reversal-row pattern shul_allocations already uses.
+safeAlter(`ALTER TABLE shul_payments ADD COLUMN sola_ref_num TEXT`);
+safeAlter(`ALTER TABLE shul_payments ADD COLUMN refund_of TEXT REFERENCES shul_payments(id)`);
 
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
