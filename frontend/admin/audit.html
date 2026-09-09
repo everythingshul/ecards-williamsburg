@@ -11,13 +11,11 @@
 <body>
 <script src="/js/app.js"></script>
 <script>
-Auth.requireAdmin();
-// 'audit' is denied by default for everyone but super_admin (see
-// RESOURCE_DEFAULT_OVERRIDES in middleware/permissions.js) unless an admin
-// explicitly grants it via Users & Permissions — same real check the nav's
-// hide-if-blocked relies on, so someone without it can't reach this page
-// directly by URL either.
-if (!Auth.can('audit')) { location.href = '/admin/dashboard'; }
+Auth.requireRole('super_admin');
+// Hardcoded super_admin-only, not a permissions check — 'audit' isn't a
+// grantable resource at all (see middleware/permissions.js), so someone
+// without the role can't reach this page directly by URL either. The
+// actual API (routes/audit.js) independently re-checks the same way.
 renderShell('/admin/audit', `
   <div class="flex-between">
     <h2>Recent Actions</h2>

@@ -13,14 +13,16 @@
 <script>
 Auth.requireAdmin();
 // Kept in sync with PERMISSION_RESOURCES (src/middleware/permissions.js) —
-// every resource that can be gated at all gets a row here.
-const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','audit','portal_impersonation'];
+// every resource that can be gated at all gets a row here. Recent Actions
+// ('audit') is deliberately absent — it's hardcoded to super_admin only
+// (routes/audit.js), never a grantable permission, so no row for it here.
+const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','portal_impersonation'];
 const RESOURCE_LABELS = {
   dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
   shul_payments: 'Shul Transactions & Allocations',
   seasons: 'Seasons', forms: 'Form Builder', tasks: 'Tasks', emails: 'Email Center', sms: 'SMS Center',
   updates: 'Updates', documents: 'E-Signatures', site_content: 'Site Content', contract_settings: 'Documents',
-  users: 'Users & Permissions', settings: 'Settings', audit: 'Recent Actions',
+  users: 'Users & Permissions', settings: 'Settings',
   portal_impersonation: 'Enter Shul/Store Portal',
 };
 const HIDABLE_FIELDS = {
@@ -141,7 +143,7 @@ async function openUser(id) {
     // access to everything), simply opening their profile and hitting Save
     // would silently downgrade them to view-only across the entire app.
     const defaultPermFor = (r, role) => {
-      if (r === 'audit' || r === 'portal_impersonation') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
+      if (r === 'portal_impersonation') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
       if (role === 'super_admin' || role === 'org_admin') return { can_view: 1, can_edit: 1, can_export: 1, scope: 'all', hidden_fields: [] };
       return { can_view: 1, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
     };

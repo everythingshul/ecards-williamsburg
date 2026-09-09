@@ -331,11 +331,11 @@ const NAV_ITEMS = [
   { href: '/admin/seasons', label: 'Seasons', icon: '&#9670;', resource: 'seasons' },
   { href: '/admin/site-content', label: 'Site Content', icon: '&#9670;', resource: 'site_content' },
   { href: '/admin/settings', label: 'Settings', icon: '&#9670;', resource: 'settings' },
-  // 'audit' has no ROLE_DEFAULTS entry of its own (see RESOURCE_DEFAULT_OVERRIDES
-  // in middleware/permissions.js) — it's denied by default for everyone but
-  // super_admin until an admin explicitly grants it to a specific user via
-  // Users & Permissions, so no hardcoded role check is needed here anymore.
-  { href: '/admin/audit', label: 'Recent Actions', icon: '&#9670;', resource: 'audit' },
+  // Hardcoded to super_admin only via `roles`, not a `resource` — 'audit'
+  // isn't in PERMISSION_RESOURCES (middleware/permissions.js) at all
+  // anymore, specifically so no Users & Permissions toggle could ever grant
+  // this to an org_admin/staff member.
+  { href: '/admin/audit', label: 'Recent Actions', icon: '&#9670;', roles: ['super_admin'] },
   // Kept at the very end of the nav on purpose: Analytics is a secondary,
   // drill-down view (the primary numbers already live on Dashboard), and
   // Forms/Documents/E-Signatures (merged into one page as three tabs — see
