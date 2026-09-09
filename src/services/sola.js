@@ -62,13 +62,22 @@ async function post(fields) {
   return data;
 }
 
+// Pulls just the last 4 digits out of Sola's xMaskedCardNumber (e.g.
+// "411111xxxxxx1111" or "************1234") — this app never has the full
+// PAN to begin with (see the file-level comment), so the trailing digits
+// are all there ever is to extract.
+function last4From(maskedCardNumber) {
+  const m = String(maskedCardNumber || '').match(/(\d{4})\s*$/);
+  return m ? m[1] : null;
+}
+
 // One-shot sale (auth + capture combined — xCommand: cc:Sale). xCardNum/
 // xCVV here are the single-use TOKENS from iFields, not real card data — see
 // the file-level comment above. Returns the Sola reference number
 // (xRefNum), which is what a later refund/void must be linked to.
 export async function chargeSale({ amount, xCardNum, xCVV, invoice, description }) {
   if (isSolaMockMode()) {
-    return { approved: true, refNum: `mock_${Date.now()}`, authCode: 'MOCK00', maskedCardNumber: '************1234', mock: true };
+    return { approved: true, refNum: `mock_${Date.now()}`, authCode: 'MOCK00', last4: '1234', mock: true };
   }
   const data = await post({
     xCommand: 'cc:Sale', xAmount: amount.toFixed(2), xCardNum, xCVV,
@@ -77,7 +86,7 @@ export async function chargeSale({ amount, xCardNum, xCVV, invoice, description 
   if (data.xResult !== 'A') {
     return { approved: false, error: data.xError || data.xStatus || 'Card declined', refNum: data.xRefNum || null };
   }
-  return { approved: true, refNum: data.xRefNum, authCode: data.xAuthCode, maskedCardNumber: data.xMaskedCardNumber || null, mock: false };
+  return { approved: true, refNum: data.xRefNum, authCode: data.xAuthCode, last4: last4From(data.xMaskedCardNumber), mock: false };
 }
 
 // Refund linked to the original sale via xRefNum — amount can be the full

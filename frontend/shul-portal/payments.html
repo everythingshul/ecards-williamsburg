@@ -232,7 +232,7 @@ async function loadPayments() {
   const { payments } = await api('/shul-payments/mine');
   qs('#payments-tbody').innerHTML = payments.length ? payments.map(p => `<tr>
       <td>${p.direction === 'out' ? badge('Paid to You', 'active') : badge('You Paid', 'pending')}</td>
-      <td>${MANUAL_METHOD_LABEL[p.method] || p.method}</td><td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
+      <td>${MANUAL_METHOD_LABEL[p.method] || p.method}${p.card_last4 ? ` &bull;&bull;&bull;&bull; ${esc(p.card_last4)}` : ''}</td><td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
       <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
       <td>${fmtDateTime(p.created_at)}</td>
     </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No payments yet.</td></tr>';

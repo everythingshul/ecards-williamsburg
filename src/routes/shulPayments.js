@@ -28,7 +28,7 @@ router.get('/mine/balance', (req, res) => {
 
 router.get('/mine', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
-  const rows = db.prepare(`SELECT id, method, amount, fee_amount, net_amount, status, direction, manual_date, manual_ref, rejected_reason, created_at, approved_at
+  const rows = db.prepare(`SELECT id, method, amount, fee_amount, net_amount, status, direction, manual_date, manual_ref, rejected_reason, card_last4, created_at, approved_at
     FROM shul_payments WHERE shul_id = ? ORDER BY created_at DESC`).all(req.user.shul_id);
   res.json({ payments: rows });
 });
@@ -72,9 +72,9 @@ router.post('/mine/sola-charge', async (req, res) => {
     const result = await solaPay.chargeSale({ amount, xCardNum, xCVV, invoice: `${shul.name_en || 'shul'}-${Date.now()}`, description: 'eCards shul payment' });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
     const id = uuid();
-    db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, entered_by)
-      VALUES (?,?,?,?,'sola_card',?,0,?,'pending_approval',?,?)`)
-      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, amount, result.refNum, req.user.id);
+    db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by)
+      VALUES (?,?,?,?,'sola_card',?,0,?,'pending_approval',?,?,?)`)
+      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, amount, result.refNum, result.last4 || null, req.user.id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id), req.ip);
     res.json({ ok: true, mock: !!result.mock });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -220,6 +220,29 @@ router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res
   const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
   logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
   res.status(201).json({ ok: true, payment: row });
+});
+
+// Manually sets/corrects a payment's processing fee — added because Sola's
+// charge API (unlike Stripe's balance_transaction) doesn't hand back a
+// real per-transaction fee (see services/sola.js), so a sola_card row's
+// fee_amount otherwise just sits at 0 forever. This lets an admin type in
+// the actual fee once they know it (e.g. from a Sola statement), recomputing
+// net_amount the same way every other fee-bearing row already does
+// (amount - fee_amount). Never touched automatically by anything else —
+// this is the one place fee_amount changes after a row is first created.
+router.put('/:id/fee', requirePermission('shul_payments', 'can_edit'), (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+  if (payment.direction !== 'in') return res.status(400).json({ error: 'Fees can only be set on a payment the shul made, not a refund/payout' });
+  const feeAmount = +req.body?.fee_amount;
+  if (!(feeAmount >= 0)) return res.status(400).json({ error: 'Fee must be $0 or more' });
+  if (feeAmount > payment.amount + 1e-9) return res.status(400).json({ error: `Fee ($${feeAmount.toFixed(2)}) can't exceed the payment amount ($${payment.amount.toFixed(2)}).` });
+  const netAmount = Math.round((payment.amount - feeAmount) * 100) / 100;
+  db.prepare('UPDATE shul_payments SET fee_amount = ?, net_amount = ? WHERE id = ?').run(feeAmount, netAmount, payment.id);
+  const updated = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(payment.id);
+  logAudit(req.user.org_id, req.user.id, 'update', 'shul_payment', payment.id, payment, updated, req.ip);
+  res.json({ ok: true, payment: updated });
 });
 
 // Refunds (full or partial) a Sola card payment through the actual

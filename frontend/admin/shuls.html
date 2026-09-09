@@ -467,7 +467,7 @@ async function loadPaymentsTab(shulId, shul) {
       <h4 style="margin-bottom:4px">Payment History</h4>
       ${payments.length ? `<table><thead><tr><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>
         ${payments.map(p => `<tr>
-          <td>${p.method === 'sola_card' ? 'Card (Sola)' : p.method === 'sola_refund' ? 'Refund (Sola)' : p.method === 'stripe_card' ? 'Card (Stripe, legacy)' : (MANUAL_METHOD_LABEL[p.method] || p.method)}</td>
+          <td>${p.method === 'sola_card' ? 'Card (Sola)' : p.method === 'sola_refund' ? 'Refund (Sola)' : p.method === 'stripe_card' ? 'Card (Stripe, legacy)' : (MANUAL_METHOD_LABEL[p.method] || p.method)}${p.card_last4 ? `<div class="small-muted">&bull;&bull;&bull;&bull; ${esc(p.card_last4)}</div>` : ''}</td>
           <td>${fmtMoney(p.amount)}</td><td>${fmtMoney(p.fee_amount)}</td><td>${fmtMoney(p.net_amount)}</td>
           <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}${p.manual_ref ? `<div class="small-muted">Ref: ${esc(p.manual_ref)}</div>` : ''}${p.entered_by_first ? `<div class="small-muted">By ${esc(p.entered_by_first)} ${esc(p.entered_by_last||'')}</div>` : ''}</td>
           <td>${fmtDateTime(p.created_at)}</td>

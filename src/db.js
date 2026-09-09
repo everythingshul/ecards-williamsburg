@@ -931,6 +931,12 @@ safeAlter(`ALTER TABLE users ADD COLUMN page_size_prefs TEXT`);
 // query — same reversal-row pattern shul_allocations already uses.
 safeAlter(`ALTER TABLE shul_payments ADD COLUMN sola_ref_num TEXT`);
 safeAlter(`ALTER TABLE shul_payments ADD COLUMN refund_of TEXT REFERENCES shul_payments(id)`);
+// Last 4 digits only, from Sola's own xMaskedCardNumber on the charge
+// response — never the full PAN, which this app never has access to in the
+// first place (see services/sola.js). Purely for staff to recognize which
+// card a payment came from; not sensitive enough to need any extra
+// protection beyond the normal admin permission gate on this table.
+safeAlter(`ALTER TABLE shul_payments ADD COLUMN card_last4 TEXT`);
 
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
