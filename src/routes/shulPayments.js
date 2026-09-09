@@ -12,10 +12,10 @@ const router = Router();
 
 const MANUAL_METHODS = ['wire', 'quickpay', 'check', 'cash', 'other'];
 
-// No webhook here (unlike the old Stripe setup) — Sola's iFields + direct
-// charge is synchronous: the charge result comes back in the same HTTP
-// response as POST /mine/sola-charge below, so there's no async event to
-// wait on and nothing for Sola to call back into this app about.
+// No webhook here (unlike the old Stripe setup) — Sola's charge is
+// synchronous: the charge result comes back in the same HTTP response as
+// POST /mine/sola-charge below, so there's no async event to wait on and
+// nothing for Sola to call back into this app about.
 
 router.use(auth, requirePermission('shul_payments'));
 
@@ -33,43 +33,55 @@ router.get('/mine', (req, res) => {
   res.json({ payments: rows });
 });
 
-// Public config a shul's payment page needs before it can render Sola's
-// iFields at all: whether online card payment is enabled for them (org
-// default, shul-level override) and the iFields key (public — only lets a
-// browser tokenize card data via Sola's own hosted iframes, never charge
-// anything on its own). shuls.stripe_payments_enabled is the same tri-state
-// on/off/use-default column from the earlier Stripe setup, reused as-is —
-// it was always "is online card payment enabled for this shul", never
-// actually processor-specific despite the name (renaming the column isn't
-// worth the migration risk on a live table for what's purely an internal
-// identifier).
+// Public config a shul's payment page needs before it can render the card
+// form at all: whether online card payment is enabled for them (org
+// default, shul-level override). shuls.stripe_payments_enabled is the same
+// tri-state on/off/use-default column from the earlier Stripe setup, reused
+// as-is — it was always "is online card payment enabled for this shul",
+// never actually processor-specific despite the name (renaming the column
+// isn't worth the migration risk on a live table for what's purely an
+// internal identifier).
 router.get('/mine/config', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const shul = db.prepare('SELECT stripe_payments_enabled FROM shuls WHERE id = ?').get(req.user.shul_id);
   const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
-  res.json({ solaEnabled: enabled, ifieldsKey: solaPay.solaIfieldsKey(), mockMode: solaPay.isSolaMockMode() });
+  res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode() });
 });
 
-// xCardNum/xCVV here are the single-use tokens iFields handed the browser —
-// real card data never reaches this server (see services/sola.js). The
-// charge itself is synchronous: chargeSale() either comes back approved
-// (and this inserts the shul_payments row right here, same
-// 'pending_approval'-until-admin-approves status the old webhook-created
-// rows used) or declined (nothing is written, the shul sees why immediately
-// instead of waiting on a webhook that may never fire).
+// xCardNum/xCVV/xExp here are the REAL card number/CVV/expiration, typed
+// directly into the shul portal's own plain form fields (no iframe) and
+// POSTed here as ordinary JSON — see services/sola.js's file-level PCI
+// comment for what that means for this app's compliance scope and why it's
+// deliberate. Never log req.body on this route. The charge itself is
+// synchronous: chargeSale() either comes back approved (and this inserts
+// the shul_payments row right here, same 'pending_approval'-until-admin-
+// approves status the old webhook-created Stripe rows used) or declined
+// (nothing is written, the shul sees why immediately).
 router.post('/mine/sola-charge', async (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
   const amount = +req.body?.amount;
-  const { xCardNum, xCVV } = req.body || {};
+  // Stripped/normalized here too (not just client-side) since this is a
+  // tampered/direct-API-call concern, not a normal-use one — the shul
+  // portal's own form already sends these clean.
+  const xCardNum = String(req.body?.xCardNum || '').replace(/\s/g, '');
+  const xCVV = String(req.body?.xCVV || '').trim();
+  const xZip = String(req.body?.xZip || '').trim();
+  const xExp = String(req.body?.xExp || '').replace(/\D/g, '');
   if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   const shul = db.prepare('SELECT stripe_payments_enabled, season_id, name_en FROM shuls WHERE id = ?').get(req.user.shul_id);
   const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
   if (!enabled) return res.status(403).json({ error: 'Online card payment is not enabled for your shul. Use "Request a Different Payment Method" instead.' });
-  if (!solaPay.isSolaMockMode() && (!xCardNum || !xCVV)) return res.status(400).json({ error: 'Card details are required' });
+  if (!solaPay.isSolaMockMode()) {
+    if (!xCardNum || !xCVV) return res.status(400).json({ error: 'Card details are required' });
+    if (xExp.length !== 4) return res.status(400).json({ error: 'Expiration date is required' });
+  }
   try {
-    const result = await solaPay.chargeSale({ amount, xCardNum, xCVV, invoice: `${shul.name_en || 'shul'}-${Date.now()}`, description: 'eCards shul payment' });
+    const result = await solaPay.chargeSale({
+      amount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
+      invoice: `${shul.name_en || 'shul'}-${Date.now()}`, comments: 'eCards shul payment',
+    });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by)

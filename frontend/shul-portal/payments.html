@@ -10,14 +10,6 @@
 </head>
 <body>
 <script src="/js/app.js"></script>
-<!-- Loaded here, before the inline script below runs, so setAccount()/
-     getTokens() (called from loadPayForm()/submitPayment()) are already
-     defined by the time they're needed — a tag placed at the very end of
-     the body (where Stripe.js used to sit on this page) executes too late
-     for that, since loadPayForm() runs synchronously in the IIFE at the
-     bottom of the inline block below, well before the page finishes
-     parsing. -->
-<script src="https://cdn.cardknox.com/ifields/3.5.2607.1401/ifields.min.js"></script>
 <script>
 Auth.requireRole('shul');
 renderShell('/shul-portal/payments', `
@@ -37,21 +29,18 @@ renderShell('/shul-portal/payments', `
     <div id="sola-mock-note" style="display:none" class="small-muted">Test mode — no real charge will be made.</div>
     <div id="sola-form-wrap" style="display:none">
       <label>Amount ($)</label><input id="pay-amount" type="number" min="1" step="0.01" style="max-width:220px">
-      <div class="grid-2" style="margin-top:14px;max-width:420px">
-        <div>
-          <label>Card Number</label>
-          <iframe data-ifields-id="card-number" data-ifields-placeholder="Card Number" src="https://cdn.cardknox.com/ifields/3.5.2607.1401/ifield.htm" style="width:100%;height:38px;border:1px solid var(--border);border-radius:6px"></iframe>
-        </div>
-        <div>
-          <label>CVV</label>
-          <iframe data-ifields-id="cvv" data-ifields-placeholder="CVV" src="https://cdn.cardknox.com/ifields/3.5.2607.1401/ifield.htm" style="width:100%;height:38px;border:1px solid var(--border);border-radius:6px"></iframe>
-        </div>
+      <!-- Plain fields, not a hosted iframe — card number/CVV are typed
+           straight into this page and POSTed to this app's own backend,
+           which forwards them to Sola. See services/sola.js's file-level
+           comment for the PCI-scope tradeoff this was a deliberate choice
+           to accept (matching another everythingshul app's own Sola
+           integration), and why nothing here should ever be logged. -->
+      <label>Card Number</label><input id="pay-card-num" placeholder="1234 1234 1234 1234" maxlength="19" style="max-width:420px" autocomplete="cc-number" inputmode="numeric">
+      <div class="grid-2" style="max-width:420px">
+        <div><label>Expiration (MM/YY)</label><input id="pay-exp" placeholder="MM/YY" maxlength="5" autocomplete="cc-exp" inputmode="numeric"></div>
+        <div><label>CVV</label><input id="pay-cvv" placeholder="123" maxlength="4" autocomplete="cc-csc" inputmode="numeric"></div>
       </div>
-      <form id="sola-pay-form" style="display:none">
-        <input name="xCardNum" type="hidden" data-ifields-id="card-number-token">
-        <input name="xCVV" type="hidden" data-ifields-id="cvv-token">
-      </form>
-      <label data-ifields-id="card-data-error" style="color:var(--danger,#b91c1c);display:block;margin-top:6px"></label>
+      <label>Billing ZIP</label><input id="pay-zip" maxlength="10" style="max-width:140px" autocomplete="postal-code">
       <button class="btn btn-primary btn-sm" style="margin-top:14px" id="btn-pay" onclick="submitPayment()">Pay</button>
       <div id="pay-status" class="small-muted" style="margin-top:8px"></div>
     </div>
@@ -68,7 +57,7 @@ renderShell('/shul-portal/payments', `
     <tbody id="payments-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table></div>
 `);
 
-let payConfig = null, ifieldsReady = false;
+let payConfig = null;
 let approvedBalance = 0;
 
 async function loadBalance() {
@@ -109,49 +98,54 @@ async function loadPayForm() {
   payConfig = await api('/shul-payments/mine/config');
   if (!payConfig.solaEnabled) { qs('#sola-disabled-note').style.display = 'block'; return; }
   if (payConfig.mockMode) qs('#sola-mock-note').style.display = 'block';
-  if (!payConfig.ifieldsKey && !payConfig.mockMode) { qs('#sola-disabled-note').textContent = 'Payment is not fully configured yet — contact the office.'; qs('#sola-disabled-note').style.display = 'block'; return; }
   qs('#sola-form-wrap').style.display = 'block';
-  // Mock mode never talks to Sola's real iframes (there's nothing live to
-  // tokenize against), so it skips setAccount() entirely — submitPayment()
-  // below checks payConfig.mockMode before ever calling getTokens().
-  if (!payConfig.mockMode && window.setAccount) {
-    setAccount(payConfig.ifieldsKey, 'EverythingShul-eCards', '1.0');
-    ifieldsReady = true;
-  }
 }
+// Light formatting as the shul types — spaces every 4 digits in the card
+// number, auto-inserts the "/" in MM/YY — purely cosmetic, both are
+// stripped back to plain digits before being sent (see submitPayment).
+qs('#pay-card-num')?.addEventListener('input', () => {
+  const el = qs('#pay-card-num');
+  el.value = el.value.replace(/[^\d ]/g, '').replace(/\s/g, '').replace(/(.{4})/g, '$1 ').trim();
+});
+qs('#pay-exp')?.addEventListener('input', () => {
+  const el = qs('#pay-exp');
+  let v = el.value.replace(/\D/g, '').slice(0, 4);
+  if (v.length > 2) v = v.slice(0, 2) + '/' + v.slice(2);
+  el.value = v;
+});
 
+// Card number/CVV are read straight from this page's own inputs and POSTed
+// to this app's backend, which forwards them to Sola — no hosted iframe.
+// See services/sola.js for the PCI-scope tradeoff that was a deliberate
+// choice behind this, and why nothing here is ever logged.
 window.submitPayment = async () => {
   const amount = +qs('#pay-amount').value;
+  const xCardNum = qs('#pay-card-num').value.replace(/\s/g, '');
+  const xCVV = qs('#pay-cvv').value.trim();
+  const xExp = qs('#pay-exp').value.replace(/\D/g, '');
+  const xZip = qs('#pay-zip').value.trim();
   if (!(amount > 0)) { qs('#pay-status').textContent = 'Enter a valid amount'; return; }
+  if (!payConfig.mockMode) {
+    if (!xCardNum || !xCVV) { qs('#pay-status').textContent = 'Enter the card number and CVV'; return; }
+    if (xExp.length !== 4) { qs('#pay-status').textContent = 'Enter the card expiration date (MM/YY)'; return; }
+  }
   qs('#btn-pay').disabled = true;
   qs('#pay-status').textContent = '';
-  const charge = async (xCardNum, xCVV) => {
-    try {
-      const { mock } = await api('/shul-payments/mine/sola-charge', { method: 'POST', body: { amount, xCardNum, xCVV } });
-      qs('#pay-status').textContent = mock
-        ? 'Test mode: charge simulated. (No real Sola account configured — nothing further to confirm.)'
-        : 'Payment submitted — it will show as pending until the office approves it.';
-      loadBalance(); loadPayments();
-    } catch (err) { qs('#pay-status').textContent = err.message; }
-    qs('#btn-pay').disabled = false;
-  };
-  if (payConfig.mockMode || !ifieldsReady) { await charge(null, null); return; }
-  // getTokens() (from Sola's ifields.min.js) hands card-number/CVV single-
-  // use tokens to the hidden xCardNum/xCVV inputs in #sola-pay-form — real
-  // card data never touches this page's own JS at any point, see
-  // services/sola.js for the full reasoning.
-  getTokens(
-    () => { charge(document.querySelector('input[name=xCardNum]').value, document.querySelector('input[name=xCVV]').value); },
-    () => { qs('#pay-status').textContent = 'Could not read card details — please try again.'; qs('#btn-pay').disabled = false; },
-    30000,
-  );
+  try {
+    const { mock } = await api('/shul-payments/mine/sola-charge', { method: 'POST', body: { amount, xCardNum, xCVV, xExp, xZip } });
+    qs('#pay-status').textContent = mock
+      ? 'Test mode: charge simulated. (No real Sola account configured — nothing further to confirm.)'
+      : 'Payment submitted — it will show as pending until the office approves it.';
+    qs('#pay-card-num').value = ''; qs('#pay-cvv').value = ''; qs('#pay-exp').value = '';
+    loadBalance(); loadPayments();
+  } catch (err) { qs('#pay-status').textContent = err.message; }
+  qs('#btn-pay').disabled = false;
 };
 // The calculator's own Pay button used to prompt for just an amount and
 // charge immediately — that worked when the "amount" was all a charge
-// needed, but a real card charge now needs interactive card-number/CVV
-// entry in the iframes below, which a JS prompt() can't provide. This now
-// fills in the amount and points the shul at the actual form instead of
-// charging blind.
+// needed, but a real card charge now needs the actual card number/CVV,
+// which a JS prompt() can't reasonably collect. This now fills in the
+// amount and points the shul at the real form instead of charging blind.
 window.promptPay = () => {
   const raw = prompt('Amount to pay ($):', '');
   if (raw === null) return;

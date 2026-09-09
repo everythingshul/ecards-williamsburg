@@ -479,7 +479,7 @@ async function loadSolaEnabledDefault() {
   qs('#sola-enabled-default').checked = settings.sola_payments_enabled_default !== '0';
   qs('#sola-status-note').innerHTML = status.mockMode
     ? '<strong>MOCK MODE</strong> — SOLA_TRANSACTION_KEY isn\'t set, so no real charges happen; shuls can still test the whole payment flow.'
-    : `<span style="color:var(--success,#1b5e20)">Live</span> — connected to Sola.${status.hasIfieldsKey ? '' : ' <strong>SOLA_IFIELDS_KEY is not set</strong> — the card entry fields will not load until it is.'}`;
+    : `<span style="color:var(--success,#1b5e20)">Live</span> — connected to Sola.`;
 }
 window.saveSolaEnabledDefault = async () => {
   try { await api('/settings', { method: 'PUT', body: { sola_payments_enabled_default: qs('#sola-enabled-default').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }

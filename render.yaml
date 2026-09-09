@@ -53,8 +53,10 @@ services:
       # Sola Payments (services/sola.js) — replaces Stripe above for shul
       # card payments; the STRIPE_* vars above are no longer read by the
       # app but are left here since historical shul_payments rows still
-      # reference method='stripe_card'.
+      # reference method='stripe_card'. Card data is collected in a plain
+      # (non-iframe) form and forwarded straight to Sola's API — see
+      # sola.js's file-level comment for the PCI-scope tradeoff behind that
+      # — so there's no separate public "iFields key" needed, only the
+      # private transaction key below.
       - key: SOLA_TRANSACTION_KEY
-        sync: false
-      - key: SOLA_IFIELDS_KEY
         sync: false
