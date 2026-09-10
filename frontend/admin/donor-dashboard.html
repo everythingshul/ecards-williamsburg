@@ -33,6 +33,33 @@
   .bar-chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; position: relative; }
   .bar-chart-bar { width: 100%; max-width: 18px; border-radius: 3px 3px 0 0; cursor: pointer; }
   .bar-chart-bar:hover, .bar-chart-bar:focus { opacity: .82; outline: none; }
+
+  /* Dark "business" hero panel for the org's headline funds figures — its
+     own dark surface (this app's own brand-bg, not a foreign palette: in
+     the portal theme that's already a navy; on public pages it's espresso
+     brown), not tied to the viewer's light/dark OS preference — this is a
+     deliberate fixed-dark design choice for one section, same reasoning
+     dark-coded charts anywhere use a chosen surface rather than following
+     prefers-color-scheme. Hero figures are proportional (not tabular-nums —
+     that's for column alignment, not a single big standalone number) and
+     >=48px per the dataviz skill's hero-figure spec. */
+  .hero-funds { background: linear-gradient(135deg, var(--brand-bg), var(--brand-bg-2)); border-radius: var(--radius); box-shadow: var(--shadow); padding: 30px 24px; display: flex; gap: 8px; justify-content: center; align-items: stretch; flex-wrap: wrap; }
+  .hero-funds .stat { min-width: 160px; text-align: center; padding: 4px 24px; }
+  .hero-funds .stat .num { font-size: 48px; font-weight: 700; line-height: 1.05; color: var(--text-on-dark); }
+  .hero-funds .stat .label { font-size: 12px; color: var(--brand-gold-light); letter-spacing: .06em; text-transform: uppercase; margin-top: 8px; }
+  .hero-funds .vrule { width: 1px; background: rgba(255,255,255,.16); align-self: stretch; margin: 4px 0; }
+
+  /* Expandable list panels (Shuls, Transactions) — a native <details> for
+     free keyboard/accessibility support, styled to match this app's .card
+     look instead of the browser default disclosure triangle. */
+  .expand-panel { padding: 0; overflow: hidden; }
+  .expand-panel > summary { list-style: none; cursor: pointer; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+  .expand-panel > summary::-webkit-details-marker { display: none; }
+  .expand-panel > summary .chev { transition: transform .15s ease; color: var(--text-muted); font-weight: 400; }
+  .expand-panel[open] > summary .chev { transform: rotate(90deg); }
+  .expand-panel > summary:hover { background: var(--brand-panel-2); }
+  .expand-panel-body { border-top: 1px solid var(--border); overflow-x: auto; }
+  .expand-panel-body table td, .expand-panel-body table th { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -43,7 +70,14 @@ if (!Auth.can('donor_dashboard')) { location.href = '/admin/dashboard'; }
 renderShell('/admin/donor-dashboard', `
   <div class="flex-between"><h2>Donor's Dash</h2><select id="f-season" style="max-width:240px"><option value="">All Seasons</option></select></div>
   <p class="small-muted">A quick-read overview for donors and board members — hover any slice or bar for the exact number behind it.</p>
-  <div class="stat-grid" id="kpi-row"><div class="small-muted">Loading…</div></div>
+  <div class="hero-funds" id="hero-funds">
+    <div class="stat"><div class="num" id="hero-loaded">—</div><div class="label">Total Loaded</div></div>
+    <div class="vrule"></div>
+    <div class="stat"><div class="num" id="hero-spent">—</div><div class="label">Total Spent</div></div>
+    <div class="vrule"></div>
+    <div class="stat"><div class="num" id="hero-remaining">—</div><div class="label">Remaining</div></div>
+  </div>
+  <div class="stat-grid" id="kpi-row" style="margin-top:16px"><div class="small-muted">Loading…</div></div>
   <div class="grid-2" style="margin-top:16px;align-items:start">
     <div class="card"><h4 style="margin:0 0 10px">Applicants by Status</h4><div id="donut-applicants"></div></div>
     <div class="card"><h4 style="margin:0 0 10px">Shuls by Status</h4><div id="donut-shuls"></div></div>
@@ -53,6 +87,24 @@ renderShell('/admin/donor-dashboard', `
     <div class="card"><h4 style="margin:0 0 10px">Cards by Status</h4><div id="donut-cards"></div></div>
   </div>
   <div class="card" style="margin-top:16px"><h4 style="margin:0 0 10px">Funds — Spent vs. Remaining</h4><div id="donut-funds"></div></div>
+
+  <details class="card expand-panel" style="margin-top:16px" id="panel-shuls">
+    <summary>Shuls <span class="small-muted" id="shuls-summary-count" style="font-weight:400"></span><span class="chev">&#9656;</span></summary>
+    <div class="expand-panel-body">
+      <table><thead><tr><th>Shul</th><th>Shul (Hebrew)</th><th>Gabai</th><th>Applicants</th><th>Approved Money</th></tr></thead>
+      <tbody id="tbody-donor-shuls"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </details>
+
+  <details class="card expand-panel" style="margin-top:16px" id="panel-transactions">
+    <summary>Transactions <span class="small-muted" id="txns-summary-count" style="font-weight:400"></span><span class="chev">&#9656;</span></summary>
+    <div class="expand-panel-body">
+      <p class="small-muted" style="padding:0 24px;margin-top:14px">No applicant names or card numbers — date/time, amount, and store only.</p>
+      <table><thead><tr><th>Date &amp; Time</th><th>Type</th><th>Amount</th><th>Store</th></tr></thead>
+      <tbody id="tbody-donor-txns"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </details>
+
   <div class="card" style="margin-top:16px">
     <div class="flex-between"><h4 style="margin:0">New Applicants, Last 30 Days</h4>
       <select id="f-days" style="max-width:160px"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
@@ -179,14 +231,20 @@ async function loadDonorDashboard() {
   const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
   const { applicants, shuls, stores, cards, funds, duplicatesOpen } = await api('/donor-dashboard/stats' + qp);
 
+  // Loaded/Spent/Remaining moved out of this plain stat-grid into the
+  // prominent dark hero panel above (see #hero-funds) — the org's headline
+  // money figures get their own treatment instead of sitting flush with
+  // secondary counts like "Cards Activated".
   qs('#kpi-row').innerHTML = [
     ['Total Applicants', applicants.total],
     ['Approved Applicants', applicants.approved],
     ['Cards Activated', cards.activated],
-    ['Money Loaded', fmtMoney(funds.loaded)],
-    ['Money Spent', fmtMoney(funds.spent)],
     ['Open Duplicate Flags', duplicatesOpen],
   ].map(([label, num]) => `<div class="stat-tile"><div class="num">${typeof num === 'string' ? esc(num) : num}</div><div class="label">${esc(label)}</div></div>`).join('');
+
+  qs('#hero-loaded').textContent = fmtMoney(funds.loaded);
+  qs('#hero-spent').textContent = fmtMoney(funds.spent);
+  qs('#hero-remaining').textContent = fmtMoney(funds.remaining);
 
   // approval_status/shul status are genuine STATE (not identity), so this
   // uses the fixed status palette (good/warning/critical), not the
@@ -227,7 +285,46 @@ async function loadDailyTrend() {
   const { daily } = await api('/donor-dashboard/daily?' + params.toString());
   renderDailyBars('bar-daily', daily);
 }
-qs('#f-season').addEventListener('change', () => { loadDonorDashboard(); loadDailyTrend(); });
+
+// Both expandable panels are lazy-loaded — the transactions list especially
+// can be a few hundred rows, no reason to fetch it before a donor actually
+// opens the panel. Re-fetched on season change only if already open (see
+// the season-filter listener below), same "don't do work nobody's looking
+// at" reasoning.
+async function loadDonorShuls() {
+  const season_id = qs('#f-season').value;
+  const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
+  const { shuls } = await api('/donor-dashboard/shuls' + qp);
+  qs('#shuls-summary-count').textContent = `(${shuls.length})`;
+  qs('#tbody-donor-shuls').innerHTML = shuls.length ? shuls.map(s => `<tr>
+      <td>${esc(s.nameEn || '')}</td>
+      <td dir="rtl">${esc(s.nameHe || '')}</td>
+      <td>${esc(s.gabaiName || '')}</td>
+      <td>${s.applicantCount}</td>
+      <td>${fmtMoney(s.approvedMoney)}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No shuls yet.</td></tr>';
+}
+async function loadDonorTransactions() {
+  const season_id = qs('#f-season').value;
+  const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
+  const { transactions } = await api('/donor-dashboard/transactions' + qp);
+  qs('#txns-summary-count').textContent = `(most recent ${transactions.length})`;
+  qs('#tbody-donor-txns').innerHTML = transactions.length ? transactions.map(t => `<tr>
+      <td>${fmtDateTime(t.occurredAt)}</td>
+      <td>${esc((t.type || '').replace(/\b\w/g, c => c.toUpperCase()))}</td>
+      <td>${fmtMoney(Math.abs(t.amount))}</td>
+      <td>${t.storeName ? esc(t.storeName) : '<span class="small-muted">—</span>'}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty-state">No transactions yet.</td></tr>';
+}
+let shulsPanelLoaded = false, txnsPanelLoaded = false;
+qs('#panel-shuls').addEventListener('toggle', (e) => { if (e.target.open && !shulsPanelLoaded) { shulsPanelLoaded = true; loadDonorShuls(); } });
+qs('#panel-transactions').addEventListener('toggle', (e) => { if (e.target.open && !txnsPanelLoaded) { txnsPanelLoaded = true; loadDonorTransactions(); } });
+
+qs('#f-season').addEventListener('change', () => {
+  loadDonorDashboard(); loadDailyTrend();
+  if (shulsPanelLoaded) loadDonorShuls();
+  if (txnsPanelLoaded) loadDonorTransactions();
+});
 qs('#f-days').addEventListener('change', loadDailyTrend);
 populateSeasonFilter('f-season').then(() => { loadDonorDashboard(); loadDailyTrend(); });
 </script>

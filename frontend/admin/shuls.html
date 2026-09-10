@@ -384,6 +384,7 @@ async function openShul(id) {
       </div>
     `;
     const footer = `
+      <button class="btn btn-outline btn-sm" onclick="location.href='/admin/applicants?shul_id=${id}'">View Applicants</button>
       <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Shul', '/shuls/${id}/other-seasons', 'openShul')">View Other Seasons</button>
       <button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button>
       <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('shul','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">+ Add Task</button>

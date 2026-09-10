@@ -97,6 +97,63 @@ router.get('/stats', (req, res) => {
   res.json({ applicants, shuls, stores, cards, funds, duplicatesOpen });
 });
 
+// Per-shul rollup for the "Shuls" expandable panel — name (English +
+// Hebrew), how many of their own applicants are on file, how much money
+// has been approved for those applicants (same SUM(card_amount) formula as
+// the org-wide funds.loaded figure above, just grouped by shul), and the
+// gabai's name as the shul's own point of contact. Deliberately no
+// applicant-level detail here at all (names, contact info) — a donor sees
+// aggregate numbers per shul, never who the individual applicants are.
+router.get('/shuls', (req, res) => {
+  const orgId = req.user.org_id;
+  const seasonId = req.query.season_id || '';
+  const seasonClause = seasonId ? ' AND a.season_id = ?' : '';
+  const seasonParams = seasonId ? [seasonId] : [];
+
+  const rows = db.prepare(`
+    SELECT s.id, s.name_en, s.name_he, s.gabai_first_name, s.gabai_last_name,
+      COUNT(CASE WHEN a.approval_status != 'incomplete' THEN a.id END) applicant_count,
+      COALESCE(SUM(CASE WHEN a.approval_status = 'approved' THEN a.card_amount ELSE 0 END), 0) approved_money
+    FROM shuls s
+    LEFT JOIN applicants a ON a.shul_id = s.id${seasonClause}
+    WHERE s.org_id = ? AND s.is_locked = 0
+    GROUP BY s.id
+    ORDER BY approved_money DESC
+  `).all(...seasonParams, orgId);
+
+  res.json({ shuls: rows.map(r => ({
+    id: r.id, nameEn: r.name_en, nameHe: r.name_he,
+    gabaiName: `${r.gabai_first_name || ''} ${r.gabai_last_name || ''}`.trim(),
+    applicantCount: r.applicant_count, approvedMoney: r.approved_money,
+  })) });
+});
+
+// Every card transaction, org-wide (season-scoped via the card's own
+// season) — for the "Transactions" expandable panel. Deliberately strips
+// this down to date/time, amount, and store: no applicant name, no card
+// number (masked or otherwise), no store contact info — a donor sees that
+// money moved and where, never who spent it. Capped at the 300 most recent
+// (same "no pagination, but capped" pattern as other admin summary lists)
+// since an active season can generate thousands of these.
+router.get('/transactions', (req, res) => {
+  const orgId = req.user.org_id;
+  const seasonId = req.query.season_id || '';
+  const seasonClause = seasonId ? ' AND c.season_id = ?' : '';
+  const seasonParams = seasonId ? [seasonId] : [];
+
+  const rows = db.prepare(`
+    SELECT t.occurred_at, t.amount, t.type, t.store_name
+    FROM card_transactions t JOIN cards c ON c.id = t.card_id
+    WHERE c.org_id = ?${seasonClause}
+    ORDER BY t.occurred_at DESC
+    LIMIT 300
+  `).all(orgId, ...seasonParams);
+
+  res.json({ transactions: rows.map(r => ({
+    occurredAt: r.occurred_at, amount: r.amount, type: r.type, storeName: r.store_name || '',
+  })) });
+});
+
 router.get('/daily', (req, res) => {
   const orgId = req.user.org_id;
   const seasonId = req.query.season_id || '';

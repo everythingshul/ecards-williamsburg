@@ -823,7 +823,18 @@ attachColumnCustomizer('btn-columns', 'columns_applicants', APPLICANT_COLUMNS, D
 // call would flash every shul from every past season into the list for a
 // moment before this one replaced it (same race shape #5 fixed for load()
 // above).
-populateSeasonFilter('f-season').then(activeId => { state.season_id = activeId; populateShulFilter('f-shul', activeId); load(); });
+// Deep link from a shul's own profile ("View Applicants" button,
+// frontend/admin/shuls.html) — pre-selects that shul in the filter before
+// the first load, instead of loading everyone first and re-filtering, so
+// the table's first paint already shows just this shul.
+const deepLinkShulId = new URLSearchParams(location.search).get('shul_id');
+populateSeasonFilter('f-season').then(activeId => {
+  state.season_id = activeId;
+  populateShulFilter('f-shul', activeId).then(() => {
+    if (deepLinkShulId) { state.shul_id = deepLinkShulId; qs('#f-shul').value = deepLinkShulId; }
+    load();
+  });
+});
 
 // Deep link from the "Notify on Document Signed" admin email (?id=<applicantId>)
 // straight into that applicant's popup.
