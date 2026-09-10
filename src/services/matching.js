@@ -217,7 +217,17 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // overwritten by this reversal the way a live-read-then-subtract could.
     const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
     const newTotal = Math.max(0, Math.round((existing.remaining - retrievable) * 100) / 100);
+    // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
+    // on the actual write.
+    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} existingRemaining=$${existing.remaining} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal=$${newTotal}`);
     await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
+  } else {
+    // Diagnostic: shows WHY the disccard write was skipped entirely — the
+    // three most common reasons are no Package/Discount ID configured, this
+    // applicant has no provider_account_id, or retrievable computed as $0
+    // (the live balance check above found nothing left to claw back, so
+    // this reversal is a pure write-off — see the shortfall handling above).
+    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant?.id} SKIPPED disccard write — discountId=${discountId || '(none)'} retrievable=$${retrievable} accountId=${fundingAnchor?.provider_account_id || '(none)'}`);
   }
 
   // Split the retrievable amount between base/match in the same proportion
