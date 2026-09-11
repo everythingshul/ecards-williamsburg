@@ -27,8 +27,35 @@ export function approvedBalance(shulId) {
   return Math.round((paid - given) * 100) / 100;
 }
 
+// Total Paid: every approved payment's net amount — the shul's own real
+// money in, net of any refunds/payouts back out (those are separate rows
+// with a negative net_amount, so this unconditional SUM nets them
+// automatically) and net of processing fees. Never includes match — a
+// match is the org's money, not something the shul ever "paid." This is
+// the same `paid` figure approvedBalance() computes internally, just
+// exposed on its own for the payment-summary panels (shul portal Payments,
+// admin shul profile) that want to show it directly instead of only the
+// balance derived from it.
+export function totalPaid(shulId) {
+  return db.prepare(`SELECT COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id = ? AND status = 'approved'`).get(shulId).t;
+}
+
+// Total Distributed: every dollar actually given to an applicant through
+// this shul, INCLUDING the match (total_amount = base_amount + match_amount
+// — see services/matching.js's createAllocation) — the money that actually
+// reached an applicant's card because of this shul, not just what the shul
+// itself put in. Same unconditional-SUM reasoning as approvedBalance: a
+// reversal is a second, negative-total_amount row, so this nets a full or
+// partial undo correctly without needing a reversed_at filter.
+export function totalDistributed(shulId) {
+  return db.prepare(`SELECT COALESCE(SUM(total_amount),0) t FROM shul_allocations WHERE shul_id = ?`).get(shulId).t;
+}
+
 export function shulBalances(shulId) {
-  return { pending: pendingBalance(shulId), approved: approvedBalance(shulId) };
+  return {
+    pending: pendingBalance(shulId), approved: approvedBalance(shulId),
+    totalPaid: totalPaid(shulId), totalDistributed: totalDistributed(shulId),
+  };
 }
 
 // Bulk version of shulBalances for a list page (Admin > Shuls) — two GROUP
@@ -41,12 +68,17 @@ export function shulBalancesForIds(shulIds) {
   const pendingRows = db.prepare(`SELECT shul_id, COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id IN (${placeholders}) AND status = 'pending_approval' GROUP BY shul_id`).all(...shulIds);
   const paidRows = db.prepare(`SELECT shul_id, COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id IN (${placeholders}) AND status = 'approved' GROUP BY shul_id`).all(...shulIds);
   const givenRows = db.prepare(`SELECT shul_id, COALESCE(SUM(base_amount),0) t FROM shul_allocations WHERE shul_id IN (${placeholders}) GROUP BY shul_id`).all(...shulIds);
+  const distributedRows = db.prepare(`SELECT shul_id, COALESCE(SUM(total_amount),0) t FROM shul_allocations WHERE shul_id IN (${placeholders}) GROUP BY shul_id`).all(...shulIds);
   const pendingById = new Map(pendingRows.map(r => [r.shul_id, r.t]));
   const paidById = new Map(paidRows.map(r => [r.shul_id, r.t]));
   const givenById = new Map(givenRows.map(r => [r.shul_id, r.t]));
+  const distributedById = new Map(distributedRows.map(r => [r.shul_id, r.t]));
   for (const id of shulIds) {
     const paid = paidById.get(id) || 0, given = givenById.get(id) || 0;
-    result.set(id, { pending: pendingById.get(id) || 0, approved: Math.round((paid - given) * 100) / 100 });
+    result.set(id, {
+      pending: pendingById.get(id) || 0, approved: Math.round((paid - given) * 100) / 100,
+      totalPaid: paid, totalDistributed: distributedById.get(id) || 0,
+    });
   }
   return result;
 }

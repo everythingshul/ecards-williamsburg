@@ -15,6 +15,7 @@ Auth.requireRole('shul');
 renderShell('/shul-portal/payments', `
   <h2>Payments</h2>
   <div class="stat-grid" id="balance-stats"><div class="small-muted">Loading…</div></div>
+  <p class="small-muted" style="margin-top:6px">Total Paid is your shul's own money only (no match). Total Distributed includes the match — every dollar actually given to an applicant through your shul. Available Balance is what's left to distribute, excluding the match.</p>
 
   <div class="card" style="margin-top:16px">
     <h3 style="margin-top:0">Add Funds Calculator</h3>
@@ -65,7 +66,9 @@ async function loadBalance() {
   approvedBalance = b.approved;
   qs('#balance-stats').innerHTML = `
     <div class="card"><div class="small-muted">Pending Approval</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.pending)}</div></div>
-    <div class="card"><div class="small-muted">Approved (available to give)</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.approved)}</div></div>
+    <div class="card"><div class="small-muted">Total Paid</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.totalPaid)}</div></div>
+    <div class="card"><div class="small-muted">Total Distributed</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.totalDistributed)}</div></div>
+    <div class="card"><div class="small-muted">Available Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.approved)}</div></div>
   `;
   updateCalculator();
 }

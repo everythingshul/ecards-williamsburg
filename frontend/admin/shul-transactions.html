@@ -25,6 +25,7 @@ renderShell('/admin/shul-transactions', `
     <button class="active" id="tab-payments-btn">Payments</button>
     <button id="tab-allocations-btn">Allocations</button>
     <button id="tab-requests-btn">Payment Method Requests</button>
+    <button id="tab-shultotals-btn">Shul Totals</button>
   </div>
   <div id="panel-payments">
     <div class="card" style="margin-bottom:16px">
@@ -114,6 +115,16 @@ renderShell('/admin/shul-transactions', `
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Shul</th><th>Requested Method</th><th>Message</th><th>Date</th></tr></thead>
       <tbody id="tbody-requests"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div id="panel-shultotals" style="display:none">
+    <p class="small-muted">Every shul's lifetime Total Paid (their own money only — never the match), one row per shul, not divided by transaction.</p>
+    <div class="toolbar"><input id="st-search" placeholder="Search shuls…" style="max-width:280px"></div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr>
+        <th data-sort="nameEn">Shul</th><th data-sort="nameHe">Shul (Hebrew)</th><th data-sort="totalPaid">Total Paid</th>
+      </tr></thead>
+      <tbody id="tbody-shultotals"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
 `);
@@ -354,7 +365,7 @@ window.undoAllocation = async (id) => {
   if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
   try {
     const { reversal } = await api(`/shul-payments/allocations/${id}/reverse`, { method: 'POST' });
-    toast(reversal?.shortfall > 0 ? `Reversed — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Reversed', reversal?.shortfall > 0);
+    toast(...reversalToastMessage(reversal, 'Reversed'));
     loadAllocations();
   } catch (err) { toast(err.message, true); }
 };
@@ -391,12 +402,50 @@ async function loadRequests() {
     </tr>`).join('') : '<tr><td colspan="4" class="empty-state">No requests yet.</td></tr>';
 }
 
-const TABS = ['payments', 'allocations', 'requests'];
-const TAB_LOADERS = { payments: loadPayments, allocations: loadAllocations, requests: loadRequests };
+// Shul Totals: a small, full (unpaginated) list — one row per shul, not per
+// transaction — so search/sort happens entirely client-side against the
+// one fetched array, same pattern as the Donor Dashboard's expandable
+// panels, rather than round-tripping to the server per keystroke/sort click.
+let shulTotalsRows = [], shulTotalsSort = { key: 'totalPaid', dir: 'DESC' };
+async function loadShulTotals() {
+  const { shuls } = await api('/shul-payments/shul-totals');
+  shulTotalsRows = shuls;
+  renderShulTotals();
+}
+function renderShulTotals() {
+  const q = qs('#st-search').value.trim().toLowerCase();
+  let rows = !q ? shulTotalsRows : shulTotalsRows.filter(s =>
+    (s.nameEn || '').toLowerCase().includes(q) || (s.nameHe || '').includes(q));
+  const { key, dir } = shulTotalsSort;
+  rows = [...rows].sort((a, b) => {
+    const av = a[key], bv = b[key];
+    const cmp = typeof av === 'number' ? av - bv : String(av || '').localeCompare(String(bv || ''));
+    return dir === 'ASC' ? cmp : -cmp;
+  });
+  qs('#tbody-shultotals').innerHTML = rows.length ? rows.map(s => `<tr>
+      <td>${esc(s.nameEn || '')}</td><td dir="rtl">${esc(s.nameHe || '')}</td><td>${fmtMoney(s.totalPaid)}</td>
+    </tr>`).join('') : '<tr><td colspan="3" class="empty-state">No shuls match.</td></tr>';
+}
+qs('#st-search').addEventListener('input', renderShulTotals);
+qs('#panel-shultotals').querySelector('thead').addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  shulTotalsSort.dir = (shulTotalsSort.key === key && shulTotalsSort.dir === 'DESC') ? 'ASC' : 'DESC';
+  shulTotalsSort.key = key;
+  renderShulTotals();
+});
+
+const TABS = ['payments', 'allocations', 'requests', 'shultotals'];
+const TAB_LOADERS = { payments: loadPayments, allocations: loadAllocations, requests: loadRequests, shultotals: loadShulTotals };
 function switchTab(t) {
   activeTab = t;
   TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
   qs('#f-status').style.display = t === 'payments' ? '' : 'none';
+  // Shul Totals is a lifetime, all-seasons rollup with its own search box —
+  // the shul/season filters above the tabs don't apply to it.
+  qs('#f-shul').style.display = t === 'shultotals' ? 'none' : '';
+  qs('#f-season').style.display = t === 'shultotals' ? 'none' : '';
   TAB_LOADERS[t]();
 }
 TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switchTab(t)));

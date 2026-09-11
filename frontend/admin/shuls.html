@@ -397,7 +397,7 @@ async function openShul(id) {
       ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Set Password</button>` : ''}
       <button class="btn btn-primary btn-sm" onclick="saveShul('${id}')">Save</button>`;
     carryForwardContext = { id, name: shul.name_en, applicants };
-    openModal(shul.name_en, body, footer);
+    openModal(shul.name_en, body, footer, { maxWidth: '1150px' });
     qsa('#stabs button').forEach(b => b.addEventListener('click', () => {
       qsa('#stabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
       ['info','notes','contract','applicants','messages','history','payments'].forEach(t => qs('#tab-'+t).style.display = t === b.dataset.t ? 'block' : 'none');
@@ -446,8 +446,11 @@ async function loadPaymentsTab(shulId, shul) {
     el.innerHTML = `
       <div class="stat-grid">
         <div class="card"><div class="small-muted">Pending Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.pending)}</div></div>
-        <div class="card"><div class="small-muted">Approved Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.approved)}</div></div>
+        <div class="card"><div class="small-muted">Total Paid</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.totalPaid)}</div></div>
+        <div class="card"><div class="small-muted">Total Distributed</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.totalDistributed)}</div></div>
+        <div class="card"><div class="small-muted">Available Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(balance.approved)}</div></div>
       </div>
+      <p class="small-muted" style="margin-top:6px">Total Paid excludes matching funds (the shul's own money only). Total Distributed includes the match — every dollar actually given to an applicant through this shul. Available Balance is what's left to distribute, excluding matching funds.</p>
       <div class="divider"></div>
       <h4 style="margin-bottom:4px">Overrides</h4>
       <div class="grid-2">
@@ -533,7 +536,7 @@ window.reverseAllocation = async (allocationId, shulId) => {
   if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores this shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
   try {
     const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
-    toast(reversal?.shortfall > 0 ? `Reversed — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Reversed', reversal?.shortfall > 0);
+    toast(...reversalToastMessage(reversal, 'Reversed'));
     loadPaymentsTab(shulId, (await api(`/shuls/${shulId}`)).shul);
   } catch (err) { toast(err.message, true); }
 };

@@ -559,7 +559,7 @@ window.undoApplicantAllocation = async (allocationId, applicantId) => {
   if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
   try {
     const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
-    toast(reversal?.shortfall > 0 ? `Undone — but $${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved.` : 'Undone', reversal?.shortfall > 0);
+    toast(...reversalToastMessage(reversal, 'Undone'));
     openApplicant(applicantId);
   } catch (err) { toast(err.message, true); }
 };

@@ -209,6 +209,25 @@ function trackPageview() {
   } catch { /* analytics is best-effort, never block the page */ }
 }
 
+// Shared toast text for a shul_allocations reversal row (POST /shul-
+// payments/allocations/:id/reverse) — used by every "Undo" button across
+// the app (applicants.html, shuls.html, shul-transactions.html, audit.html)
+// instead of each duplicating the same two warning conditions. `verb` is
+// past-tense ('Undone'/'Reversed') to match each call site's own wording.
+// Two independent things can go wrong with an otherwise-successful
+// reversal: some of the money was already spent (shortfall — written off,
+// not restored to the shul), and/or the disccardpromos write itself failed
+// (giftcard_status/giftcard_error on the reversal row — see services/
+// matching.js's reverseAllocation) — the shul's own balance is still
+// correctly restored either way; only disccardpromos may be temporarily
+// out of sync until the automatic retry sweep catches it.
+function reversalToastMessage(reversal, verb) {
+  const parts = [];
+  if (reversal?.shortfall > 0) parts.push(`$${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved`);
+  if (reversal?.giftcard_status === 'failed') parts.push(`disccardpromos wasn't updated yet — it'll retry automatically (the shul's balance was still restored)`);
+  return parts.length ? [`${verb} — but ${parts.join('; ')}.`, true] : [verb, false];
+}
+
 function toast(msg, isError = false) {
   let el = document.getElementById('toast');
   if (!el) { el = document.createElement('div'); el.id = 'toast'; el.className = 'toast'; document.body.appendChild(el); }
@@ -523,13 +542,20 @@ window.submitSetPassword = async (userId) => {
 
 // wide:true widens the modal (e.g. a table with a lot of columns, like the
 // Form Builder responses view) instead of the default 900px cap.
-function openModal(title, bodyHtml, footerHtml = '', { wide = false } = {}) {
+// `wide` widens AND raises the height cap (max-width:1400px, body
+// max-height:82vh) — for a modal with genuinely tall content (e.g. a form
+// responses table). `maxWidth` widens ONLY, no height change — for a modal
+// that's cramped sideways (buttons/fields wrapping or overflowing) but
+// whose content height is already fine. Pass at most one; `maxWidth` wins
+// if both are given.
+function openModal(title, bodyHtml, footerHtml = '', { wide = false, maxWidth = null } = {}) {
   const el = document.createElement('div');
   el.className = 'modal-backdrop';
   el.id = 'ec-modal';
-  el.innerHTML = `<div class="modal"${wide ? ' style="max-width:1400px"' : ''}>
+  const widthStyle = maxWidth ? ` style="max-width:${maxWidth}"` : (wide ? ' style="max-width:1400px"' : '');
+  el.innerHTML = `<div class="modal"${widthStyle}>
     <div class="modal-header" style="cursor:move"><h3 style="margin:0" dir="auto">${esc(title)}</h3><button onclick="closeModal()">&times;</button></div>
-    <div class="modal-body" dir="auto"${wide ? ' style="max-height:82vh"' : ''}>${bodyHtml}</div>
+    <div class="modal-body" dir="auto"${wide && !maxWidth ? ' style="max-height:82vh"' : ''}>${bodyHtml}</div>
     ${footerHtml ? `<div class="modal-footer">${footerHtml}</div>` : ''}
   </div>`;
   el.addEventListener('click', (e) => { if (e.target === el) closeModal(); });

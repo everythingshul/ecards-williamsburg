@@ -2,7 +2,7 @@ import { db, uuid } from '../db.js';
 import * as giftcard from './giftcard.js';
 import { approvedBalance } from './shulBalance.js';
 import { logAudit } from './audit.js';
-import { resolveFundingAnchor } from './providerAccount.js';
+import { resolveFundingAnchor, scheduleProviderEnforceSoon } from './providerAccount.js';
 import { getApplicantBalances } from './applicantBalance.js';
 
 // Most-specific-wins, consistent with every other override chain in this
@@ -206,6 +206,21 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     }
   }
 
+  // giftcardStatus/giftcardError, not a bare try/throw — CRITICAL: unlike
+  // the old version of this function, a disccardpromos failure here must
+  // NEVER abort the reversal. The local ledger (this shul's restored
+  // balance, the applicant's reduced "Loaded" figure) is the real,
+  // money-relevant state and has to update regardless of whether the
+  // external write succeeded — same best-effort pattern createAllocation
+  // and every approval route already use. Previously this call had no
+  // try/catch at all: a disccardpromos error (a timeout, a rate limit,
+  // anything) threw straight out of this function, so the code below that
+  // inserts the reversal row and marks the original reversed_at was never
+  // reached — the shul's money never came back and the applicant's card
+  // balance never dropped on either side, even though the admin had just
+  // clicked "Undo." That silent, all-or-nothing failure was the actual bug
+  // behind "Undo Payment doesn't remove the money."
+  let giftcardStatus = 'ok', giftcardError = null;
   if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
     // Same reasoning as createAllocation above — the live GET just above
     // this is only for the retrievable/shortfall spend-protection check
@@ -220,8 +235,17 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
     // on the actual write.
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} existingRemaining=$${existing.remaining} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal=$${newTotal}`);
-    await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
+    try {
+      await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
+    } catch (e) {
+      giftcardStatus = 'failed';
+      giftcardError = e.message;
+      console.error('[matching] reverseAllocation disccardpromos write failed (local reversal still proceeds):', e.message);
+      scheduleProviderEnforceSoon(orgId, `reversal fund-write failed for allocation ${original.id}`);
+    }
   } else {
+    giftcardStatus = discountId ? 'ok' : 'failed';
+    giftcardError = discountId ? null : 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
     // Diagnostic: shows WHY the disccard write was skipped entirely — the
     // three most common reasons are no Package/Discount ID configured, this
     // applicant has no provider_account_id, or retrievable computed as $0
@@ -239,9 +263,9 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   const reversalBase = Math.round((retrievable - reversalMatch) * 100) / 100;
 
   const id = uuid();
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, reversal_of)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, discountId ? 'ok' : 'failed', original.id);
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, giftcardStatus, giftcardError, original.id);
 
   db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);

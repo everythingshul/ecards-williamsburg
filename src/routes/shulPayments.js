@@ -210,6 +210,27 @@ router.post('/mine/allocate', async (req, res) => {
 
 // ============================= ADMIN =============================
 
+// One row per shul with just their lifetime Total Paid (net of refunds/
+// payouts/fees, same figure as shulBalance.js's totalPaid — never
+// including match, since that's never money the shul paid) — for the
+// Shul Transactions "Shul Totals" tab. Deliberately NOT per-transaction
+// and NOT paginated: this is a small, full list (one row per shul, not per
+// payment) meant to be searched/sorted entirely client-side, same pattern
+// as GET /shuls/all-list.
+router.get('/shul-totals', (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const rows = db.prepare(`
+    SELECT s.id, s.name_en, s.name_he,
+      COALESCE(SUM(CASE WHEN p.status = 'approved' THEN p.net_amount ELSE 0 END), 0) total_paid
+    FROM shuls s
+    LEFT JOIN shul_payments p ON p.shul_id = s.id
+    WHERE s.org_id = ? AND s.is_locked = 0
+    GROUP BY s.id
+    ORDER BY total_paid DESC
+  `).all(req.user.org_id);
+  res.json({ shuls: rows.map(r => ({ id: r.id, nameEn: r.name_en, nameHe: r.name_he, totalPaid: r.total_paid })) });
+});
+
 router.get('/', (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { shul_id, status, season_id } = req.query;
