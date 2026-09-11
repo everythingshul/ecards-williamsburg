@@ -33,14 +33,26 @@
 // no confirmed "assign/activate a card to an applicant" endpoint at all —
 // every real endpoint we've seen operates on an existing customer (who
 // already carries `active_cards`), not on a card being provisioned fresh.
-// assignCard/activateCard/deactivateCard/getCardStatus/listTransactions
-// below are the OLD unverified best-guess placeholder (paths like
-// /cards/assign, /cards/:id/activate) and almost certainly do NOT match the
-// real API — real confirmed paths all live under /v1/ or /org/, never
-// /cards/. They're left in place (and still used by routes/cards.js /
-// services/cardSync.js) because pulling them without a confirmed
-// replacement would break the app; treat them as known-wrong pending real
-// docs for card provisioning/activation and a transaction-history endpoint.
+// assignCard/activateCard/deactivateCard/getCardStatus below are the OLD
+// unverified best-guess placeholder (paths like /cards/assign,
+// /cards/:id/activate) and almost certainly do NOT match the real API —
+// real confirmed paths all live under /v1/ or /org/, never /cards/. They're
+// left in place (still used by routes/cards.js for card assign/activate/
+// deactivate) because pulling them without a confirmed replacement would
+// break the app; treat them as known-wrong pending real docs.
+//
+// listTransactions/listAllTransactions below (the /cards/:id/transactions
+// and /transactions paths) are the SAME kind of unverified guess, and were
+// confirmed wrong in practice (2026-09) — they were the actual cause of
+// real card spend never showing up anywhere in this app: every real card
+// this app discovers has no provider_card_id at all (disccardpromos has no
+// stable per-card id), so the only caller that ever invoked them,
+// services/cardSync.js's syncOneCard, could never actually reach a real
+// card. Transaction sync now goes entirely through getCustomerByExternalId
+// (transactions=true) below, a CONFIRMED endpoint — see cardSync.js's
+// syncApplicantCards. listTransactions/listAllTransactions are no longer
+// called anywhere; kept only as a reference for the old (wrong) guess in
+// case disccardpromos ever confirms a real per-card endpoint later.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from 'crypto';

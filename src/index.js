@@ -217,11 +217,21 @@ const REMINDER_INTERVAL_MS = 30 * 60 * 1000;
 setInterval(() => { sendDueTaskReminders().catch(e => console.error('[reminders] check failed', e.message)); }, REMINDER_INTERVAL_MS);
 setTimeout(() => { sendDueTaskReminders().catch(e => console.error('[reminders] check failed', e.message)); }, 15 * 1000);
 
-// Automatic disccardpromos sync — pulls transactions for every active card so
-// store spend, balances, and the transaction ledger stay live without an
-// admin manually clicking "Sync Now" on each card. No-ops instantly while in
+// Automatic disccardpromos sync — pulls transactions for every applicant's
+// cards so store spend, balances, and the transaction ledger stay live
+// without an admin manually clicking "Sync Now". No-ops instantly while in
 // mock mode (no credentials configured yet).
-const CARD_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+//
+// 60s, not 15 minutes — as close to "the moment it happens" as plain
+// polling gets. A REAL instant push (disccardpromos calling this app the
+// moment a purchase posts) would need them to support outbound webhooks,
+// which isn't confirmed anywhere in their docs we've seen; worth asking
+// their team directly. Until/unless that exists, this interval is the
+// actual lever for "how stale can a transaction be" — lower it further if
+// disccardpromos' rate limits allow it for this org's card/applicant
+// volume (each sweep is one API call per applicant with an account, not
+// per card).
+const CARD_SYNC_INTERVAL_MS = 60 * 1000;
 setInterval(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, CARD_SYNC_INTERVAL_MS);
 setTimeout(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, 20 * 1000);
 

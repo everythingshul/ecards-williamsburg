@@ -5,20 +5,35 @@ import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
 
-// Pulls new transactions for a single card from disccardpromos and inserts
-// them into the ledger, resolving each to a known store where possible.
-// Shared by the manual per-card "Sync Now" button and the automatic
-// background sweep below.
+// See syncApplicantCards' diagnostic comment below — logged at most once
+// per process lifetime, not per applicant/sweep.
+let loggedTransactionShapeOnce = false;
+
+// FIXED (2026-09) — root cause of "transactions never show up": this used
+// to call giftcard.js's listTransactions(), which hits /cards/:id/transactions
+// — one of the OLD unverified best-guess paths documented at the top of
+// giftcard.js ("almost certainly do NOT match the real API — real confirmed
+// paths all live under /v1/ or /org/, never /cards/"). Worse, it only ever
+// ran for a card whose provider_card_id was set — but every real card this
+// app discovers (see syncApplicantCards below) is inserted with
+// provider_card_id = NULL, since disccardpromos has no stable per-card id
+// at all. So the automatic sweep's old top-level query
+// (`... AND provider_card_id IS NOT NULL`) matched zero real cards, and
+// even a manual per-card "Sync Now" click hit an endpoint that likely
+// doesn't exist — nothing about real spend could ever have synced.
+//
+// The one CONFIRMED way to read a customer's activity is the Customer API
+// itself (giftcard.js's getCustomerByExternalId, with transactions=true) —
+// already used, with balances=true, to discover cards. syncApplicantCards
+// below now pulls transactions in that SAME call and matches each one back
+// to a local card by masked number (the only identifier both sides agree
+// on) — a single card's "Sync Now" is really "sync this card's applicant"
+// (every card they hold syncs together), same as the automatic sweep.
 export async function syncOneCard(orgId, card) {
-  const txns = await giftcard.listTransactions(card.season_id, { providerCardId: card.provider_card_id, since: card.last_synced_at });
-  const insert = db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`);
-  for (const t of txns) {
-    const storeName = t.store_name || t.merchant || '';
-    insert.run(uuid(), card.id, t.id || t.transaction_id, t.type || (t.amount < 0 ? 'purchase' : 'refund'), t.amount, t.balance_after ?? null, storeName, resolveStoreId(orgId, storeName), t.occurred_at || t.date, JSON.stringify(t));
-  }
-  db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE id = ?`).run(card.id);
-  return txns.length;
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(card.applicant_id);
+  if (!applicant) return 0;
+  const { transactionsSynced } = await syncApplicantCards(orgId, applicant);
+  return transactionsSynced;
 }
 
 // Locks an applicant's disccardpromos customer — used when an applicant is
@@ -71,26 +86,32 @@ export async function lockApplicantCards(orgId, applicant) {
 }
 
 // Reconciles a customer's actual active_cards (from disccardpromos' real,
-// confirmed Customer API) against our local cards table in both directions:
+// confirmed Customer API) against our local cards table in both directions,
+// AND syncs their transactions — all from the SAME customer fetch, one API
+// call per applicant instead of a separate round-trip per concern:
 //  - discovers cards activated directly on disccardpromos' own dashboard,
 //    which this app would otherwise never learn about since they never went
 //    through routes/cards.js's /assign.
 //  - marks locally assigned/activated cards as removed once their masked
 //    number is no longer in the customer's active_cards, so a card
 //    unassigned/removed on disccardpromos' side stops showing as live here.
-// Matches by masked number: disccardpromos has no stable per-card id at all
-// (confirmed — see giftcard.js's linkCardToCustomer), so masked number is
-// the only thing both sides agree on. Returns { discovered, removed } counts.
+//  - inserts any new card_transactions rows (purchases/refunds/etc — see
+//    syncOneCard's comment above for why this replaced the old, broken
+//    per-card sync path).
+// Card matching is by masked number throughout: disccardpromos has no
+// stable per-card id at all (confirmed — see giftcard.js's
+// linkCardToCustomer), so masked number is the only thing both sides agree
+// on. Returns { discovered, removed, transactionsSynced }.
 export async function syncApplicantCards(orgId, applicant) {
-  if (!applicant.provider_account_id || applicant.provider_exempt) return { discovered: 0, removed: 0 };
+  if (!applicant.provider_account_id || applicant.provider_exempt) return { discovered: 0, removed: 0, transactionsSynced: 0 };
   let customer;
   try {
-    customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true });
+    customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true, transactions: true });
   } catch (e) {
-    console.error('[cardSync] failed to fetch customer for card discovery, applicant', applicant.id, ':', e.message);
-    return { discovered: 0, removed: 0 };
+    console.error('[cardSync] failed to fetch customer for card/transaction sync, applicant', applicant.id, ':', e.message);
+    return { discovered: 0, removed: 0, transactionsSynced: 0 };
   }
-  if (!customer) return { discovered: 0, removed: 0 };
+  if (!customer) return { discovered: 0, removed: 0, transactionsSynced: 0 };
   const remoteMasked = new Set(Array.isArray(customer.active_cards) ? customer.active_cards : []);
   const localActive = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ? AND status IN ('assigned','activated')`).all(applicant.id);
   const known = new Set(localActive.map(c => c.card_number_masked));
@@ -120,7 +141,57 @@ export async function syncApplicantCards(orgId, applicant) {
     deactivate.run(local.id);
     removed++;
   }
-  return { discovered, removed };
+
+  // Transactions — every card this applicant has EVER held (not just the
+  // currently-active ones above), so a purchase on a since-deactivated card
+  // still lands in the ledger.
+  const rawTxns = Array.isArray(customer.transactions) ? customer.transactions
+    : Array.isArray(customer.transaction_history) ? customer.transaction_history : [];
+  // Diagnostic, logged ONCE per process lifetime (not per applicant/sweep —
+  // this would otherwise fire every minute for every applicant with no new
+  // activity, which is most applicants most of the time): shows the real
+  // customer response's top-level keys the first time transactions=true
+  // comes back with nothing recognized as an array of transactions. If
+  // disccardpromos' real field name isn't "transactions" or
+  // "transaction_history" (both guesses — see the comment above), this is
+  // the fastest way to find the real one instead of another guess.
+  if (!rawTxns.length && customer && typeof customer === 'object' && !loggedTransactionShapeOnce) {
+    loggedTransactionShapeOnce = true;
+    console.log(`[cardSync] diagnostic (logged once): customer response's top-level keys when no transactions array was recognized: ${Object.keys(customer).join(', ')}`);
+  }
+  let transactionsSynced = 0;
+  if (rawTxns.length) {
+    const allLocal = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ?`).all(applicant.id);
+    const cardIdByMasked = new Map(allLocal.map(c => [c.card_number_masked, c.id]));
+    // The overwhelmingly common case is one card per applicant — if that's
+    // true here, attribute every transaction to it even if the per-
+    // transaction card-identifying field turns out to use a name this app
+    // doesn't recognize yet (transactions=true's exact response shape isn't
+    // documented beyond the flag's existence — field names below are a
+    // best guess, matched defensively like every other disccardpromos
+    // response in this file). Only genuinely ambiguous (multi-card,
+    // unmatched) transactions get skipped, and logged rather than silently
+    // dropped, so a real shape mismatch is at least visible in server logs
+    // instead of reproducing the exact "transactions don't show up" bug
+    // this change fixes.
+    const singleCardId = allLocal.length === 1 ? allLocal[0].id : null;
+    const insertTxn = db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    for (const t of rawTxns) {
+      const masked = t.card_number || t.masked_card_number || t.card || t.card_number_masked || t.card_last4;
+      const cardId = (masked && cardIdByMasked.get(masked)) || singleCardId;
+      if (!cardId) {
+        console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no recognized card field) — raw: ${JSON.stringify(t).slice(0, 300)}`);
+        continue;
+      }
+      const storeName = t.store_name || t.merchant || '';
+      const result = insertTxn.run(uuid(), cardId, t.id || t.transaction_id, t.type || (t.amount < 0 ? 'purchase' : 'refund'), t.amount, t.balance_after ?? null, storeName, resolveStoreId(orgId, storeName), t.occurred_at || t.date, JSON.stringify(t));
+      if (result.changes) transactionsSynced++;
+    }
+    db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE applicant_id = ?`).run(applicant.id);
+  }
+
+  return { discovered, removed, transactionsSynced };
 }
 
 // Compares our own ledger (approval-time card_amount + every shul_allocation
@@ -191,26 +262,28 @@ async function notifyReconciliationMismatch(orgId, applicant, flag) {
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-// Sweeps every assigned/activated card in an org, and discovers any card
-// activated straight on disccardpromos' own dashboard for every applicant
-// who already has a customer there. Used by the automatic background
-// interval (see index.js) and the "Sync All" button — this is what makes
-// card activity/store spend "live" without someone having to click into
-// each card individually. No-ops instantly per card in mock mode.
+// Sweeps every applicant with a disccardpromos account — cards AND
+// transactions together (one customer fetch each, see syncApplicantCards
+// above) — used by the automatic background interval (see index.js) and
+// the "Sync All" button. This is what makes card activity/store spend
+// "live" without someone having to click into each card individually.
+// No-ops instantly per applicant in mock mode.
+//
+// Used to run a SEPARATE loop first over `cards WHERE ... provider_card_id
+// IS NOT NULL` for transactions — removed because that query matched zero
+// real cards (provider_card_id is never set for a card discovered the
+// normal way) and its own per-card sync hit an unconfirmed, likely-wrong
+// endpoint anyway; see syncOneCard's comment for the full story. Every
+// card and every transaction now comes from the one per-applicant
+// customer fetch below.
 export async function syncAllCards(orgId) {
-  const cards = db.prepare(`SELECT * FROM cards WHERE org_id = ? AND status IN ('assigned','activated') AND provider_card_id IS NOT NULL`).all(orgId);
-  let totalSynced = 0;
-  for (const card of cards) {
-    try { totalSynced += await syncOneCard(orgId, card); }
-    catch (e) { console.error('[cardSync] failed for card', card.id, e.message); }
-  }
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0`).all(orgId);
-  let cardsDiscovered = 0, cardsRemoved = 0;
+  let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0;
   for (const applicant of applicants) {
     try {
-      const { discovered, removed } = await syncApplicantCards(orgId, applicant);
-      cardsDiscovered += discovered; cardsRemoved += removed;
-    } catch (e) { console.error('[cardSync] card discovery failed for applicant', applicant.id, e.message); }
+      const { discovered, removed, transactionsSynced } = await syncApplicantCards(orgId, applicant);
+      cardsDiscovered += discovered; cardsRemoved += removed; totalSynced += transactionsSynced;
+    } catch (e) { console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
   }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares
@@ -224,5 +297,10 @@ export async function syncAllCards(orgId) {
       if (flag) reconciliationFlags++;
     } catch (e) { console.error('[cardSync] balance reconciliation failed for applicant', anchor.id, e.message); }
   }
-  return { cardsChecked: cards.length, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags };
+  // cardsChecked is shown to the admin as "Checked N card(s)" (see
+  // frontend/admin/cards.html) — computed separately from the sync loop
+  // above (which iterates applicants, not cards) purely so that toast still
+  // reads as a card count.
+  const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
+  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags };
 }
