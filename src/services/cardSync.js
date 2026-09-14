@@ -102,14 +102,26 @@ export async function lockApplicantCards(orgId, applicant) {
 // stable per-card id at all (confirmed — see giftcard.js's
 // linkCardToCustomer), so masked number is the only thing both sides agree
 // on. Returns { discovered, removed, transactionsSynced }.
-export async function syncApplicantCards(orgId, applicant) {
+//
+// customerOverride: pass an already-fetched customer object (or explicit
+// `null` for "confirmed absent, disccardpromos has no such customer right
+// now") to skip this function's own live GET — see syncAllCards below,
+// which builds ONE bulk customer pull per sweep (giftcard.buildCustomerIndex
+// with balances+transactions) and hands each applicant's own record in
+// directly, instead of every applicant triggering its own round trip.
+// Leave undefined (the default) for the old one-call-per-applicant behavior
+// — used by syncOneCard's manual "Sync Now" click, where there's no batch
+// to amortize a bulk pull across.
+export async function syncApplicantCards(orgId, applicant, customerOverride) {
   if (!applicant.provider_account_id || applicant.provider_exempt) return { discovered: 0, removed: 0, transactionsSynced: 0 };
-  let customer;
-  try {
-    customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true, transactions: true });
-  } catch (e) {
-    console.error('[cardSync] failed to fetch customer for card/transaction sync, applicant', applicant.id, ':', e.message);
-    return { discovered: 0, removed: 0, transactionsSynced: 0 };
+  let customer = customerOverride;
+  if (customer === undefined) {
+    try {
+      customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true, transactions: true });
+    } catch (e) {
+      console.error('[cardSync] failed to fetch customer for card/transaction sync, applicant', applicant.id, ':', e.message);
+      return { discovered: 0, removed: 0, transactionsSynced: 0 };
+    }
   }
   if (!customer) return { discovered: 0, removed: 0, transactionsSynced: 0 };
   const remoteMasked = new Set(Array.isArray(customer.active_cards) ? customer.active_cards : []);
@@ -209,16 +221,23 @@ export async function syncApplicantCards(orgId, applicant) {
 // not on every sweep) and opens a card_reconciliation_flags row; a flag
 // that's no longer reproducing (the numbers now agree, within a cent) is
 // auto-resolved on the next sweep rather than needing a manual dismiss.
-export async function reconcileApplicantBalance(orgId, applicant) {
+//
+// customerOverride: same convention as syncApplicantCards above — pass an
+// already-fetched customer (or explicit null) to skip this function's own
+// live GET when the caller already has one bulk pull's worth of data in
+// hand (see syncAllCards). undefined falls back to the old per-anchor call.
+export async function reconcileApplicantBalance(orgId, applicant, customerOverride) {
   if (!applicant.provider_account_id || applicant.provider_exempt) return null;
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   if (!discountId) return null;
-  let customer;
-  try {
-    customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true });
-  } catch (e) {
-    console.error('[cardSync] reconciliation fetch failed for applicant', applicant.id, ':', e.message);
-    return null;
+  let customer = customerOverride;
+  if (customer === undefined) {
+    try {
+      customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true });
+    } catch (e) {
+      console.error('[cardSync] reconciliation fetch failed for applicant', applicant.id, ':', e.message);
+      return null;
+    }
   }
   if (!customer) return null;
   const pkg = (customer.packages || []).find(p => String(p.id) === String(discountId));
@@ -262,26 +281,53 @@ async function notifyReconciliationMismatch(orgId, applicant, flag) {
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-// Sweeps every applicant with a disccardpromos account — cards AND
-// transactions together (one customer fetch each, see syncApplicantCards
-// above) — used by the automatic background interval (see index.js) and
-// the "Sync All" button. This is what makes card activity/store spend
-// "live" without someone having to click into each card individually.
-// No-ops instantly per applicant in mock mode.
+// Sweeps every applicant with a disccardpromos account — cards, transactions,
+// AND balance reconciliation together — used by the automatic background
+// interval (see index.js, every 60s) and the "Sync All" button. This is
+// what makes card activity/store spend "live" without someone having to
+// click into each card individually. No-ops instantly per applicant in mock
+// mode.
 //
-// Used to run a SEPARATE loop first over `cards WHERE ... provider_card_id
-// IS NOT NULL` for transactions — removed because that query matched zero
-// real cards (provider_card_id is never set for a card discovered the
-// normal way) and its own per-card sync hit an unconfirmed, likely-wrong
-// endpoint anyway; see syncOneCard's comment for the full story. Every
-// card and every transaction now comes from the one per-applicant
-// customer fetch below.
+// FIXED (2026-09): used to make one live getCustomerByExternalId call per
+// applicant for card/transaction sync, THEN a second one per merge-group
+// anchor for balance reconciliation — up to 2N live calls every 60 seconds
+// for N applicants. disccardpromos' own docs (confirmed directly, not
+// inferred) show `balances` and `transactions` are both optional query
+// params on the BULK list endpoint too (giftcard.js's listAllCustomers/
+// buildCustomerIndex), not just the single-customer one — so this now pulls
+// ONE bulk index per season touched by this sweep, with both flags on, and
+// hands each applicant's own record out of that same index to both
+// syncApplicantCards and reconcileApplicantBalance. A season whose index
+// pull genuinely doesn't contain a given external_id (never created, or the
+// bulk pull is momentarily behind) is treated as "no customer" for that
+// applicant THIS sweep — never falls back to an extra live call, or every
+// sweep would regress right back into one call per applicant, the exact
+// thing this eliminates; it'll show up next time the bulk pull catches up
+// (well within the 60-second cadence). An index build that fails outright
+// (network error, or mock mode) IS a safe per-season fallback to the old
+// one-call-per-applicant path, same "degrade to live lookups" convention
+// used everywhere else this file's index pattern is used.
 export async function syncAllCards(orgId) {
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0`).all(orgId);
+  const seasonIds = [...new Set(applicants.map(a => a.season_id))];
+  const indexBySeason = new Map();
+  for (const seasonId of seasonIds) {
+    indexBySeason.set(seasonId, giftcard.isMockMode(seasonId) ? null : await giftcard.buildCustomerIndex(seasonId, { balances: true, transactions: true }));
+  }
+  // undefined (index missing/failed for this season) preserves
+  // syncApplicantCards'/reconcileApplicantBalance's own live-fetch fallback;
+  // a real index in hand always resolves to either the matched customer or
+  // an explicit null ("confirmed absent this sweep") — see the function
+  // comment above for why a miss never triggers an extra live call.
+  const customerFor = (a) => {
+    const index = indexBySeason.get(a.season_id);
+    return index ? (index.byExt.get(String(a.external_id)) ?? null) : undefined;
+  };
+
   let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0;
   for (const applicant of applicants) {
     try {
-      const { discovered, removed, transactionsSynced } = await syncApplicantCards(orgId, applicant);
+      const { discovered, removed, transactionsSynced } = await syncApplicantCards(orgId, applicant, customerFor(applicant));
       cardsDiscovered += discovered; cardsRemoved += removed; totalSynced += transactionsSynced;
     } catch (e) { console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
   }
@@ -293,7 +339,7 @@ export async function syncAllCards(orgId) {
   const anchors = applicants.filter(a => !a.merge_group_id || a.merge_group_id === a.id);
   for (const anchor of anchors) {
     try {
-      const flag = await reconcileApplicantBalance(orgId, anchor);
+      const flag = await reconcileApplicantBalance(orgId, anchor, customerFor(anchor));
       if (flag) reconciliationFlags++;
     } catch (e) { console.error('[cardSync] balance reconciliation failed for applicant', anchor.id, e.message); }
   }

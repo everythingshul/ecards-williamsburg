@@ -501,11 +501,20 @@ export async function deleteCustomer(seasonId, customerId) {
 // ignored or capped lower by disccardpromos, and their real max page size
 // / pagination shape needs to come from their team directly — this is the
 // concrete evidence to bring them.
-export async function listAllCustomers(seasonId) {
+// balances/transactions: CONFIRMED (2026-09) against disccardpromos' real
+// OpenAPI docs — both are optional query params on THIS bulk list endpoint,
+// same names/semantics as getCustomerByExternalId's below. Before this was
+// confirmed, transaction sync (services/cardSync.js) assumed it needed one
+// live per-customer GET per applicant every sweep, since the bulk list was
+// believed to only cover balances — that assumption was wrong; a single
+// bulk pull with transactions=true covers every customer's transactions in
+// one paginated call, same as balances.
+export async function listAllCustomers(seasonId, { balances = false, transactions = false } = {}) {
   if (isMockMode(seasonId)) return [];
   const cfg = resolveConfig(seasonId);
   let results = [];
-  let path = '/org/customers/?page_size=500';
+  const qs = [balances && 'balances=true', transactions && 'transactions=true'].filter(Boolean).join('&');
+  let path = `/org/customers/?page_size=500${qs ? `&${qs}` : ''}`;
   let reportedTotal = null;
   let pageCount = 0;
   while (path) {
@@ -531,25 +540,26 @@ export async function listAllCustomers(seasonId) {
 
 // Wraps ONE listAllCustomers() pull into lookup maps, for any caller that
 // would otherwise do a live per-customer GET for every applicant in a batch
-// (mass-approve, runProviderEnforce's per-applicant loop, runProviderAudit).
-// disccardpromos' bulk list already returns each customer's active_cards
-// and packages (balance data) same as the single-customer endpoint does with
-// ?balances=true — so a caller that only needs "does this external_id
-// already have an account, and if so what does it look like" can read that
-// straight out of this one pull instead of asking disccardpromos again per
-// record. NOTE: the bulk list does NOT include transaction history (that's
-// still only available per-customer via ?transactions=true) — this index is
-// only a substitute for balance/existence lookups, never for
-// services/cardSync.js's transaction sync, which must keep making its own
-// per-applicant call.
+// (mass-approve, runProviderEnforce's per-applicant loop, runProviderAudit,
+// AND services/cardSync.js's automatic sweep — see its own comment on why
+// that one now passes { balances: true, transactions: true }).
+// CONFIRMED (2026-09) against disccardpromos' real docs: balances AND
+// transactions are both optional query params on the BULK list endpoint
+// too, not just the single-customer one — a caller that used to believe it
+// needed one live per-customer GET per applicant (transaction sync
+// included) can get everyone's data in this one paginated pull instead.
+// Pass { balances, transactions } through only when the caller actually
+// needs that heavier payload — existence/is_active-only callers
+// (runProviderEnforce, runProviderAudit) leave both off, same lighter
+// request as before this was confirmed.
 // Returns null (not an empty index) on mock mode or a failed pull, so a
 // caller can tell "nothing to reuse, fall back to the old per-record path"
 // apart from "pulled successfully, and there's genuinely nothing in it".
-export async function buildCustomerIndex(seasonId) {
+export async function buildCustomerIndex(seasonId, opts = {}) {
   if (isMockMode(seasonId)) return null;
   let list;
   try {
-    list = await listAllCustomers(seasonId);
+    list = await listAllCustomers(seasonId, opts);
   } catch (e) {
     console.error('[giftcard] buildCustomerIndex: listAllCustomers failed, callers will fall back to per-record lookups:', e.message);
     return null;
