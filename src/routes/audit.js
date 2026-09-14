@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { auth, requireRole } from '../middleware/auth.js';
 import { getRecentActions, undoAuditEntry } from '../services/audit.js';
+import { getApiCallLogs } from '../services/apiCallLog.js';
 
 const router = Router();
 // This is a full activity feed across every entity in the org (every
@@ -15,6 +16,14 @@ router.use(auth, requireRole('super_admin'));
 router.get('/recent', (req, res) => {
   const hours = Math.min(168, Math.max(1, +req.query.hours || 48));
   res.json({ actions: getRecentActions(req.user.org_id, hours) });
+});
+
+// Outbound provider-call trace (disccardpromos/email/sms) — see
+// services/apiCallLog.js. Distinct from GET /api/logs (routes/apiLogs.js),
+// which tracks the opposite direction (requests THIS app received).
+router.get('/provider-calls', (req, res) => {
+  const { provider, success, search, hours, limit } = req.query;
+  res.json({ logs: getApiCallLogs(req.user.org_id, { provider, success, search, hours, limit }) });
 });
 
 router.post('/:id/undo', (req, res) => {

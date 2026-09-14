@@ -21,6 +21,7 @@ import { syncInboundSms, getOwnSmsNumber } from './services/sms.js';
 import { runBackup } from './services/backup.js';
 import { db, DEFAULT_ORG_ID } from './db.js';
 import { requestLog, startRequestLogPruning } from './middleware/requestLog.js';
+import { startProviderCallLogPruning } from './services/apiCallLog.js';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -247,6 +248,10 @@ startProviderEnforceScheduler(DEFAULT_ORG_ID);
 // Prunes api_request_logs (see middleware/requestLog.js) daily — one row
 // per API request grows fast, so nothing keeps it forever.
 startRequestLogPruning(db);
+// Same pruning rhythm for provider_call_log (see services/apiCallLog.js) —
+// the outbound-call counterpart, growing just as fast once the 60-second
+// card-sync sweep and every mail/SMS send are all logging into it.
+startProviderCallLogPruning();
 
 // Automatic inbound-SMS sync — SimpleSender doesn't support webhooks yet, so
 // this polls GET /v1/messages for new incoming replies instead. No-ops

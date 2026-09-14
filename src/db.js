@@ -562,6 +562,34 @@ CREATE TABLE IF NOT EXISTS api_request_logs (
 CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_api_request_logs_org ON api_request_logs(org_id, created_at);
 
+-- The other direction from api_request_logs above: every outbound HTTP
+-- request THIS app made to a third-party provider (disccardpromos, Brevo
+-- email, SMS) — one row per real call, so "did the batching fix actually
+-- cut call volume" or "why did this send fail" are answerable from the
+-- admin UI instead of needing server console access (which the deployed
+-- environment doesn't give admins). request_summary/response_summary are
+-- deliberately short, secret-free descriptions (never raw card numbers,
+-- API keys, or full PII payloads) — see services/apiCallLog.js's clip().
+CREATE TABLE IF NOT EXISTS provider_call_log (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  provider TEXT NOT NULL, -- 'disccardpromos' | 'email' | 'sms'
+  method TEXT NOT NULL,
+  endpoint TEXT NOT NULL,
+  request_summary TEXT,
+  status_code INTEGER,
+  success INTEGER NOT NULL DEFAULT 0,
+  response_summary TEXT,
+  error_message TEXT,
+  duration_ms INTEGER,
+  related_entity_type TEXT,
+  related_entity_id TEXT,
+  season_id TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_provider_call_log_created_at ON provider_call_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_provider_call_log_org ON provider_call_log(org_id, created_at);
+
 CREATE TABLE IF NOT EXISTS settings (
   org_id TEXT NOT NULL,
   key TEXT NOT NULL,

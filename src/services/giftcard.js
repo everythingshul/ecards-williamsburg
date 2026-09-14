@@ -56,7 +56,8 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from 'crypto';
-import { db } from '../db.js';
+import { db, DEFAULT_ORG_ID } from '../db.js';
+import { logApiCall } from './apiCallLog.js';
 
 // Strips a trailing slash on a base URL (a very easy copy-paste mistake,
 // e.g. 'https://api.disccardpromos.com/') so `${apiBase}${path}` (path
@@ -125,17 +126,39 @@ function logStartupStatus() {
 }
 logStartupStatus();
 
+// Best-effort season->org lookup purely for tagging provider_call_log rows —
+// this app is single-org, so DEFAULT_ORG_ID is always the right fallback,
+// never a correctness issue if a seasonId is missing/unknown.
+function orgIdForSeason(seasonId) {
+  if (!seasonId) return DEFAULT_ORG_ID;
+  return db.prepare('SELECT org_id FROM seasons WHERE id = ?').get(seasonId)?.org_id || DEFAULT_ORG_ID;
+}
+
 async function call(seasonId, path, opts = {}) {
   const cfg = resolveConfig(seasonId);
   if (!cfg.apiBase || !cfg.apiKey) throw new Error('disccardpromos not configured (running in mock mode; this should not be reached)');
-  const res = await fetch(`${cfg.apiBase}${path}`, {
-    ...opts,
-    headers: {
-      'Authorization': `Token ${cfg.apiKey}`,
-      'Content-Type': 'application/json',
-      ...(opts.headers || {}),
-    },
-  });
+  const method = opts.method || 'GET';
+  const orgId = orgIdForSeason(seasonId);
+  const started = Date.now();
+  let res;
+  try {
+    res = await fetch(`${cfg.apiBase}${path}`, {
+      ...opts,
+      headers: {
+        'Authorization': `Token ${cfg.apiKey}`,
+        'Content-Type': 'application/json',
+        ...(opts.headers || {}),
+      },
+    });
+  } catch (e) {
+    // The fetch itself threw — network failure, DNS, TLS, timeout — before
+    // any HTTP response came back at all, distinct from the res.ok===false
+    // branch below (a real response with a bad status). Still logged, so a
+    // provider outage shows up in the admin UI as a call attempt, not
+    // silence.
+    logApiCall('disccardpromos', { orgId, method, endpoint: path, requestSummary: opts.body, statusCode: null, success: false, errorMessage: `network error: ${e.message}`, durationMs: Date.now() - started, seasonId });
+    throw e;
+  }
   // A failure response isn't guaranteed to be JSON at all — a 500 from a
   // Django-style backend with DEBUG off is typically a plain-text/HTML error
   // page, which res.json() can't parse. Read the raw text first so that case
@@ -144,7 +167,7 @@ async function call(seasonId, path, opts = {}) {
   let body;
   try { body = rawText ? JSON.parse(rawText) : {}; } catch { body = {}; }
   if (!res.ok) {
-    console.error(`[giftcard] ${opts.method || 'GET'} ${path} -> ${res.status}: ${rawText.slice(0, 2000)}`);
+    console.error(`[giftcard] ${method} ${path} -> ${res.status}: ${rawText.slice(0, 2000)}`);
     // body.message covers their simple-error shape; a DRF-style validation
     // error instead comes back as {field: ["reason", ...]} with no top-level
     // message, which previously collapsed to an opaque "API error 500" with
@@ -158,8 +181,10 @@ async function call(seasonId, path, opts = {}) {
       || (rawText ? rawText.replace(/\s+/g, ' ').trim().slice(0, 300) : null);
     const err = new Error(detail ? `disccardpromos API error ${res.status}: ${detail}` : `disccardpromos API error ${res.status}`);
     err.status = res.status; err.body = body; err.rawText = rawText;
+    logApiCall('disccardpromos', { orgId, method, endpoint: path, requestSummary: opts.body, statusCode: res.status, success: false, responseSummary: rawText, errorMessage: err.message, durationMs: Date.now() - started, seasonId });
     throw err;
   }
+  logApiCall('disccardpromos', { orgId, method, endpoint: path, requestSummary: opts.body, statusCode: res.status, success: true, responseSummary: rawText, durationMs: Date.now() - started, seasonId });
   return body;
 }
 

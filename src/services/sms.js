@@ -13,6 +13,7 @@
 
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { findAccountByPhone } from '../utils/contactLookup.js';
+import { logApiCall } from './apiCallLog.js';
 
 // A shul/applicant is a fresh row every season, so a message tied to one of
 // those directly (meta.relatedEntityType/Id, set by whichever profile page
@@ -64,7 +65,9 @@ export async function sendSmsChecked(orgId, to, body, meta = {}) {
     status = 'mock';
     error = 'SMS provider not configured (SMS_API_BASE/SMS_API_KEY missing). No message was actually sent.';
     console.log(`[sms:MOCK org=${orgId || 'platform'}] To: ${to}\n${body}`);
+    logApiCall('sms', { orgId, method: 'POST', endpoint: '/v1/messages/send', requestSummary: `To: ${to}`, success: false, errorMessage: error });
   } else {
+    const started = Date.now();
     try {
       const res = await fetch(`${CONFIG.apiBase}/v1/messages/send`, {
         method: 'POST',
@@ -82,8 +85,10 @@ export async function sendSmsChecked(orgId, to, body, meta = {}) {
       if (!res.ok || resBody?.status === 'failed' || resBody?.success === false || resBody?.error) {
         status = 'failed'; error = resBody?.error || resBody?.message || `SMS send failed (${res.status})`;
       }
+      logApiCall('sms', { orgId, method: 'POST', endpoint: '/v1/messages/send', requestSummary: `To: ${to}`, statusCode: res.status, success: status !== 'failed', responseSummary: JSON.stringify(resBody), errorMessage: status === 'failed' ? error : null, durationMs: Date.now() - started });
     } catch (e) {
       status = 'failed'; error = e.message;
+      logApiCall('sms', { orgId, method: 'POST', endpoint: '/v1/messages/send', requestSummary: `To: ${to}`, success: false, errorMessage: `network error: ${e.message}`, durationMs: Date.now() - started });
     }
   }
   try {
@@ -152,9 +157,14 @@ function classifyDirection(m, ownNumberDigits) {
 export async function syncInboundSms(orgId, ownNumber) {
   if (isSmsMockMode()) return { imported: 0, skipped: 0, total: 0 };
   const ownNumberDigits = digitsOnly(ownNumber);
+  const started = Date.now();
   const res = await fetch(`${CONFIG.apiBase}/v1/messages`, { headers: { Authorization: `Bearer ${CONFIG.apiKey}` } });
-  if (!res.ok) throw new Error(`SimpleSender /v1/messages failed (${res.status})`);
+  if (!res.ok) {
+    logApiCall('sms', { orgId, method: 'GET', endpoint: '/v1/messages', statusCode: res.status, success: false, errorMessage: `SimpleSender /v1/messages failed (${res.status})`, durationMs: Date.now() - started });
+    throw new Error(`SimpleSender /v1/messages failed (${res.status})`);
+  }
   const data = await res.json().catch(() => ({}));
+  logApiCall('sms', { orgId, method: 'GET', endpoint: '/v1/messages', statusCode: res.status, success: true, responseSummary: JSON.stringify(data).slice(0, 500), durationMs: Date.now() - started });
   const messages = Array.isArray(data.messages) ? data.messages : [];
 
   let imported = 0, skipped = 0, classified = 0;

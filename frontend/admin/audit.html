@@ -21,6 +21,7 @@ renderShell('/admin/audit', `
   <div class="tabs">
     <button class="active" id="tab-actions-btn">Actions</button>
     <button id="tab-apirequests-btn">API Requests</button>
+    <button id="tab-providercalls-btn">Provider Calls</button>
   </div>
   <div id="panel-actions">
     <div class="flex-between">
@@ -51,6 +52,26 @@ renderShell('/admin/audit', `
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>User</th><th>IP</th></tr></thead>
       <tbody id="tbody-apirequests"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div id="panel-providercalls" style="display:none">
+    <p class="small-muted">Every outbound HTTP request this app made to a third-party provider (disccardpromos, email, SMS) — the reverse of API Requests above. This is where a batching fix like "one bulk pull instead of one call per applicant" is visible: filter to disccardpromos during a mass-approve or the automatic sync and count the calls. Never includes API keys or full card numbers. Rows older than 30 days are pruned automatically.</p>
+    <div class="toolbar">
+      <select id="pc-provider"><option value="">All Providers</option><option value="disccardpromos">disccardpromos</option><option value="email">Email</option><option value="sms">SMS</option></select>
+      <select id="pc-success"><option value="">All Results</option><option value="1">Success</option><option value="0">Failed</option></select>
+      <input id="pc-search" placeholder="Search endpoint/response/error…" style="max-width:240px">
+      <select id="pc-hours">
+        <option value="1">Last hour</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadProviderCalls()">Filter</button>
+    </div>
+    <p class="small-muted">Showing the most recent 500 matching calls — narrow the filters for a longer window.</p>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Time</th><th>Provider</th><th>Method</th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead>
+      <tbody id="tbody-providercalls"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
 `);
@@ -259,10 +280,51 @@ window.loadApiRequests = async () => {
   } catch (err) { qs('#tbody-apirequests').innerHTML = `<tr><td colspan="7" class="empty-state">${esc(err.message)}</td></tr>`; }
 };
 
-const LOG_TABS = ['actions', 'apirequests'];
+// ============================= Provider Calls tab =============================
+let providerCallRows = [];
+function providerCallParams() {
+  const p = {};
+  const provider = qs('#pc-provider').value, success = qs('#pc-success').value, search = qs('#pc-search').value.trim(), hours = qs('#pc-hours').value;
+  if (provider) p.provider = provider;
+  if (success !== '') p.success = success;
+  if (search) p.search = search;
+  if (hours) p.hours = hours;
+  return new URLSearchParams(p).toString();
+}
+window.loadProviderCalls = async () => {
+  qs('#tbody-providercalls').innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
+  try {
+    const { logs } = await api('/audit/provider-calls?' + providerCallParams());
+    providerCallRows = logs;
+    qs('#tbody-providercalls').innerHTML = logs.length ? logs.map((l, i) => `<tr style="cursor:pointer" onclick="showProviderCallDetail(${i})">
+      <td>${fmtDateTime(l.created_at)}</td>
+      <td>${esc(l.provider)}</td>
+      <td>${esc(l.method)}</td>
+      <td style="max-width:320px;overflow-wrap:anywhere">${esc(l.endpoint)}</td>
+      <td>${l.status_code != null ? badge(String(l.status_code), l.status_code >= 400 ? 'rejected' : 'active') : '—'}</td>
+      <td>${l.duration_ms != null ? l.duration_ms + ' ms' : '—'}</td>
+      <td>${l.success ? badge('success', 'active') : badge('failed', 'rejected')}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No provider calls match these filters.</td></tr>';
+  } catch (err) { qs('#tbody-providercalls').innerHTML = `<tr><td colspan="7" class="empty-state">${esc(err.message)}</td></tr>`; }
+};
+window.showProviderCallDetail = (i) => {
+  const l = providerCallRows[i];
+  if (!l) return;
+  const body = `
+    <p><strong>${esc(l.method)} ${esc(l.endpoint)}</strong></p>
+    <p class="small-muted">${fmtDateTime(l.created_at)} · ${l.status_code ?? '—'} · ${l.duration_ms != null ? l.duration_ms + ' ms' : '—'} · ${l.success ? 'Success' : 'Failed'}</p>
+    ${l.request_summary ? `<p><strong>Request:</strong></p><pre style="max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--brand-panel-2);padding:10px;border-radius:6px">${esc(l.request_summary)}</pre>` : ''}
+    ${l.response_summary ? `<p><strong>Response:</strong></p><pre style="max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--brand-panel-2);padding:10px;border-radius:6px">${esc(l.response_summary)}</pre>` : ''}
+    ${l.error_message ? `<p style="color:var(--danger)"><strong>Error:</strong> ${esc(l.error_message)}</p>` : ''}
+  `;
+  openModal(`${l.provider} call`, body, '', { wide: true });
+};
+
+const LOG_TABS = ['actions', 'apirequests', 'providercalls'];
 function switchLogTab(t) {
   LOG_TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
   if (t === 'apirequests') loadApiRequests();
+  if (t === 'providercalls') loadProviderCalls();
 }
 LOG_TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switchLogTab(t)));
 </script>

@@ -441,6 +441,16 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     ourApprovedCount: approved.length, theirActiveCount, mockMode: isMock,
     accountsCreated: createdApplicantIds.size, accountsDeactivated: deactivated,
     fundsErrors, mismatches,
+    // Self-service proof that the batching fix (see giftcard.js's
+    // buildCustomerIndex) is actually active on THIS run, without needing
+    // server console access — this whole object is dumped verbatim in the
+    // admin's "Make Disccardpromos Match" result panel. bulkCustomerPull
+    // false with approved applicants present would mean the index build
+    // failed and every run silently fell back to one live GET per
+    // applicant — the exact pattern the fix was meant to eliminate.
+    bulkCustomerPull: !!index,
+    customersInBulkPull: index ? index.list.length : null,
+    accountExistenceCallsAvoided: index ? approved.length : 0,
   };
 }
 

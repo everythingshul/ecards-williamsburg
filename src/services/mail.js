@@ -1,4 +1,5 @@
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
+import { logApiCall } from './apiCallLog.js';
 
 // ---------------------------------------------------------------------------
 // Email — Brevo (https://api.brevo.com) transactional email API.
@@ -81,8 +82,10 @@ export async function sendMail(orgId, to, subject, bodyHtml, replyTo) {
   const effectiveReplyTo = replyTo || defaultReplyTo(orgId);
   if (!cfg.apiKey) {
     console.log(`[mail:DRY-RUN org=${orgId || 'platform'}] To: ${to} | Subject: ${subject}\n${bodyHtml.replace(/<[^>]+>/g, ' ')}`);
+    logApiCall('email', { orgId, method: 'POST', endpoint: '/v3/smtp/email', requestSummary: `To: ${to} | Subject: ${subject}`, success: false, errorMessage: 'Email provider not configured (BREVO_API_KEY missing) — dry-run, not actually sent.' });
     return { dryRun: true };
   }
+  const started = Date.now();
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'api-key': cfg.apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -94,12 +97,17 @@ export async function sendMail(orgId, to, subject, bodyHtml, replyTo) {
       ...(effectiveReplyTo ? { replyTo: { email: effectiveReplyTo } } : {}),
     }),
   });
+  const requestSummary = `To: ${to} | Subject: ${subject}`;
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     console.error('[mail] Brevo send failed', res.status, body);
-    throw new Error(body?.message || `Email send failed (${res.status})`);
+    const message = body?.message || `Email send failed (${res.status})`;
+    logApiCall('email', { orgId, method: 'POST', endpoint: '/v3/smtp/email', requestSummary, statusCode: res.status, success: false, responseSummary: JSON.stringify(body), errorMessage: message, durationMs: Date.now() - started });
+    throw new Error(message);
   }
-  return res.json();
+  const result = await res.json();
+  logApiCall('email', { orgId, method: 'POST', endpoint: '/v3/smtp/email', requestSummary, statusCode: res.status, success: true, responseSummary: JSON.stringify(result), durationMs: Date.now() - started });
+  return result;
 }
 
 // Wraps sendMail() so every call site gets a single, consistent emailError
