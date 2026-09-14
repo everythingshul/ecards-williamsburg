@@ -107,7 +107,13 @@ export function resolveFundingAnchor(applicant) {
 // what created the account" (only that case should ever load first-time
 // funds) apart from "this call merely linked to an already-existing one"
 // (the person already has their card through the other record).
-export async function ensureProviderAccount(orgId, applicant) {
+// index: an optional pre-built giftcard.buildCustomerIndex() result — when
+// present, the account-existence check below reuses it instead of making
+// its own live GET (see upsertAccountForApproval's existingHint param in
+// giftcard.js). A caller processing many applicants in one run (mass-approve,
+// runProviderEnforce) should build ONE index and pass it into every call
+// here rather than pulling disccardpromos' customer list fresh per applicant.
+export async function ensureProviderAccount(orgId, applicant, index) {
   if (applicant.provider_exempt) return { accountId: null, created: false, linked: false, error: 'This applicant is exempt from disccardpromos provisioning.' };
   if (!applicant.shul_id) return { accountId: null, created: false, linked: false, error: 'Applicant has no shul on file.' };
   if (applicant.provider_account_id) return { accountId: applicant.provider_account_id, created: false, linked: false, error: null };
@@ -142,8 +148,14 @@ export async function ensureProviderAccount(orgId, applicant) {
   }
 
   const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(anchor.shul_id);
+  // With an index in hand, we already know whether the anchor's external_id
+  // has an account (and what it looks like) — pass that straight through as
+  // the hint so upsertAccountForApproval skips its own live existence GET.
+  // An explicit `null` (not undefined) here correctly means "confirmed
+  // absent, create new" rather than "no index, do your own lookup".
+  const existingHint = index ? (index.byExt.get(String(anchor.external_id)) || null) : undefined;
   try {
-    const result = await giftcard.upsertAccountForApproval(anchor.season_id, buildProviderOpts(orgId, anchor, shul?.name_en || 'Unknown'));
+    const result = await giftcard.upsertAccountForApproval(anchor.season_id, buildProviderOpts(orgId, anchor, shul?.name_en || 'Unknown'), existingHint);
     if (result.accountId) {
       // Every member of this merge group (for a non-merged applicant, just
       // itself) shares this one account id.
@@ -239,7 +251,13 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ?`).all(orgId, seasonId);
   job.total = applicants.length;
   const isMock = giftcard.isMockMode(seasonId);
-  const allCustomers = isMock ? [] : await giftcard.listAllCustomers(seasonId);
+  const index = isMock ? null : await giftcard.buildCustomerIndex(seasonId);
+  const allCustomers = index?.list || [];
+  // cleanId here (not the index's own normalizeCustomerId-keyed maps
+  // directly) since this function's ids come from applicants.provider_account_id,
+  // which can carry the ".0"-corrupted form (see cleanId's own comment) —
+  // both normalize the same way, so re-keying with cleanId keeps this
+  // function's existing lookups exactly as before.
   const byId = new Map(allCustomers.map(c => [cleanId(c.id), c]));
   const byExt = new Map(allCustomers.filter(c => c.external_id != null && c.external_id !== '').map(c => [String(c.external_id), c]));
 
@@ -289,7 +307,15 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
   }
 
   return {
-    checked: applicants.length, customersOnProvider: allCustomers.length, mockMode: isMock,
+    checked: applicants.length, customersOnProvider: allCustomers.length,
+    // disccardpromos' own claimed total (from listAllCustomers' pagination
+    // metadata) vs. what actually got collected — if these ever disagree,
+    // the customer list is being silently truncated (see that function's
+    // comment on why), and this is the visible proof, right in the admin
+    // UI, that something's wrong with the pull itself rather than every
+    // number downstream of it just happening to look off.
+    providerReportedTotal: allCustomers.reportedTotal ?? null,
+    mockMode: isMock,
     active: active.length, inactive: inactive.length, notFound: notFound.length,
     activeIds: active, inactiveIds: inactive, notFoundIds: notFound, mockIds: mock,
     relinked, orphans,
@@ -330,6 +356,19 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
   const approved = applicants.filter(a => a.approval_status === 'approved' && !a.provider_exempt && a.shul_id);
   job.total = approved.length;
 
+  const isMock = giftcard.isMockMode(seasonId);
+  // ONE bulk customer pull for the whole run, reused below by both the
+  // account-existence check (in the ensureProviderAccount loop) and the
+  // deactivation scan — this used to be a live GET per approved applicant
+  // (via upsertAccountForApproval's own findCustomerByExternalId) plus a
+  // SECOND full listAllCustomers() pull later in this same function for
+  // deactivation, on every run of this scheduled-every-15-minutes job. A
+  // stale/created-mid-run account just falls back to the old per-record
+  // behavior (ensureProviderAccount treats a miss in the index the same as
+  // "no index" for that one lookup) — nothing depends on this index staying
+  // perfectly fresh through the whole run.
+  const index = isMock ? null : await giftcard.buildCustomerIndex(seasonId);
+
   const mismatches = [];
   const createdApplicantIds = new Set();
   for (const a of approved) {
@@ -337,7 +376,7 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     // Re-fetch — an earlier member of this same merge group processed
     // earlier in this same loop may have just given this row an account.
     const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
-    const result = await ensureProviderAccount(orgId, fresh);
+    const result = await ensureProviderAccount(orgId, fresh, index);
     if (result.error) { mismatches.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), reason: result.error }); continue; }
     if (result.created) createdApplicantIds.add(a.id);
   }
@@ -372,9 +411,13 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
   }
 
   let deactivated = 0;
-  const isMock = giftcard.isMockMode(seasonId);
   if (!isMock) {
-    const allCustomers = await giftcard.listAllCustomers(seasonId);
+    // Reuse the same index pulled at the top of this run rather than a
+    // second listAllCustomers() call — a customer created moments ago by
+    // this very run's ensureProviderAccount loop just won't be in it yet,
+    // which is fine: a newly-created account for a just-approved applicant
+    // is never a deactivation candidate.
+    const allCustomers = index?.list || [];
     const approvedAccountIds = new Set(approved.map(a => db.prepare('SELECT provider_account_id FROM applicants WHERE id = ?').get(a.id)?.provider_account_id).filter(Boolean).map(cleanId));
     for (const c of allCustomers) {
       if (!c.is_active) continue;

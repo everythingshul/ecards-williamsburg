@@ -459,18 +459,79 @@ export async function deleteCustomer(seasonId, customerId) {
 // than treated as a path). Used by services/providerAccount.js's
 // runProviderAudit/runProviderEnforce so a full-org reconciliation costs
 // one paginated pull, never one GET per applicant.
+//
+// page_size=500 on the FIRST request (2026-09): a real org reported this
+// function only ever returning ~200 customers regardless of how many
+// actually exist. Two independent, plausible causes, both addressed here:
+// (a) disccardpromos' default page size may just be 200 with no override
+// requested, so asking for a bigger page up front means pagination is
+// rarely even needed for most orgs' customer counts; (b) their `next`
+// field might not match this assumed DRF shape at all, silently stopping
+// the loop after page one — impossible to fully rule out without their
+// real docs, so this also now logs the fetched count/page count every
+// time, and explicitly WARNS if their response's own `count` field (the
+// other standard DRF pagination field, reporting the TRUE total regardless
+// of page size) says there's more than what actually got collected. If the
+// warning still fires after this change, page_size=500 itself is being
+// ignored or capped lower by disccardpromos, and their real max page size
+// / pagination shape needs to come from their team directly — this is the
+// concrete evidence to bring them.
 export async function listAllCustomers(seasonId) {
   if (isMockMode(seasonId)) return [];
   const cfg = resolveConfig(seasonId);
   let results = [];
-  let path = '/org/customers/';
+  let path = '/org/customers/?page_size=500';
+  let reportedTotal = null;
+  let pageCount = 0;
   while (path) {
+    pageCount++;
     const body = await call(seasonId, path);
     results = results.concat(body.results || body.data || []);
+    if (reportedTotal == null && typeof body.count === 'number') reportedTotal = body.count;
     const next = body.next || null;
     path = next ? next.replace(cfg.apiBase, '') : null;
   }
+  console.log(`[giftcard] listAllCustomers: fetched ${results.length} customer(s) across ${pageCount} page(s)${reportedTotal != null ? `, disccardpromos reported ${reportedTotal} total` : ''}`);
+  if (reportedTotal != null && results.length < reportedTotal) {
+    console.warn(`[giftcard] listAllCustomers: only collected ${results.length} of ${reportedTotal} customers disccardpromos says exist — pagination stopped early. Their 'next' field likely doesn't match the shape this function expects; needs confirming with their team.`);
+  }
+  // Arrays are objects — attaching this doesn't affect any existing caller
+  // that just uses .length/.filter/iteration, but lets a caller that wants
+  // to surface it (e.g. the admin Full Audit UI) show disccardpromos' own
+  // claimed total right next to what was actually collected, without
+  // needing server log access to see the same thing.
+  results.reportedTotal = reportedTotal;
   return results;
+}
+
+// Wraps ONE listAllCustomers() pull into lookup maps, for any caller that
+// would otherwise do a live per-customer GET for every applicant in a batch
+// (mass-approve, runProviderEnforce's per-applicant loop, runProviderAudit).
+// disccardpromos' bulk list already returns each customer's active_cards
+// and packages (balance data) same as the single-customer endpoint does with
+// ?balances=true — so a caller that only needs "does this external_id
+// already have an account, and if so what does it look like" can read that
+// straight out of this one pull instead of asking disccardpromos again per
+// record. NOTE: the bulk list does NOT include transaction history (that's
+// still only available per-customer via ?transactions=true) — this index is
+// only a substitute for balance/existence lookups, never for
+// services/cardSync.js's transaction sync, which must keep making its own
+// per-applicant call.
+// Returns null (not an empty index) on mock mode or a failed pull, so a
+// caller can tell "nothing to reuse, fall back to the old per-record path"
+// apart from "pulled successfully, and there's genuinely nothing in it".
+export async function buildCustomerIndex(seasonId) {
+  if (isMockMode(seasonId)) return null;
+  let list;
+  try {
+    list = await listAllCustomers(seasonId);
+  } catch (e) {
+    console.error('[giftcard] buildCustomerIndex: listAllCustomers failed, callers will fall back to per-record lookups:', e.message);
+    return null;
+  }
+  const byId = new Map(list.map(c => [normalizeCustomerId(c.id), c]));
+  const byExt = new Map(list.filter(c => c.external_id != null && c.external_id !== '').map(c => [String(c.external_id), c]));
+  return { list, byId, byExt };
 }
 
 // Full customer record including active_cards (masked numbers) and packages
@@ -524,10 +585,18 @@ export async function linkCardToCustomer(seasonId, customerId, cardNumber, exter
 // too. A new customer gets created with the same full set. Returns
 // { created, accountId }. (seasonName isn't wired to anything yet — see
 // note above.)
-export async function upsertAccountForApproval(seasonId, opts) {
+//
+// existingHint: pass a pre-fetched customer (or explicit `null` for
+// "confirmed absent") to skip this function's own findCustomerByExternalId
+// GET — lets a caller that's processing many applicants in one run (mass-
+// approve, runProviderEnforce) pull disccardpromos' full customer list ONCE
+// via buildCustomerIndex() below and reuse it here, instead of one existence
+// check per applicant. Leave undefined for the old one-call-per-applicant
+// behavior (a single approve, or any caller without an index in hand).
+export async function upsertAccountForApproval(seasonId, opts, existingHint) {
   const { externalId } = opts;
   if (isMockMode(seasonId)) return { created: true, accountId: `mock_acct_${externalId}` };
-  const existing = await findCustomerByExternalId(seasonId, externalId);
+  const existing = existingHint !== undefined ? existingHint : await findCustomerByExternalId(seasonId, externalId);
   if (existing) {
     // isActive: true folded into this same PATCH (not a separate call
     // afterward) — live-tested 2026-08-19 that a follow-up PATCH omitting

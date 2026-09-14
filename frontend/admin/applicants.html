@@ -413,7 +413,7 @@ async function openApplicant(id) {
           <div class="stat-tile"><div class="num">${fmtMoney(balance.spent)}</div><div class="label">Spent</div></div>
           <div class="stat-tile"><div class="num">${fmtMoney(balance.remaining)}</div><div class="label">Remaining</div></div>
         </div>${mergeGroup && mergeGroup.length ? `<p class="small-muted" style="margin:-8px 0 14px">Combined balance across every merged record — one shared gift card account.</p>` : ''}` : ''}
-        ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code></p>` : ''}
+        ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code> <button class="btn btn-sm btn-outline" style="padding:1px 8px" onclick="viewRawProviderData('${id}')">View Raw disccardpromos Data</button></p>` : ''}
         ${cards.length ? cards.map(c => `<div class="card" style="margin-bottom:10px"><div class="flex-between"><strong>${esc(c.card_number_masked||'Unassigned')}</strong>${badge(c.status,c.status)}</div><div class="small-muted">Amount: ${fmtMoney(c.amount)} · Activated: ${c.activated_at?fmtDateTime(c.activated_at):'not yet'}</div><a class="small-muted" href="/admin/cards?card=${c.id}">View transactions</a></div>`).join('') : `<p class="small-muted">No card assigned yet.</p>${a.approval_status==='approved' ? `<button class="btn btn-sm btn-primary" onclick="assignCard('${id}')">Assign Gift Card</button>` : '<p class="small-muted">Applicant must be approved first.</p>'}`}
       </div>
       <div id="atab-transactions" style="display:none">
@@ -549,6 +549,32 @@ window.assignCard = async (id) => {
   if (!cardNumber) return;
   try { await api('/cards/assign', { method: 'POST', body: { applicant_id: id, card_number: cardNumber.trim() } }); toast('Card assigned'); closeModal(); openApplicant(id); } catch (err) { toast(err.message, true); }
 };
+
+// Self-service diagnostic: shows EXACTLY what disccardpromos' own API
+// returns for this applicant's customer record right now — no server log
+// access needed. Built specifically to answer "why don't transactions show
+// up" without another round of guessing at disccardpromos' real field
+// names — if the "transactions"/"transaction_history" field this app looks
+// for isn't in this raw JSON, whatever key IS here (visible directly below)
+// is the real one.
+let lastRawProviderJson = '';
+window.viewRawProviderData = async (id) => {
+  const body = `<div id="raw-provider-body"><p class="small-muted">Loading…</p></div>`;
+  openModal('Raw disccardpromos Data', body, '', { maxWidth: '900px' });
+  try {
+    const { customer, mockMode } = await api(`/applicants/${id}/provider-customer`);
+    lastRawProviderJson = JSON.stringify(customer, null, 2);
+    qs('#raw-provider-body').innerHTML = `
+      ${mockMode ? '<p class="small-muted" style="color:var(--danger,#b91c1c)">MOCK MODE is active — this is not real disccardpromos data.</p>' : ''}
+      <p class="small-muted">This is the live response disccardpromos just sent back for this applicant. If transactions still aren't showing up in this app, look for whatever key here holds them (likely an array of objects near the top level) — that's the real field name to fix the sync code with.</p>
+      <pre style="max-height:60vh;overflow:auto;background:var(--brand-panel-2);padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-word">${esc(lastRawProviderJson)}</pre>
+      <button class="btn btn-sm btn-outline" onclick="copyRawProviderJson()">Copy to Clipboard</button>
+    `;
+  } catch (err) {
+    qs('#raw-provider-body').innerHTML = `<p style="color:var(--danger,#b91c1c)">${esc(err.message)}</p>`;
+  }
+};
+window.copyRawProviderJson = () => { navigator.clipboard.writeText(lastRawProviderJson).then(() => toast('Copied')); };
 
 // Undo a shul's allocation right from the applicant's own Transactions tab —
 // same endpoint/warning as Admin > Shuls' Payments tab and the Shul

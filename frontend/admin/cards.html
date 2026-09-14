@@ -14,7 +14,7 @@
 Auth.requireAdmin();
 renderShell('/admin/cards', `
   <div class="flex-between"><h2>Cards & Transactions</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-sync-all">Sync All Now</button><button class="btn btn-outline btn-sm" id="btn-export-cards">Export Cards CSV</button><button class="btn btn-outline btn-sm" id="btn-export-txns">Export Transactions CSV</button></div></div>
-  <p class="small-muted">Cards auto-sync with disccardpromos every 15 minutes in the background. Use Sync All Now for an immediate refresh.</p>
+  <p class="small-muted">Cards auto-sync with disccardpromos every 60 seconds in the background. Use Sync All Now for an immediate refresh.</p>
   <div id="mock-banner"></div>
   <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button><button id="tab-recon-btn">Balance Mismatches<span id="recon-badge"></span></button></div>
   <div id="panel-cards">
@@ -40,7 +40,8 @@ renderShell('/admin/cards', `
     </div>
   </div>
   <div id="panel-recon" style="display:none">
-    <p class="small-muted">An applicant whose real disccardpromos balance doesn't match what our own records say it should be — checked automatically on every sync. Never auto-corrected; review each one and resolve it once you've sorted out (or accepted) the difference.</p>
+    <p class="small-muted">An applicant whose real disccardpromos balance doesn't match what our own records say it should be — checked automatically on every sync. "Fix on disccardpromos" pushes our ledger's number to disccardpromos, actually correcting the real balance (not just dismissing the flag); "Mark Resolved" only clears the flag without changing anything.</p>
+    <div class="pill-row" style="margin-bottom:10px"><button class="btn btn-sm btn-primary" id="btn-fix-all-recon">Fix All on disccardpromos</button></div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Applicant</th><th>Our Ledger</th><th>disccardpromos</th><th>Difference</th><th>Detected</th><th></th></tr></thead>
       <tbody id="tbody-recon"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
@@ -73,13 +74,29 @@ async function loadReconFlags() {
       <td>${fmtMoney(f.actual_amount)}</td>
       <td>${fmtMoney(f.actual_amount - f.expected_amount)}</td>
       <td>${fmtDateTime(f.detected_at)}</td>
-      <td><button class="btn btn-sm btn-outline" onclick="resolveReconFlag('${f.id}')">Mark Resolved</button></td>
+      <td><button class="btn btn-sm btn-primary" onclick="fixReconFlag('${f.id}')">Fix on disccardpromos</button> <button class="btn btn-sm btn-outline" onclick="resolveReconFlag('${f.id}')">Mark Resolved</button></td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No mismatches — everything matches disccardpromos.</td></tr>';
 }
+window.fixReconFlag = async (id) => {
+  if (!confirm("Push our ledger's number to disccardpromos for this applicant? This actually changes their real balance there to match what our own records say it should be.")) return;
+  try {
+    const { pushedAmount } = await api(`/cards/reconciliation-flags/${id}/fix`, { method: 'POST' });
+    toast(`Fixed — disccardpromos now shows ${fmtMoney(pushedAmount)}`);
+    loadReconFlags();
+  } catch (err) { toast(err.message, true); }
+};
 window.resolveReconFlag = async (id) => {
   if (!confirm('Mark this mismatch as resolved? This only clears the flag — it never changes any balance.')) return;
   try { await api(`/cards/reconciliation-flags/${id}/resolve`, { method: 'POST' }); toast('Resolved'); loadReconFlags(); } catch (err) { toast(err.message, true); }
 };
+qs('#btn-fix-all-recon').addEventListener('click', async () => {
+  if (!confirm("Push our ledger's number to disccardpromos for EVERY currently-flagged applicant? This actually changes their real balances there to match what our own records say they should be.")) return;
+  try {
+    const { total, fixed, failures } = await api('/cards/reconciliation-flags/fix-all', { method: 'POST' });
+    toast(!total ? 'Nothing to fix' : `Fixed ${fixed} of ${total}${failures.length ? ` — ${failures.length} failed: ${failures.map(f => `${f.name} (${f.error})`).join('; ')}` : ''}`, failures.length > 0);
+    loadReconFlags();
+  } catch (err) { toast(err.message, true); }
+});
 // Quiet initial check so the badge count shows up without needing to click
 // into the tab first — same "surface it, don't bury it" reasoning as every
 // other pending-count badge in this app.

@@ -1051,7 +1051,7 @@ router.get('/:id/provider-customer', requireAdmin, async (req, res) => {
   if (!applicant) return res.status(404).json({ error: 'Not found' });
   if (!applicant.external_id) return res.status(400).json({ error: 'This applicant has no external_id yet' });
   try {
-    const customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true, suppressNotFound: false });
+    const customer = await giftcard.getCustomerByExternalId(applicant.season_id, applicant.external_id, { balances: true, transactions: true, suppressNotFound: false });
     res.json({ customer, mockMode: giftcard.isMockMode(applicant.season_id) });
   } catch (e) {
     res.status(502).json({ error: e.message, status: e.status, rawText: e.rawText });
@@ -1210,6 +1210,18 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
   // forward this to) tell "no Package/Discount ID configured" apart from a
   // genuine live API rejection, instead of guessing from a number alone.
   const providerErrorDetails = [];
+  // One disccardpromos customer-list pull per season touched by this batch,
+  // reused across every applicant in that season instead of a live
+  // existence-check GET per applicant (see ensureProviderAccount's `index`
+  // param) — a batch is almost always a single season, but a Map keyed by
+  // season_id keeps this correct if it ever isn't. Built lazily (only for a
+  // season this batch actually approves someone into) rather than up front,
+  // since most mass-approve calls only ever touch one season anyway.
+  const providerIndexBySeason = new Map();
+  async function getProviderIndex(seasonId) {
+    if (!providerIndexBySeason.has(seasonId)) providerIndexBySeason.set(seasonId, await giftcard.buildCustomerIndex(seasonId));
+    return providerIndexBySeason.get(seasonId);
+  }
   for (const id of ids) {
     const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(id, req.user.org_id);
     if (!applicant || applicant.is_paused) { skipped++; continue; }
@@ -1230,7 +1242,8 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
     // one shared account (services/providerAccount.js's ensureProviderAccount
     // resolves which identity that is), never its own.
     if (applicant.shul_id && !applicant.provider_exempt) {
-      const acctResult = await ensureProviderAccount(req.user.org_id, applicant);
+      const providerIndex = await getProviderIndex(applicant.season_id);
+      const acctResult = await ensureProviderAccount(req.user.org_id, applicant, providerIndex);
       const accountOk = !acctResult.error;
       if (acctResult.error) {
         providerErrors++;

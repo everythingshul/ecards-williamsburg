@@ -6,6 +6,8 @@ import * as giftcard from '../services/giftcard.js';
 import { sendXlsx } from '../services/xlsx.js';
 import { syncOneCard, syncAllCards } from '../services/cardSync.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
+import { resolveFundingAnchor } from '../services/providerAccount.js';
+import { getApplicantBalances } from '../services/applicantBalance.js';
 
 const router = Router();
 router.use(auth, requirePermission('cards'));
@@ -97,6 +99,62 @@ router.post('/reconciliation-flags/:id/resolve', requirePermission('cards', 'can
   db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
     .run(req.user.id, flag.id);
   res.json({ ok: true });
+});
+
+// Unlike /resolve above (which ONLY dismisses the flag — see its own
+// comment — never touches either side's real balance), this actually
+// CORRECTS disccardpromos: pushes this app's own ledger total (the same
+// figure every other write in this app now treats as ground truth — see
+// services/giftcard.js's syncPackageAmount) onto the customer's real
+// package balance, then marks the flag resolved. Exists because a flag
+// left open forever doesn't fix itself — nothing in this app auto-corrects
+// a mismatch once detected (reconcileApplicantBalance's own comment: "this
+// app doesn't assume which side is wrong"), so a real, accumulated
+// discrepancy (e.g. from a write that failed before a bug fix landed) just
+// sits there being reported on every sweep until an admin does something
+// about it. This is that "something."
+async function fixOneFlag(orgId, userId, flag) {
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(flag.applicant_id);
+  if (!applicant) throw new Error('Applicant not found');
+  const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
+  if (!discountId) throw new Error('No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).');
+  const fundingAnchor = resolveFundingAnchor(applicant);
+  if (!fundingAnchor.provider_account_id) throw new Error('This applicant has no disccardpromos account on file.');
+  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.remaining ?? 0;
+  await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, totalAmount: expected });
+  db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
+    .run(userId, flag.id);
+  return expected;
+}
+
+router.post('/reconciliation-flags/:id/fix', requirePermission('cards', 'can_edit'), async (req, res) => {
+  const flag = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE id = ? AND org_id = ?`).get(req.params.id, req.user.org_id);
+  if (!flag) return res.status(404).json({ error: 'Not found' });
+  if (flag.status !== 'open') return res.status(400).json({ error: 'Already resolved' });
+  try {
+    const pushedAmount = await fixOneFlag(req.user.org_id, req.user.id, flag);
+    res.json({ ok: true, pushedAmount });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Bulk version — fixes every currently-open flag in one click, since a
+// history of past (now-fixed) write bugs can leave dozens of these sitting
+// around, and correcting each one individually is exactly the kind of
+// tedious, repetitive task this should never require. Best-effort per
+// flag: one failure (e.g. a transient disccardpromos error) doesn't stop
+// the rest — every outcome is reported back so nothing fails silently.
+router.post('/reconciliation-flags/fix-all', requirePermission('cards', 'can_edit'), async (req, res) => {
+  const flags = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE org_id = ? AND status = 'open'`).all(req.user.org_id);
+  let fixed = 0;
+  const failures = [];
+  for (const flag of flags) {
+    try { await fixOneFlag(req.user.org_id, req.user.id, flag); fixed++; }
+    catch (e) {
+      const a = db.prepare('SELECT first_name, last_name FROM applicants WHERE id = ?').get(flag.applicant_id);
+      failures.push({ applicantId: flag.applicant_id, name: a ? `${a.first_name} ${a.last_name}`.trim() : flag.applicant_id, error: e.message });
+    }
+  }
+  res.json({ ok: true, total: flags.length, fixed, failures });
 });
 
 router.get('/:id', (req, res) => {
