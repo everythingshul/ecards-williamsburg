@@ -1002,6 +1002,14 @@ safeAlter(`ALTER TABLE shul_payments ADD COLUMN refund_of TEXT REFERENCES shul_p
 // protection beyond the normal admin permission gate on this table.
 safeAlter(`ALTER TABLE shul_payments ADD COLUMN card_last4 TEXT`);
 
+// Human-readable explanation of exactly what a reversal did and why —
+// written once by services/matching.js's reverseAllocation onto the
+// reversal row itself (e.g. "Full $500.00 returned — nothing had been
+// spent yet" or "$120.00 returned; $380.00 had already been spent and
+// could not be retrieved"), so an admin or shul looking back at an Undo
+// later sees the real reasoning, not just a bare negative dollar amount.
+safeAlter(`ALTER TABLE shul_allocations ADD COLUMN reversal_note TEXT`);
+
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to

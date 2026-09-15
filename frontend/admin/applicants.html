@@ -422,7 +422,7 @@ async function openApplicant(id) {
         <p class="small-muted" style="margin-top:0">Real money given toward this person's card, by which shul — merged records combined into one list. Undoing pulls the money back off the card where possible; if some has already been spent, only what's left comes back and the rest is written off.</p>
         ${allocations && allocations.length ? `<div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Shul</th><th>Given</th><th>Match</th><th>Total</th><th>Date</th><th></th></tr></thead><tbody>
           ${allocations.filter(al => al.total_amount !== 0).map(al => `<tr${al.reversed_at ? ' style="opacity:.55"' : ''}>
-            <td>${esc(al.shul_name||'')}${al.is_admin_override ? ' ' + badge('override','pending') : ''}${al.reversal_of ? ' ' + badge('reversal','rejected') : ''}</td>
+            <td>${esc(al.shul_name||'')}${al.is_admin_override ? ' ' + badge('override','pending') : ''}${al.reversal_of ? ' ' + badge('reversal','rejected') : ''}${al.reversal_note ? `<div class="small-muted" style="opacity:1;white-space:normal">${esc(al.reversal_note)}</div>` : ''}</td>
             <td>${fmtMoney(al.base_amount)}</td><td>${fmtMoney(al.match_amount)}</td><td>${fmtMoney(al.total_amount)}</td>
             <td>${fmtDateTime(al.created_at)}</td>
             <td>${!al.reversed_at && !al.reversal_of && al.total_amount > 0 ? `<button class="btn btn-outline btn-sm" onclick="undoApplicantAllocation('${al.id}','${id}')">Undo</button>` : ''}</td>

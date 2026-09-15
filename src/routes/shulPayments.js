@@ -204,10 +204,17 @@ router.get('/mine/allocations', (req, res) => {
     const shul = db.prepare('SELECT * FROM shuls WHERE id = ?').get(r.shul_id);
     const season = db.prepare('SELECT * FROM seasons WHERE id = ?').get(r.season_id);
     const displayMatch = applicant && shul && season ? shulDisplayMatch({ applicant, shul, season, baseAmount: r.base_amount, ownMatchAmount: r.match_amount }) : 0;
+    // A reversed give's own reversal_note (see services/matching.js's
+    // buildReversalNote) — the shul's own money, so they see the same plain
+    // explanation an admin does (how much came back, how much couldn't be
+    // retrieved and why), just attached to the original row rather than as
+    // a separate reversal entry (this endpoint never shows shul-facing
+    // reversal rows directly — see the privacy comment above).
+    const reversal = r.reversed_at ? db.prepare('SELECT reversal_note FROM shul_allocations WHERE reversal_of = ?').get(r.id) : null;
     return {
       id: r.id, applicant_id: r.applicant_id, applicant_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
       base_amount: r.base_amount, display_total: Math.round((r.base_amount + displayMatch) * 100) / 100,
-      created_at: r.created_at, reversed: !!r.reversed_at,
+      created_at: r.created_at, reversed: !!r.reversed_at, reversal_note: reversal?.reversal_note || null,
     };
   });
   res.json({ allocations: out });

@@ -190,6 +190,29 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   return row;
 }
 
+// One human-readable sentence explaining exactly what a reversal did and
+// why — written once onto the reversal row's own `reversal_note` column
+// (see db.js) so an admin or shul looking back at it later (in the
+// allocations list, not just the one-time toast when it happened) sees the
+// real reasoning instead of a bare negative dollar amount. The SAME string
+// backs both the toast (see reverseAllocation's return value) and every
+// list view that renders a reversal row, so there's exactly one source of
+// truth for "why" instead of the frontend re-deriving its own explanation
+// from raw flags.
+function buildReversalNote({ neverLoaded, total, retrievable, shortfall }) {
+  const fmt = (n) => `$${n.toFixed(2)}`;
+  if (neverLoaded) {
+    return `Full ${fmt(total)} returned to the shul's balance. This allocation had never actually reached the applicant's card in the first place (an earlier sync issue), so there was nothing to retrieve.`;
+  }
+  if (shortfall <= 0) {
+    return `Full ${fmt(total)} returned to the shul's balance — confirmed on disccardpromos that none of it had been spent yet.`;
+  }
+  if (retrievable <= 0) {
+    return `$0 returned to the shul's balance — the full ${fmt(total)} had already been spent by the applicant before this Undo.`;
+  }
+  return `${fmt(retrievable)} returned to the shul's balance; ${fmt(shortfall)} had already been spent by the applicant and could not be retrieved.`;
+}
+
 // Reverses an allocation as an equal-and-opposite entry (never a delete —
 // same reasoning as every other money record in this app). A fungible
 // balance can't prove which specific dollars are still sitting there, so
@@ -288,9 +311,10 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // ledger read either fully includes this reversal or hasn't started yet
   // — never half-applied.
   const id = uuid();
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id);
+  const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall });
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id, reversalNote);
   db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
 
   // giftcardStatus/giftcardError, not a bare try/throw — CRITICAL: unlike
@@ -336,19 +360,15 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // this reversal is a pure write-off — see the shortfall handling above).
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant?.id} SKIPPED disccard write — discountId=${discountId || '(none)'} retrievable=$${retrievable} accountId=${fundingAnchor?.provider_account_id || '(none)'}`);
   }
-  db.prepare('UPDATE shul_allocations SET giftcard_status = ?, giftcard_error = ? WHERE id = ?').run(giftcardStatus, giftcardError, id);
+  // Append the disccardpromos-write outcome onto the same note, so the one
+  // persisted sentence covers everything that happened — not just the
+  // shul-balance side computed before this write was even attempted.
+  const finalNote = giftcardStatus === 'failed'
+    ? `${reversalNote} (disccardpromos itself wasn't updated yet — it'll retry automatically; the shul's balance above is already correct.)`
+    : reversalNote;
+  db.prepare('UPDATE shul_allocations SET giftcard_status = ?, giftcard_error = ?, reversal_note = ? WHERE id = ?').run(giftcardStatus, giftcardError, finalNote, id);
 
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
-  // neverLoaded: this app's OWN record already shows the original give's
-  // disccardpromos write failed at the time it was made — so a shortfall
-  // here isn't the applicant having "already spent" the money, it's that
-  // the money never reached the real card in the first place (see
-  // giftcard.js's addFunds/setPackageAmountAbsolute header comments for the
-  // wrong-endpoint bug this used to hit). The frontend uses this to tell
-  // the truth instead of guessing "already spent" whenever the live
-  // balance simply comes back lower than this app expected. (neverLoaded is
-  // computed earlier in this function, right above the live-balance check
-  // it's used to skip.)
   logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
   return { ...reversalRow, shortfall, neverLoaded };
 }

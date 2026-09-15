@@ -254,18 +254,22 @@ async function loadGiveTable() {
     api('/shul-payments/mine/allocations'),
   ]);
   const approved = applicants.filter(a => a.approval_status === 'approved');
-  const totals = new Map(); // applicant_id -> { given, matched }
+  const totals = new Map(); // applicant_id -> { given, matched, notes }
   for (const a of allocations) {
-    if (a.reversed) continue;
-    const t = totals.get(a.applicant_id) || { given: 0, matched: 0 };
+    const t = totals.get(a.applicant_id) || { given: 0, matched: 0, notes: [] };
+    // A reversed give's own note is kept for reference even though it no
+    // longer counts toward the running total below — a shul should still
+    // be able to see how much came back and why, not just watch the row
+    // silently vanish (see services/matching.js's buildReversalNote).
+    if (a.reversed) { if (a.reversal_note) t.notes.push(a.reversal_note); totals.set(a.applicant_id, t); continue; }
     t.given += a.base_amount;
     t.matched += a.display_total - a.base_amount;
     totals.set(a.applicant_id, t);
   }
   qs('#give-tbody').innerHTML = approved.length ? approved.map(a => {
-    const t = totals.get(a.id) || { given: 0, matched: 0 };
+    const t = totals.get(a.id) || { given: 0, matched: 0, notes: [] };
     return `<tr>
-      <td>${esc(a.first_name)} ${esc(a.last_name)}</td>
+      <td>${esc(a.first_name)} ${esc(a.last_name)}${t.notes.length ? t.notes.map(n => `<div class="small-muted" style="white-space:normal">${esc(n)}</div>`).join('') : ''}</td>
       <td>${fmtMoney(t.given)}</td>
       <td>${fmtMoney(t.matched)}</td>
       <td>${fmtMoney(t.given + t.matched)}</td>
