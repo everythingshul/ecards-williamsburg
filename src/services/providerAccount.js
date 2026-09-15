@@ -327,12 +327,12 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
 const enforceJobs = new Map(); // orgId -> job state
 export function getProviderEnforceJob(orgId) { return enforceJobs.get(orgId) || null; }
 
-export function startProviderEnforce(orgId, seasonId) {
+export function startProviderEnforce(orgId, seasonId, { fullResync = false } = {}) {
   const existing = enforceJobs.get(orgId);
   if (existing?.status === 'running') return existing;
   const job = { status: 'running', progress: 0, total: 0, result: null, error: null, startedAt: new Date().toISOString(), finishedAt: null };
   enforceJobs.set(orgId, job);
-  runProviderEnforce(orgId, seasonId, job).then(result => {
+  runProviderEnforce(orgId, seasonId, job, { fullResync }).then(result => {
     job.result = result; job.status = 'done'; job.finishedAt = new Date().toISOString();
   }).catch(e => {
     job.status = 'error'; job.error = e.message; job.finishedAt = new Date().toISOString();
@@ -350,7 +350,7 @@ export function startProviderEnforce(orgId, seasonId) {
 // deleted on either side. Re-pulls disccardpromos' list at the end and
 // reports our approved-count vs their active-count side by side, plus
 // exactly which applicants are still mismatched and why.
-export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }) {
+export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }, { fullResync = false } = {}) {
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ?`).all(orgId, seasonId);
   const approved = applicants.filter(a => a.approval_status === 'approved' && !a.provider_exempt && a.shul_id);
@@ -450,14 +450,26 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
   // wrong-URL PATCH bug, and a brief detour through the incremental
   // add-funds endpoint — either could have left the real disccardpromos
   // balance out of sync with what this app's own ledger says it should be,
-  // with no local trace telling this sweep to touch it). Every run now
-  // unconditionally re-pushes every approved applicant's current absolute
-  // ledger total, not just the new/failed ones — self-correcting any
-  // historical drift within 15 minutes (or immediately via the on-demand
-  // "Make Disccardpromos Match" trigger) regardless of whether anything
-  // here ever looked broken. Same idempotent write as everywhere else in
-  // this app: setting the same correct total twice is a harmless no-op.
-  if (discountId) {
+  // with no local trace telling this sweep to touch it).
+  //
+  // DELIBERATELY NOT part of the automatic boot/15-minute sweep, and NOT
+  // run by the regular "Make Disccardpromos Match" button — only when
+  // `fullResync: true` is explicitly passed (a separate, clearly-labeled
+  // admin action). Reason: `ledger.remaining` here is loaded minus this
+  // app's own tracked `spent` (services/applicantBalance.js's
+  // getApplicantBalances, summed from card_transactions) — and real
+  // transaction sync from disccardpromos is still unconfirmed/incomplete
+  // (see cardSync.js), so `spent` reads ~$0 for most applicants regardless
+  // of what they've genuinely purchased in stores. Pushing this total
+  // UNCONDITIONALLY and REPEATEDLY (every 15 minutes, forever) would reset
+  // every applicant's REAL disccardpromos balance back up to the full
+  // amount ever loaded on every single pass — silently erasing real,
+  // legitimate purchases and effectively letting a card re-spend money it
+  // already used. Safe as a one-time, deliberate catch-up (which is what
+  // this was built for, and already run successfully once) — never safe as
+  // a standing recurring behavior until real transaction sync is confirmed
+  // working end to end.
+  if (fullResync && discountId) {
     for (const a of approved) {
       if (touchedApplicantIds.has(a.id)) continue;
       const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);

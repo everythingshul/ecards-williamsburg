@@ -391,6 +391,14 @@ router.get('/provider-audit', requireSuperAdmin, (req, res) => {
 router.get('/provider-enforce', requireSuperAdmin, (req, res) => {
   res.json(getProviderEnforceJob(req.user.org_id) || { status: 'idle' });
 });
+// Same shared job state as provider-enforce above (both run through
+// startProviderEnforce) — a separate path only because the frontend's job
+// poller reuses whatever path started the job. Registered here, before
+// GET /:id, for the same single-path-segment reason as every other route
+// in this block.
+router.get('/provider-full-resync', requireSuperAdmin, (req, res) => {
+  res.json(getProviderEnforceJob(req.user.org_id) || { status: 'idle' });
+});
 
 router.get('/:id', (req, res) => {
   const applicant = db.prepare(`SELECT a.*, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a
@@ -1690,5 +1698,19 @@ router.post('/provider-enforce', requireSuperAdmin, (req, res) => {
   const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
   if (!seasonId) return res.status(400).json({ error: 'No season to enforce' });
   res.json(startProviderEnforce(req.user.org_id, seasonId));
+});
+
+// Separate, deliberate action from the regular "Make Disccardpromos Match"
+// above — unconditionally re-pushes EVERY approved applicant's full
+// computed amount, not just brand-new/currently-failed ones (see
+// services/providerAccount.js's runProviderEnforce fullResync option for
+// exactly why this is never part of the automatic sweep: it can overwrite
+// real spending on disccardpromos' side with this app's own ledger total,
+// which is only safe while real transaction sync stays unconfirmed if run
+// as a one-time, admin-initiated catch-up — never on a recurring schedule).
+router.post('/provider-full-resync', requireSuperAdmin, (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  if (!seasonId) return res.status(400).json({ error: 'No season to enforce' });
+  res.json(startProviderEnforce(req.user.org_id, seasonId, { fullResync: true }));
 });
 export default router;

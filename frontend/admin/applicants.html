@@ -210,11 +210,18 @@ async function refreshProviderSyncModal() {
       <button class="btn btn-sm btn-outline" onclick="reconcileMergedAccounts()">Reconcile Merged Accounts</button>
       <button class="btn btn-sm btn-outline" onclick="runProviderJob('provider-audit', 'psync-audit-result')">Run Full Audit</button>
       <button class="btn btn-sm btn-primary" onclick="runProviderJob('provider-enforce', 'psync-enforce-result')">Make Disccardpromos Match</button>
+      <button class="btn btn-sm btn-outline" style="border-color:var(--danger,#b91c1c);color:var(--danger,#b91c1c)" onclick="runFullResync()">Force Resync All Amounts</button>
     </div>
+    <p class="small-muted" style="margin-top:6px">Force Resync pushes EVERY approved applicant's full computed amount to disccardpromos, even ones that already looked fine — a one-time catch-up for accounts affected by a past sync bug. Since real store-spend isn't reliably tracked yet, this can overwrite genuine spending on disccardpromos' side with this app's own total — use only when you know some accounts are actually stale, not as a routine action.</p>
     <div id="psync-audit-result" style="margin-top:10px"></div>
     <div id="psync-enforce-result" style="margin-top:10px"></div>
+    <div id="psync-fullresync-result" style="margin-top:10px"></div>
   `;
 }
+window.runFullResync = () => {
+  if (!confirm("Force-resync EVERY approved applicant's amount on disccardpromos now?\n\nThis can overwrite real spending with this app's own total, since store-spend isn't reliably tracked yet. Only do this if you know some accounts are actually stale (e.g. right after fixing a sync bug) — not as routine maintenance.")) return;
+  runProviderJob('provider-full-resync', 'psync-fullresync-result');
+};
 window.filterByProviderSync = (key) => {
   closeModal();
   state.provider_sync = key; state.page = 1;
