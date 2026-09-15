@@ -3,6 +3,7 @@ import { db } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { getPermission, requirePermission } from '../middleware/permissions.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
+import { orgFundsSummary } from '../services/applicantBalance.js';
 
 const router = Router();
 // Internal team only — every count below is computed org-wide (total shuls,
@@ -92,7 +93,7 @@ router.get('/stats', (req, res) => {
   }
   // Store spend is per-transaction, not per-season directly — scope it
   // through the card a transaction was made against (a card belongs to
-  // exactly one season). Shared by both funds stats below and topStores.
+  // exactly one season). Shared by topStores below.
   const storeSeasonClause = seasonId ? ' AND c2.season_id = ?' : '';
   if (cardPerm.can_view && !hidden.has('funds_stats')) {
     // Approved Funds: what's actually been committed and pushed to
@@ -100,15 +101,17 @@ router.get('/stats', (req, res) => {
     // they're approved (see routes/applicants.js POST /:id/approve's
     // upsertAccountForApproval call), independent of whether a physical
     // card has since been assigned (assignCard is a separate manual step,
-    // so `cards` rows/totalLoaded above can lag behind this). Total Spent
-    // is the same underlying transaction data as topStores/totalStoreSpend
-    // below, just always computed here (not gated on 'stores' can_view) so
-    // it survives the Store Spend panel being hidden independently.
-    stats.funds = {
-      approvedFunds: db.prepare(`SELECT COALESCE(SUM(card_amount),0) t FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).get(orgId, ...seasonParams).t,
-      totalSpent: db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
-        FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id WHERE c2.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).total,
-    };
+    // so `cards` rows/totalLoaded above can lag behind this).
+    //
+    // FIXED (2026-09) — Total Spent used to sum card_transactions directly,
+    // which depends on disccardpromos' transactions-array field name
+    // (never confirmed — see services/cardSync.js) and silently stayed at
+    // 0 the whole time, which is why this tile read $0.00 regardless of
+    // real activity. services/applicantBalance.js's orgFundsSummary derives
+    // spend from each applicant's real, reliably-readable disccardpromos
+    // balance instead (merge-group aware, so a shared account's balance
+    // isn't double-counted across its members).
+    stats.funds = orgFundsSummary(orgId, seasonId);
   }
   // Duplicate flags aren't tied to a season (a flagged duplicate is either
   // resolved or not, independent of which season it was raised in), so this

@@ -951,6 +951,24 @@ safeAlter(`ALTER TABLE applicants ADD COLUMN previous_shul_id TEXT REFERENCES sh
 // on disccardpromos' side forever.
 safeAlter(`ALTER TABLE applicants ADD COLUMN provider_deactivate_error TEXT`);
 
+// The one reliably-readable number disccardpromos gives back for a real
+// customer: their package `amount` (confirmed real field, unlike the
+// transactions list — see services/cardSync.js's syncApplicantCards, which
+// already reads this same figure to keep cards.amount fresh). Persisted
+// here too so services/applicantBalance.js can use it directly as the
+// authoritative "how much is really on the card" instead of trying to
+// derive spend from individual card_transactions rows, which depends on a
+// transactions-array field name that's never been confirmed and kept
+// silently returning nothing — the actual root cause of both "$0.00
+// dashboard totals" and recurring balance-mismatch emails (our own ledger's
+// "spent" was always undercounted, since it only ever came from that same
+// broken transaction parsing). Null until the first real sync; only ever
+// written for a merge group's PRIMARY member (the only identity disccard
+// actually knows this account under) — see applicantBalance.js's own
+// comment on how a secondary's balance is resolved from its group's anchor.
+safeAlter(`ALTER TABLE applicants ADD COLUMN disccard_balance REAL`);
+safeAlter(`ALTER TABLE applicants ADD COLUMN disccard_balance_synced_at TEXT`);
+
 // Stores sign their participation agreement through the generic documents
 // system (entity_type='store' on a documents row), unlike shuls (which get
 // status='contract_signed' written directly onto the shul at sign time) —

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
+import { orgFundsSummary } from '../services/applicantBalance.js';
 
 const router = Router();
 // Donor's Dash (frontend/admin/donor-dashboard.html) is its own separately
@@ -80,16 +81,12 @@ router.get('/stats', (req, res) => {
     deactivated: cardStatusCount('deactivated') + cardStatusCount('lost'),
   };
 
-  // Same two formulas as routes/dashboard.js's funds panel: loaded is every
-  // approved applicant's committed card_amount (pushed to disccardpromos at
-  // approval, independent of whether a physical card has been assigned
-  // yet); spent sums every negative (purchase) card_transactions row for
-  // this org/season via the card's own season, same negative-amount-is-a-
-  // purchase convention used everywhere else in the app.
-  const loaded = db.prepare(`SELECT COALESCE(SUM(card_amount),0) t FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).get(orgId, ...seasonParams).t;
-  const storeSeasonClause = seasonId ? ' AND c2.season_id = ?' : '';
-  const spent = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) s
-    FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id WHERE c2.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).s;
+  // Same source as routes/dashboard.js's funds panel — see
+  // services/applicantBalance.js's orgFundsSummary for why spend is derived
+  // from each applicant's real disccardpromos balance (merge-group aware)
+  // rather than summed from card_transactions, which depends on an
+  // unconfirmed field name and silently stayed at 0.
+  const { approvedFunds: loaded, totalSpent: spent } = orgFundsSummary(orgId, seasonId);
   const funds = { loaded, spent, remaining: Math.round((loaded - spent) * 100) / 100 };
 
   const duplicatesOpen = db.prepare(`SELECT COUNT(*) c FROM duplicate_flags WHERE org_id = ? AND status = 'open'`).get(orgId).c;

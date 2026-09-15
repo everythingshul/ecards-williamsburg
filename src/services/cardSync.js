@@ -163,6 +163,13 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   // newly-discovered card was recorded locally with a $0 amount regardless
   // of its real balance.
   const balance = (customer.packages || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+  // Persisted onto the applicant row this customer object was actually
+  // fetched for (see applicants.disccard_balance's own comment in db.js) —
+  // this is the one reliably-readable disccardpromos figure, and
+  // services/applicantBalance.js uses it directly instead of trying to
+  // derive spend from card_transactions, which depends on the still-
+  // unconfirmed transactions-array field name.
+  db.prepare(`UPDATE applicants SET disccard_balance = ?, disccard_balance_synced_at = datetime('now') WHERE id = ?`).run(balance, applicant.id);
   let discovered = 0;
   for (const masked of remoteMasked) {
     if (known.has(masked)) continue;
