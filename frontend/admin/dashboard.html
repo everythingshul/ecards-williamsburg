@@ -100,10 +100,16 @@ async function loadStats() {
       ['Total Applicants', stats.applicants.total], ['Pending Applicants', stats.applicants.pending],
       ['Approved Applicants', stats.applicants.approved]);
     if (stats.cards) tiles.push(
-      ['Cards Issued', stats.cards.total], ['Cards Activated', stats.cards.activated],
-      ['Total Loaded', fmtMoney(stats.cards.totalLoaded)]);
+      ['Cards Issued', stats.cards.total], ['Cards Activated', stats.cards.activated]);
+    // Total Loaded/Spent/Remaining — the org-wide ledger figures (see
+    // services/applicantBalance.js's orgFundsSummary), not stats.cards'
+    // own totalLoaded (a narrower, cards-only sum that used to collide
+    // with this one under the same "Total Loaded" label — two tiles with
+    // the same name and different numbers, which is exactly the "2 total
+    // loaded" bug report this replaced).
     if (stats.funds) tiles.push(
-      ['Total Loaded', fmtMoney(stats.funds.approvedFunds)], ['Total Spent', fmtMoney(stats.funds.totalSpent)]);
+      ['Total Loaded', fmtMoney(stats.funds.approvedFunds)], ['Total Spent', fmtMoney(stats.funds.totalSpent)],
+      ['Remaining', fmtMoney(Math.round((stats.funds.approvedFunds - stats.funds.totalSpent) * 100) / 100)]);
     qs('#stats').innerHTML = tiles.map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
     qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
     if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;

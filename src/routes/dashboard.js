@@ -88,7 +88,6 @@ router.get('/stats', (req, res) => {
     stats.cards = {
       total: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).c,
       activated: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status='activated'${seasonClause}`).get(orgId, ...seasonParams).c,
-      totalLoaded: db.prepare(`SELECT COALESCE(SUM(amount),0) t FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).t,
     };
   }
   // Store spend is per-transaction, not per-season directly — scope it
@@ -96,21 +95,16 @@ router.get('/stats', (req, res) => {
   // exactly one season). Shared by topStores below.
   const storeSeasonClause = seasonId ? ' AND c2.season_id = ?' : '';
   if (cardPerm.can_view && !hidden.has('funds_stats')) {
-    // Approved Funds: what's actually been committed and pushed to
-    // disccardpromos — every approved applicant's card_amount, the moment
-    // they're approved (see routes/applicants.js POST /:id/approve's
-    // upsertAccountForApproval call), independent of whether a physical
-    // card has since been assigned (assignCard is a separate manual step,
-    // so `cards` rows/totalLoaded above can lag behind this).
-    //
-    // FIXED (2026-09) — Total Spent used to sum card_transactions directly,
-    // which depends on disccardpromos' transactions-array field name
-    // (never confirmed — see services/cardSync.js) and silently stayed at
-    // 0 the whole time, which is why this tile read $0.00 regardless of
-    // real activity. services/applicantBalance.js's orgFundsSummary derives
-    // spend from each applicant's real, reliably-readable disccardpromos
-    // balance instead (merge-group aware, so a shared account's balance
-    // isn't double-counted across its members).
+    // Total Loaded (approvedFunds): every approved applicant's own
+    // card_amount plus every shul_allocations top-up since (base + match
+    // combined — see services/applicantBalance.js's orgFundsSummary),
+    // independent of whether a physical card has since been assigned
+    // (assignCard is a separate manual step, so the `cards` table can lag
+    // behind this). Total Spent strictly sums real card_transactions —
+    // correctly reads $0 until disccardpromos' transactions-array field
+    // name is confirmed (see the Cards page's diagnostic banner), rather
+    // than a derived guess. orgFundsSummary dedupes by merge group (so a
+    // shared disccardpromos account isn't double-counted across its members).
     stats.funds = orgFundsSummary(orgId, seasonId);
   }
   // Duplicate flags aren't tied to a season (a flagged duplicate is either
