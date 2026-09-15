@@ -391,17 +391,15 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       // resolution above) — so the external_id on this PATCH must be the
       // primary's, not this member's own, or the just-correctly-set
       // external_id gets silently overwritten right back to the wrong value.
-      const anchor = resolveFundingAnchor(a);
-      // Absolute total from our own ledger (merge-group aware), never a
-      // live-read-then-add — see giftcard.js's syncPackageAmount for why
-      // (the lost-update race that was undercounting a second shul's
-      // contribution). This is the first-ever fund load for a JUST-created
-      // account, so the ledger's remaining figure already IS the correct
-      // total to set (this applicant's own approved card_amount, plus
-      // anything else already on file for the group).
+      // This is the first-ever fund load for a JUST-created account (balance
+      // starts at $0), so the ledger's remaining figure (merge-group aware —
+      // this applicant's own approved card_amount, plus anything else
+      // already on file for the group) is exactly the right amount to
+      // CREDIT via the confirmed incremental add-funds call — see
+      // giftcard.js's addFunds.
       const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
       try {
-        await giftcard.syncPackageAmount(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, totalAmount: ledger.remaining });
+        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, discountId, amount: ledger.remaining });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }
@@ -411,36 +409,62 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
   }
 
   // Retry any allocation that never made it onto the real card the first
-  // time (services/matching.js's createAllocation never blocks on this
-  // write failing — the shul's own balance/ledger is the source of truth
-  // and always updates — so a bad discount ID, a dropped network request,
-  // or disccardpromos being briefly down just left giftcard_status='failed'
-  // sitting there with nobody watching it, and the money never actually
-  // arrived on the card despite this app showing the give as successful).
-  // This 15-minute sweep is the self-heal: any STILL-approved applicant
-  // (already excluding the brand-new accounts just funded above, which
-  // already got the ledger's current total) with at least one failed
-  // allocation gets the ledger's current total re-pushed once — success
-  // clears every one of that applicant's failed rows at once (the push is
-  // the applicant's whole remaining total, not per-row, so one push always
-  // resolves every outstanding failure for them together).
+  // time (services/matching.js's createAllocation/reverseAllocation never
+  // block on this write failing — the shul's own balance/ledger is the
+  // source of truth and always updates — so a bad discount ID, a dropped
+  // network request, or disccardpromos being briefly down just left
+  // giftcard_status='failed' sitting there with nobody watching it, and the
+  // money never actually arrived on/left the card despite this app showing
+  // the give/undo as successful). This 15-minute sweep is the self-heal.
+  //
+  // A normal give (total_amount > 0) retries via the confirmed INCREMENTAL
+  // add-funds call, one row at a time, for exactly that row's own amount —
+  // never the applicant's whole ledger total, which would double-count
+  // every OTHER allocation that already landed successfully (unlike the
+  // brand-new-account loop above, this applicant can have a mix of
+  // already-synced and still-failed rows).
+  //
+  // A reversal (total_amount < 0, from Undo) retries via the best-guess
+  // absolute-set PATCH instead — see giftcard.js's setPackageAmountAbsolute
+  // — since there's no confirmed way to debit a package directly; several
+  // failed reversal rows for the same applicant all converge on the SAME
+  // ledger total, so those are deduped per applicant rather than retried
+  // once per row.
   if (discountId) {
-    const failedApplicantIds = db.prepare(`
-      SELECT DISTINCT applicant_id FROM shul_allocations
-      WHERE org_id = ? AND season_id = ? AND giftcard_status = 'failed'
-    `).all(orgId, seasonId).map(r => r.applicant_id).filter(id => !createdApplicantIds.has(id));
-    for (const applicantId of failedApplicantIds) {
-      const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
+    const failedRows = db.prepare(`
+      SELECT * FROM shul_allocations WHERE org_id = ? AND season_id = ? AND giftcard_status = 'failed'
+    `).all(orgId, seasonId).filter(r => !createdApplicantIds.has(r.applicant_id));
+    const clearRow = (id) => db.prepare(`UPDATE shul_allocations SET giftcard_status = 'ok', giftcard_error = NULL WHERE id = ?`).run(id);
+    const markRowError = (id, message) => db.prepare(`UPDATE shul_allocations SET giftcard_error = ? WHERE id = ?`).run(message, id);
+
+    for (const row of failedRows.filter(r => r.total_amount > 0)) {
+      const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(row.applicant_id);
       if (!a || a.approval_status !== 'approved' || !a.provider_account_id) continue;
       const anchor = resolveFundingAnchor(a);
       if (!anchor.provider_account_id) continue;
-      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount || 0 };
       try {
-        await giftcard.syncPackageAmount(a.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, discountId, totalAmount: ledger.remaining });
-        db.prepare(`UPDATE shul_allocations SET giftcard_status = 'ok', giftcard_error = NULL WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(a.id);
+        await giftcard.addFunds(a.season_id, { customerId: anchor.provider_account_id, discountId, amount: row.total_amount });
+        clearRow(row.id);
       } catch (e) {
-        db.prepare(`UPDATE shul_allocations SET giftcard_error = ? WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(e.message, a.id);
+        markRowError(row.id, e.message);
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Retry of a previously-failed card load still failing: ${e.message}` });
+      }
+    }
+
+    const failedReversalApplicantIds = [...new Set(failedRows.filter(r => r.total_amount < 0).map(r => r.applicant_id))];
+    for (const applicantId of failedReversalApplicantIds) {
+      const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
+      if (!a || !a.provider_account_id) continue;
+      const anchor = resolveFundingAnchor(a);
+      if (!anchor.provider_account_id) continue;
+      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: 0 };
+      const rowIds = failedRows.filter(r => r.applicant_id === applicantId && r.total_amount < 0).map(r => r.id);
+      try {
+        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining });
+        rowIds.forEach(clearRow);
+      } catch (e) {
+        rowIds.forEach(id => markRowError(id, e.message));
+        fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Retry of a previously-failed card claw-back still failing: ${e.message}` });
       }
     }
   }

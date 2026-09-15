@@ -110,7 +110,7 @@ router.post('/reconciliation-flags/:id/resolve', requirePermission('cards', 'can
 // comment — never touches either side's real balance), this actually
 // CORRECTS disccardpromos: pushes this app's own ledger total (the same
 // figure every other write in this app now treats as ground truth — see
-// services/giftcard.js's syncPackageAmount) onto the customer's real
+// services/giftcard.js's setPackageAmountAbsolute) onto the customer's real
 // package balance, then marks the flag resolved. Exists because a flag
 // left open forever doesn't fix itself — nothing in this app auto-corrects
 // a mismatch once detected (reconcileApplicantBalance's own comment: "this
@@ -126,7 +126,7 @@ async function fixOneFlag(orgId, userId, flag) {
   const fundingAnchor = resolveFundingAnchor(applicant);
   if (!fundingAnchor.provider_account_id) throw new Error('This applicant has no disccardpromos account on file.');
   const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.remaining ?? 0;
-  await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, totalAmount: expected });
+  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: expected });
   db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
     .run(userId, flag.id);
   return expected;

@@ -17,15 +17,32 @@
 //
 // CONFIRMED against real API docs (2026-08-16/17): base
 // https://api.disccardpromos.com, auth header is `Authorization: Token <key>`
-// — NOT Bearer. Two resource groups are now confirmed against real docs
-// pasted in by the user (docs.disccardpromos.com itself is blocked by this
-// environment's network egress policy, so we only ever see what gets pasted
-// in directly):
-//   - Customers: /org/customers/... — see the block further down. Loading
-//     funds onto a card is a Customer PATCH (see addFunds below), NOT the
-//     /v1/add-funds/ endpoint this comment originally described — that was
-//     an earlier best guess, corrected 2026-09 once the real contract was
-//     confirmed: there is no separate add-funds endpoint at all.
+// — NOT Bearer.
+//
+// CORRECTED (2026-09-15) — docs.disccardpromos.com is actually reachable
+// from this environment via a plain `curl` (verified live, same session as
+// this fix — it 302-redirects to /reference, a ReadMe.io-hosted API
+// reference with a real "Add Funds" guide page under /reference/add-funds).
+// A PRIOR pass's comment here claimed the opposite ("docs.disccardpromos.com
+// itself is blocked... there is no separate add-funds endpoint at all") and
+// rewrote addFunds into a Customer PATCH — that claim was never actually
+// re-verified against the live docs (its own commit message says it was only
+// "verified in isolation with a mocked fetch"), and it was wrong: the
+// dedicated POST /v1/add-funds/ endpoint was already live in their docs a
+// month before that "correction" was made. This was the root cause of a
+// real, repeated bug report ("adding money to a card doesn't come up in
+// disccard") — the Customer PATCH this app had been sending instead used
+// the wrong URL entirely (a trailing slash on a path their docs define
+// WITHOUT one: `/org/customers/{id}`, not `/org/customers/{id}/`), so
+// every one of those writes almost certainly 404'd.
+//   - Loading funds onto a card: POST /v1/add-funds/ — see addFunds below.
+//     INCREMENTAL only (credits by `amount`, rejects amount<=0) — there is
+//     no confirmed way to REDUCE a package's balance via this endpoint, so
+//     Undo/claw-back and any "force this to an absolute total" reconcile
+//     action still go through the (still best-guess, now URL-corrected)
+//     Customer PATCH — see setPackageAmountAbsolute below.
+//   - Customers: /org/customers/... (list/get/create/update/delete) — see
+//     the block further down.
 //   - Card ops: /v1/balances/, /v1/charge/, /v1/refund/ — see
 //     getCardBalance/chargeCard/refundCard below.
 //
@@ -219,46 +236,50 @@ export async function refundCard(seasonId, { cardNum, amount }) {
   return call(seasonId, '/v1/refund/', { method: 'POST', body: JSON.stringify({ cardNum, amount }) });
 }
 
-// Sets a customer's package balance to an ABSOLUTE total — this is what
-// actually loads (or reduces) money on a card. Wired into applicant
-// approval and every shul allocation (routes/applicants.js,
-// services/matching.js, services/providerAccount.js) — per-season/package
-// mapping was explicitly ruled out; there's one org-wide Package/Discount
-// ID (Settings > Organization > Gift Card Loading, settings key
-// disccardpromos_discount_id) used for every approval regardless of season.
-//
-// CORRECTED (2026-09): there is NO separate /v1/add-funds/ endpoint — that
-// was the earlier best-guess described in this file's header, and it does
-// not match the real API. The only write path for a customer's balance is
-// PATCHing the customer record directly, and that PATCH's own `amount`
-// field is the CUSTOMER'S ENTIRE NEW TOTAL for that package, not a delta.
-//
-// SECOND CORRECTION (2026-09, task: merge-group cumulative-total bug): this
-// function used to be delta-based from the CALLER's side too — it read the
-// customer's current live balance from disccardpromos, added the caller's
-// own delta to it, and PATCHed that computed total. That "read live, add,
-// write" pattern is a classic lost-update race: when two contributions
-// land close together (e.g. two different shuls giving to the same merged
-// applicant within the same sync window), each one can read the SAME
-// "before" balance and independently compute "before + my own delta" — so
-// whichever write lands second silently overwrites the first instead of
-// summing, and disccardpromos ends up showing only the LAST contribution
-// instead of the combined total, even though this app's own ledger has
-// both rows and knows the real combined figure. Every caller now computes
-// the correct ABSOLUTE total itself, from THIS APP'S OWN ledger
-// (services/applicantBalance.js's getApplicantBalances — merge-group
-// aware, already the same figure services/cardSync.js's balance-mismatch
-// reconciliation treats as ground truth) rather than from a live read of
-// disccardpromos' own state, which removes the race entirely: this app is
-// always the one source of truth for what the total SHOULD be, and every
-// write just makes disccardpromos match it.
-//
-// customerId (disccardpromos' own numeric id — our provider_account_id) is
-// required: a Customer PATCH has no by-external-id write path, only the
-// by-external-id READ endpoints elsewhere in this file. externalId is still
-// always included on the PATCH body too, since ANY PATCH that omits it
-// silently clears the field (see linkCardToCustomer's identical note).
-export async function syncPackageAmount(seasonId, { customerId, externalId, discountId, totalAmount }) {
+// CONFIRMED (2026-09-15, fetched directly from docs.disccardpromos.com/
+// reference/add-funds) — POST /v1/add-funds/ credits a customer's balance
+// on a specific Discount package. Body: { discount_id, amount, customer_id
+// (or card_number/external_id/home_phone — customer_id is what this app
+// always has and uses) }. `amount` here IS a delta (must be > 0 — the real
+// API rejects 0/negative with "Amount must be greater than zero") — this is
+// the genuine, documented, incremental "load more money" call, used for
+// every normal give/allocation and every brand-new account's first load.
+// There is no way to reduce a balance through this endpoint — see
+// setPackageAmountAbsolute below for Undo/claw-back and force-reconcile.
+export async function addFunds(seasonId, { customerId, discountId, amount }) {
+  if (isMockMode(seasonId)) return { success: true, mock: true };
+  const delta = Math.round(amount * 100) / 100;
+  if (!(delta > 0)) return { success: true, skipped: true };
+  console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} discount_id=${discountId} -> crediting +$${delta}`);
+  const result = await call(seasonId, '/v1/add-funds/', { method: 'POST', body: JSON.stringify({
+    discount_id: discountId, amount: delta, customer_id: Number(normalizeCustomerId(customerId)),
+  }) });
+  console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} response=${JSON.stringify(result)}`);
+  return result;
+}
+
+// STILL A BEST GUESS, unlike addFunds above — used only where money needs to
+// come OFF a package (Undo/claw-back in services/matching.js's
+// reverseAllocation) or where an admin action needs to force-reconcile to a
+// known-correct absolute total (routes/cards.js's reconciliation-flag fix,
+// and every approval-time funder in routes/applicants.js/
+// services/providerAccount.js, which must converge to the ledger's full
+// total rather than blindly re-adding it — a merge group's account can
+// already carry another member's contribution, and a retry must never
+// double-count a previous partially-successful attempt). disccardpromos'
+// docs have no documented "remove funds"/debit endpoint at all — the
+// closest thing, POST /v1/refund/, requires a referenceId from a prior POS
+// Charge call, which an admin-side Undo never has. This PATCHes the
+// customer record's own `amount` field directly (confirmed shape: a plain
+// float, no discount_id accepted, path is `/org/customers/{id}` with NO
+// trailing slash and no by-external-id variant — externalId is still
+// included in the body since a previous pass's testing found any PATCH
+// omitting it risked clearing the field) — relying on the UNCONFIRMED
+// assumption that this generic field maps onto this org's one configured
+// package, true today only because every applicant uses a single org-wide
+// Package/Discount ID (disccardpromos_discount_id in Settings). If
+// disccardpromos ever documents a real debit endpoint, replace this.
+export async function setPackageAmountAbsolute(seasonId, { customerId, externalId, totalAmount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
   const newTotal = Math.max(0, Math.round(totalAmount * 100) / 100);
   // Diagnostic, always-on (not gated behind a debug flag) — this is the
@@ -271,11 +292,11 @@ export async function syncPackageAmount(seasonId, { customerId, externalId, disc
   // report ever comes in again, this line is the first thing to check —
   // it shows exactly what THIS app computed and sent, which tells you
   // immediately whether the bug is in our own math or somewhere after.
-  console.log(`[giftcard] syncPackageAmount customerId=${normalizeCustomerId(customerId)} discountId=${discountId} externalId=${externalId} -> setting package amount to $${newTotal}`);
-  const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'PATCH', body: JSON.stringify({
-    amount: newTotal, discount_id: discountId, external_id: externalId,
+  console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} -> setting package amount to $${newTotal}`);
+  const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}`, { method: 'PATCH', body: JSON.stringify({
+    amount: newTotal, external_id: externalId,
   }) });
-  console.log(`[giftcard] syncPackageAmount customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);
+  console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);
   return result;
 }
 

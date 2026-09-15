@@ -215,17 +215,38 @@ function trackPageview() {
 // instead of each duplicating the same two warning conditions. `verb` is
 // past-tense ('Undone'/'Reversed') to match each call site's own wording.
 // Two independent things can go wrong with an otherwise-successful
-// reversal: some of the money was already spent (shortfall — written off,
-// not restored to the shul), and/or the disccardpromos write itself failed
-// (giftcard_status/giftcard_error on the reversal row — see services/
-// matching.js's reverseAllocation) — the shul's own balance is still
-// correctly restored either way; only disccardpromos may be temporarily
-// out of sync until the automatic retry sweep catches it.
+// reversal: some of the money couldn't be retrieved (shortfall — written
+// off, not restored to the shul), and/or the disccardpromos write itself
+// failed (giftcard_status/giftcard_error on the reversal row — see
+// services/matching.js's reverseAllocation) — the shul's own balance is
+// still correctly restored either way; only disccardpromos may be
+// temporarily out of sync until the automatic retry sweep catches it.
+//
+// `neverLoaded` (see reverseAllocation) means this app's OWN record already
+// shows the ORIGINAL give's disccardpromos write failed when it was made —
+// so a shortfall here is never "the applicant already spent it" (this app
+// has no way to know that, and saying so was flatly false when the real
+// cause was a past sync bug that kept the money from ever reaching the
+// card). Only when the original load is known to have succeeded does
+// "already spent" become the honest explanation for a lower-than-expected
+// live balance.
 function reversalToastMessage(reversal, verb) {
   const parts = [];
-  if (reversal?.shortfall > 0) parts.push(`${fmtMoney(reversal.shortfall)} had already been spent and couldn't be retrieved`);
+  if (reversal?.shortfall > 0) {
+    parts.push(reversal.neverLoaded
+      ? `${fmtMoney(reversal.shortfall)} of this was never actually loaded onto the card in the first place (an earlier sync issue) — there was nothing to retrieve`
+      : `${fmtMoney(reversal.shortfall)} had already been spent and couldn't be retrieved`);
+  }
   if (reversal?.giftcard_status === 'failed') parts.push(`disccardpromos wasn't updated yet — it'll retry automatically (the shul's balance was still restored)`);
-  return parts.length ? [`${verb} — but ${parts.join('; ')}.`, true] : [verb, false];
+  if (!parts.length) return [verb, false];
+  // A full shortfall (nothing at all came back from the card — the
+  // reversal row's own total_amount is 0, since total_amount = -retrievable)
+  // shouldn't lead with a plain success verb — only this app's OWN ledger/
+  // balance was reversed, so say that plainly instead of implying the card
+  // was touched.
+  const nothingRetrieved = reversal?.shortfall > 0 && Math.abs(reversal.total_amount || 0) < 0.005;
+  const headline = nothingRetrieved ? `Your balance was restored, but nothing could be retrieved from the card` : verb;
+  return [`${headline} — ${parts.join('; ')}.`, true];
 }
 
 function toast(msg, isError = false) {

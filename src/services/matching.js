@@ -164,20 +164,16 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
-    // Ledger read AFTER this allocation's own row is already committed
-    // above — `remaining` already includes this contribution, so it's sent
-    // to disccardpromos as-is, never added to again here.
-    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
-    const newTotal = existing.remaining;
-    // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
-    // on the actual write. This one shows the INPUT side: what the ledger
-    // (now including this allocation) says the new total should be — so a
-    // wrong result can be traced to either "the ledger has the wrong total"
-    // or "the write itself didn't take", instead of just seeing the final
-    // number.
-    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
+    // Confirmed (2026-09-15, see giftcard.js's addFunds) POST /v1/add-funds/
+    // credits a package by an INCREMENTAL amount — this allocation's own
+    // combined base+match (`totalAmount`) is exactly the right delta to
+    // send, no ledger read needed: the endpoint itself does the add
+    // atomically on disccardpromos' own side, so two near-simultaneous
+    // contributions for the same applicant can never race each other out
+    // the way a read-then-compute-absolute-total approach could.
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount}`);
     try {
-      await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, totalAmount: newTotal });
+      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, discountId, amount: totalAmount });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -232,8 +228,24 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // can retry the undo once disccardpromos is reachable again, instead of
   // silently reversing this shul's balance/ledger for money that may
   // already be spent and unretrievable.
+  //
+  // FIXED (2026-09-15) — a SECOND, separate root cause of "the shul didn't
+  // get their money back": when THIS allocation's own original write to
+  // disccardpromos already failed (giftcard_status='failed' — see
+  // addFunds/setPackageAmountAbsolute's header comments for the
+  // wrong-endpoint bug this used to hit), the applicant's live balance
+  // reflects every OTHER contribution ever made to them EXCEPT this one —
+  // comparing it against original.total_amount below and writing off
+  // whatever "shortfall" that comparison found was punishing the shul for
+  // this app's own past sync bug, not real spending: the money never
+  // reached the card, so there was nothing for the applicant to have
+  // spent, and the full amount belongs back in the shul's balance. Skip the
+  // live-balance check entirely in that case — the full amount is always
+  // "retrievable" (nothing to claw back FROM the card, since the card
+  // never had it) and the shul's balance is restored in full.
+  const neverLoaded = original.giftcard_status === 'failed';
   let retrievable = original.total_amount, shortfall = 0;
-  if (fundingExternalId && discountId) {
+  if (!neverLoaded && fundingExternalId && discountId) {
     let customer = null, lastError = null;
     for (let attempt = 1; attempt <= 3 && !customer; attempt++) {
       try {
@@ -303,11 +315,11 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // removing the other half of the race).
     const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
     const newTotal = Math.max(0, existing.remaining);
-    // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
-    // on the actual write.
+    // Diagnostic — see giftcard.js's setPackageAmountAbsolute for the
+    // matching log on the actual write.
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);
     try {
-      await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
+      await giftcard.setPackageAmountAbsolute(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, totalAmount: newTotal });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -327,6 +339,16 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   db.prepare('UPDATE shul_allocations SET giftcard_status = ?, giftcard_error = ? WHERE id = ?').run(giftcardStatus, giftcardError, id);
 
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
+  // neverLoaded: this app's OWN record already shows the original give's
+  // disccardpromos write failed at the time it was made — so a shortfall
+  // here isn't the applicant having "already spent" the money, it's that
+  // the money never reached the real card in the first place (see
+  // giftcard.js's addFunds/setPackageAmountAbsolute header comments for the
+  // wrong-endpoint bug this used to hit). The frontend uses this to tell
+  // the truth instead of guessing "already spent" whenever the live
+  // balance simply comes back lower than this app expected. (neverLoaded is
+  // computed earlier in this function, right above the live-balance check
+  // it's used to skip.)
   logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
-  return { ...reversalRow, shortfall };
+  return { ...reversalRow, shortfall, neverLoaded };
 }

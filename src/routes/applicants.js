@@ -1020,15 +1020,15 @@ router.post('/:id/approve', requirePermission('applicants', 'can_edit'), async (
           // live disccardpromos read-then-add — this applicant's row was
           // already UPDATEd to approved/card_amount above, so the ledger
           // already reflects this approval's own contribution. See
-          // giftcard.js's syncPackageAmount for why (a live-read-then-add
-          // races when two shuls' contributions land close together,
-          // silently undercounting instead of summing).
+          // giftcard.js's setPackageAmountAbsolute for why (a live-read-
+          // then-add races when two shuls' contributions land close
+          // together, silently undercounting instead of summing).
           const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: amount };
-          // Diagnostic — see giftcard.js's syncPackageAmount for the
+          // Diagnostic — see giftcard.js's setPackageAmountAbsolute for the
           // matching log on the actual write.
           console.log(`[applicants] approve applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id || acctResult.accountId} thisAmount=$${amount} ledgerRemaining=$${ledger.remaining}`);
           try {
-            await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, totalAmount: ledger.remaining });
+            await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining });
           } catch (e) {
             providerFundsError = e.message;
             console.error('[giftcard] failed to load funds on approval:', e.message);
@@ -1273,7 +1273,7 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
         // Absolute total from our own ledger, never a live read-then-add —
         // see the single /:id/approve route's identical comment.
         const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: amount };
-        try { await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, totalAmount: ledger.remaining }); }
+        try { await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining }); }
         catch (e) {
           providerErrors++;
           providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: card not loaded — ${e.message}`);
@@ -1629,7 +1629,7 @@ router.post('/:id/retry-provider-sync', requireSuperAdmin, async (req, res) => {
       // not pile another delta on top of an unknown starting point).
       const fundingAnchor = resolveFundingAnchor(applicant);
       const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: applicant.card_amount };
-      try { await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, discountId, totalAmount: ledger.remaining }); }
+      try { await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining }); }
       catch (e) { fundsError = e.message; }
     }
   }
