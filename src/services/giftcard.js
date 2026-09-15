@@ -241,11 +241,15 @@ export async function refundCard(seasonId, { cardNum, amount }) {
 // on a specific Discount package. Body: { discount_id, amount, customer_id
 // (or card_number/external_id/home_phone — customer_id is what this app
 // always has and uses) }. `amount` here IS a delta (must be > 0 — the real
-// API rejects 0/negative with "Amount must be greater than zero") — this is
-// the genuine, documented, incremental "load more money" call, used for
-// every normal give/allocation and every brand-new account's first load.
-// There is no way to reduce a balance through this endpoint — see
-// setPackageAmountAbsolute below for Undo/claw-back and force-reconcile.
+// API rejects 0/negative with "Amount must be greater than zero").
+//
+// NOT CURRENTLY CALLED (2026-09-15, explicit instruction): every
+// create/reconcile write in this app was switched back to
+// setPackageAmountAbsolute below, pushing the FULL computed total (every
+// shul's combined base+match for this applicant, from this app's own
+// ledger) rather than one allocation's own delta through this endpoint.
+// Kept here, correct and ready to use, in case a future call site
+// genuinely wants an incremental add instead of a forced absolute total.
 export async function addFunds(seasonId, { customerId, discountId, amount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
   const delta = Math.round(amount * 100) / 100;

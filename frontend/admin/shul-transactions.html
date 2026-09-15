@@ -401,7 +401,12 @@ window.submitPayout = async () => {
 
 async function loadAllocations() {
   const { allocations } = await api('/shul-payments/allocations?' + currentFilterParams());
-  const active = allocations.filter(a => !a.reversed_at);
+  // Reversal rows themselves (reversal_of set — a negative-amount credit-
+  // back entry, never itself reversed_at) must never show an Undo button:
+  // "undoing" a reversal ran negative math and silently corrupted the
+  // shul's balance — see services/matching.js's reverseAllocation, which
+  // now also refuses this server-side as a second layer of defense.
+  const active = allocations.filter(a => !a.reversed_at && !a.reversal_of);
   qs('#tbody-allocations').innerHTML = active.length ? active.map(a => `<tr>
       <td>${esc(a.shul_name||'')}</td>
       <td>${esc(a.first_name||'')} ${esc(a.last_name||'')}${a.is_admin_override ? ' ' + badge('override','pending') : ''}</td>

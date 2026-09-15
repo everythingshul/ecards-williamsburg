@@ -164,16 +164,24 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
-    // Confirmed (2026-09-15, see giftcard.js's addFunds) POST /v1/add-funds/
-    // credits a package by an INCREMENTAL amount — this allocation's own
-    // combined base+match (`totalAmount`) is exactly the right delta to
-    // send, no ledger read needed: the endpoint itself does the add
-    // atomically on disccardpromos' own side, so two near-simultaneous
-    // contributions for the same applicant can never race each other out
-    // the way a read-then-compute-absolute-total approach could.
-    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount}`);
+    // REVERTED (2026-09-15, explicit instruction): push the FULL computed
+    // total via the 'amount' PATCH (setPackageAmountAbsolute), not just
+    // this one allocation's own delta via the incremental add-funds
+    // endpoint. Example from the request: shul 1 gives $100 (+$100 match =
+    // $200), shul 2 gives $50 (+$50 match = $100) — disccardpromos' amount
+    // field must end up at $300 (both combined), computed from THIS APP'S
+    // OWN ledger (services/applicantBalance.js's getApplicantBalances —
+    // merge-group aware), never a separate delta add.
+    //
+    // Ledger read AFTER this allocation's own row is already committed
+    // above — `remaining` already includes this contribution, so it's sent
+    // to disccardpromos as-is, never added to again here (removes the
+    // lost-update race a live-read-then-add would have).
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
+    const newTotal = existing.remaining;
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
     try {
-      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, discountId, amount: totalAmount });
+      await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: newTotal });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -227,6 +235,18 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   const original = db.prepare('SELECT * FROM shul_allocations WHERE id = ? AND org_id = ?').get(allocationId, orgId);
   if (!original) throw new Error('Allocation not found');
   if (original.reversed_at) throw new Error('This allocation has already been reversed');
+  // FOUND (2026-09-15) — a reversal row itself (reversal_of set, negative
+  // base/match/total_amount, its OWN reversed_at left null since it's never
+  // itself been reversed) was still clickable as "Undo" in two admin list
+  // views (Shul Transactions' Allocations tab, the shul profile's
+  // Allocations Given table — neither filtered it out the way the
+  // applicant profile's own list already did). Reversing a reversal ran
+  // every calculation below on a NEGATIVE total_amount, producing garbage
+  // (a nonsensical negative "retrievable", a double-negated credit back
+  // onto the shul's balance) — the likely real cause behind "Undo isn't
+  // working." Blocked here, not just hidden in those two views (now also
+  // fixed), so no other/future caller can hit this either.
+  if (original.reversal_of) throw new Error("This is a reversal record, not a give — it can't be undone itself.");
 
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(original.applicant_id);
   // Same merge-group anchor reasoning as createAllocation above — the

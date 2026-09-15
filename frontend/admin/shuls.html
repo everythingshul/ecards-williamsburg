@@ -499,7 +499,7 @@ async function loadPaymentsTab(shulId, shul) {
           <td>${fmtMoney(a.base_amount)}</td><td>${fmtMoney(a.match_amount)}</td><td>${fmtMoney(a.total_amount)}</td>
           <td>${esc(a.created_by_first||'')} ${esc(a.created_by_last||'')}</td>
           <td>${fmtDateTime(a.created_at)}</td>
-          <td>${a.reversed_at ? badge('reversed','rejected') : `<button class="btn btn-sm btn-outline" onclick="reverseAllocation('${a.id}','${shulId}')">Undo</button>`}</td>
+          <td>${a.reversed_at ? badge('reversed','rejected') : (a.reversal_of ? badge('reversal','rejected') : `<button class="btn btn-sm btn-outline" onclick="reverseAllocation('${a.id}','${shulId}')">Undo</button>`)}</td>
         </tr>`).join('')}
       </tbody></table>` : '<p class="small-muted">No allocations yet.</p>'}
     `;

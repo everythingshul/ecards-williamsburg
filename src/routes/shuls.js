@@ -40,7 +40,30 @@ const REQUIRED_SHUL_FIELDS = ['name_en', 'address', 'city', 'state', 'zip', 'ruv
 // second account with the same email.
 function ensureShulPortalUser(orgId, shul, portalEmailOverride) {
   let user = db.prepare('SELECT * FROM users WHERE shul_id = ?').get(shul.id);
-  if (user) return user;
+  if (user) {
+    // FIXED (2026-09) — this used to return the existing row as-is, stale
+    // email and all: every invite/resend/approve email in this file sends
+    // to `user.email`, not the shul's own gabai_email, so an admin editing
+    // a shul's email (a plain gabai_email update on PUT /:id, no override
+    // passed here) had zero effect on where the NEXT portal email actually
+    // went — it kept going to whatever address was typed in when the login
+    // was first created, indefinitely, even after PUT /:id deactivated
+    // that login for exactly this reason. Every call site through here is
+    // an explicit "send this shul a portal email now" action, so it should
+    // always target the shul's current declared contact address — resync
+    // before returning, same collision-safe logic PUT /:id already uses
+    // for a shul's own self-edit (skip only on a blank/colliding target,
+    // which can't be written to the UNIQUE users.email column anyway).
+    const target = normalizeEmail(portalEmailOverride || shul.gabai_email);
+    if (target && normalizeEmail(user.email) !== target) {
+      const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(target, user.id);
+      if (!clash) {
+        db.prepare('UPDATE users SET email = ? WHERE id = ?').run(target, user.id);
+        user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+      }
+    }
+    return user;
+  }
   // gabai_email stays as typed on the shul row (fine for display/mailing),
   // but the users-table copy must be normalized — login lowercases its
   // lookup, so a mixed-case users.email is an account nobody can sign into.
