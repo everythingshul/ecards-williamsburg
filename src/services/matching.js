@@ -207,8 +207,19 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
 // list view that renders a reversal row, so there's exactly one source of
 // truth for "why" instead of the frontend re-deriving its own explanation
 // from raw flags.
-function buildReversalNote({ neverLoaded, total, retrievable, shortfall }) {
+function buildReversalNote({ neverLoaded, total, retrievable, shortfall, rawDiagnostic }) {
   const fmt = (n) => `$${n.toFixed(2)}`;
+  // Whenever a shortfall is reported, append EXACTLY what the live read
+  // returned — this app has no server console an admin can check, so
+  // without this the only way to sanity-check "was this really spent?" is
+  // to trust the app's own conclusion. With it, an admin can directly
+  // compare `matchedPackageAmount` against what disccardpromos' own
+  // dashboard shows for this applicant right now: if they match, the
+  // shortfall is real; if they don't, the read (or which package/customer
+  // it hit) is wrong, and this is the exact evidence needed to chase that.
+  const diag = (shortfall > 0 && rawDiagnostic)
+    ? ` [Live read: disccardpromos external_id=${rawDiagnostic.externalIdQueried}, customer id=${rawDiagnostic.customerIdReturned}, package id=${rawDiagnostic.discountIdConfigured} amount=${rawDiagnostic.matchedPackageAmount}]`
+    : '';
   if (neverLoaded) {
     return `Full ${fmt(total)} returned to the shul's balance. This allocation had never actually reached the applicant's card in the first place (an earlier sync issue), so there was nothing to retrieve.`;
   }
@@ -216,9 +227,9 @@ function buildReversalNote({ neverLoaded, total, retrievable, shortfall }) {
     return `Full ${fmt(total)} returned to the shul's balance — confirmed on disccardpromos that none of it had been spent yet.`;
   }
   if (retrievable <= 0) {
-    return `$0 returned to the shul's balance — the full ${fmt(total)} had already been spent by the applicant before this Undo.`;
+    return `$0 returned to the shul's balance — the full ${fmt(total)} had already been spent by the applicant before this Undo.${diag}`;
   }
-  return `${fmt(retrievable)} returned to the shul's balance; ${fmt(shortfall)} had already been spent by the applicant and could not be retrieved.`;
+  return `${fmt(retrievable)} returned to the shul's balance; ${fmt(shortfall)} had already been spent by the applicant and could not be retrieved.${diag}`;
 }
 
 // Reverses an allocation as an equal-and-opposite entry (never a delete —
@@ -288,6 +299,16 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // never had it) and the shul's balance is restored in full.
   const neverLoaded = original.giftcard_status === 'failed';
   let retrievable = original.total_amount, shortfall = 0;
+  // rawDiagnostic — the EXACT live read this decision was based on, kept
+  // and surfaced (see buildReversalNote below) instead of only ever going
+  // to a server console nobody here can see (this app has no server
+  // console access — see CLAUDE.md). Whenever "Undo says money was spent
+  // but it wasn't" comes up again, this number settles it immediately: it
+  // either matches what disccardpromos' own dashboard shows for this
+  // applicant right now (a real, if surprising, live balance — the "spent"
+  // conclusion is correct) or it doesn't (the read itself, or which
+  // package/customer it hit, is wrong — a real bug to chase from here).
+  let rawDiagnostic = null;
   if (!neverLoaded && fundingExternalId && discountId) {
     let customer = null, lastError = null;
     for (let attempt = 1; attempt <= 3 && !customer; attempt++) {
@@ -303,6 +324,8 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     }
     const pkg = customer.packages?.find(p => String(p.id) === String(discountId));
     const currentBalance = pkg ? Number(pkg.amount) : null;
+    rawDiagnostic = { externalIdQueried: fundingExternalId, discountIdConfigured: discountId, customerIdReturned: customer.id, packagesReturned: customer.packages, matchedPackageAmount: currentBalance };
+    console.log(`[matching] reverseAllocation LIVE READ for allocation ${original.id}:`, JSON.stringify(rawDiagnostic));
     if (currentBalance == null) {
       throw new Error("Couldn't read this applicant's real balance from disccardpromos (no matching package on their account) — Undo was NOT performed, so nothing was changed here or on the card.");
     }
@@ -331,7 +354,7 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // ledger read either fully includes this reversal or hasn't started yet
   // — never half-applied.
   const id = uuid();
-  const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall });
+  const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
   db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id, reversalNote);
