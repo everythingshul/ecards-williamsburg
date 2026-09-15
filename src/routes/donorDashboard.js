@@ -95,28 +95,32 @@ router.get('/stats', (req, res) => {
 });
 
 // Per-shul rollup for the "Shuls" expandable panel — name (English +
-// Hebrew), how many of their own applicants are on file, how much money
-// has been approved for those applicants (same SUM(card_amount) formula as
-// the org-wide funds.loaded figure above, just grouped by shul), and the
-// gabai's name as the shul's own point of contact. Deliberately no
-// applicant-level detail here at all (names, contact info) — a donor sees
-// aggregate numbers per shul, never who the individual applicants are.
+// Hebrew), how many of their own applicants are on file, and how much
+// money THIS SHUL has paid in and had approved (same figure as Shul
+// Transactions' "Shul Totals" tab / services/shulBalance.js's totalPaid:
+// SUM(shul_payments.net_amount) WHERE status='approved') — NOT a sum of
+// their applicants' card amounts, which used to be here and is a
+// completely different number (money loaded onto cards vs. money the shul
+// itself paid the org) — reported as "Approved Money says $0 for every
+// shul" since most shuls' own payments and their applicants' card totals
+// rarely match. Gabai's name is the shul's own point of contact.
+// Deliberately no applicant-level detail here at all (names, contact
+// info) — a donor sees aggregate numbers per shul, never who the
+// individual applicants are.
 router.get('/shuls', (req, res) => {
   const orgId = req.user.org_id;
   const seasonId = req.query.season_id || '';
-  const seasonClause = seasonId ? ' AND a.season_id = ?' : '';
-  const seasonParams = seasonId ? [seasonId] : [];
+  const seasonClauseA = seasonId ? ' AND a.season_id = ?' : '';
+  const seasonClauseP = seasonId ? ' AND p.season_id = ?' : '';
 
   const rows = db.prepare(`
     SELECT s.id, s.name_en, s.name_he, s.gabai_first_name, s.gabai_last_name,
-      COUNT(CASE WHEN a.approval_status != 'incomplete' THEN a.id END) applicant_count,
-      COALESCE(SUM(CASE WHEN a.approval_status = 'approved' THEN a.card_amount ELSE 0 END), 0) approved_money
+      (SELECT COUNT(*) FROM applicants a WHERE a.shul_id = s.id AND a.approval_status != 'incomplete'${seasonClauseA}) applicant_count,
+      COALESCE((SELECT SUM(p.net_amount) FROM shul_payments p WHERE p.shul_id = s.id AND p.status = 'approved'${seasonClauseP}), 0) approved_money
     FROM shuls s
-    LEFT JOIN applicants a ON a.shul_id = s.id${seasonClause}
     WHERE s.org_id = ? AND s.is_locked = 0
-    GROUP BY s.id
     ORDER BY approved_money DESC
-  `).all(...seasonParams, orgId);
+  `).all(...(seasonId ? [seasonId] : []), ...(seasonId ? [seasonId] : []), orgId);
 
   res.json({ shuls: rows.map(r => ({
     id: r.id, nameEn: r.name_en, nameHe: r.name_he,

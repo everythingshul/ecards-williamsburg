@@ -497,6 +497,24 @@ router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async
       ? ' (voided — the original charge never settled, so nothing actually hit the card.)'
       : (result.voidAttemptError ? ` (refunded — void wasn't possible: ${result.voidAttemptError})` : '');
     const refundStatus = payment.status === 'approved' ? 'approved' : 'rejected';
+    // FIXED — a payment refunded/voided while still 'pending_approval' used
+    // to stay in that status forever: services/shulBalance.js's
+    // pendingBalance() sums net_amount for every 'pending_approval' row
+    // unconditionally, and the refund row above lands in 'rejected' (a
+    // different bucket, since the original was never 'approved' — see this
+    // route's file-level comment), so nothing ever offset it. The shul kept
+    // seeing that money as "pending" indefinitely even though it had
+    // already been sent back to their card. A full refund/void closes the
+    // original out completely — nothing is left to ever approve — so it
+    // moves to 'rejected' too, matching the refund row's own bucket and
+    // dropping both out of Pending Balance together. A genuine PARTIAL
+    // refund of a still-pending payment leaves the original's status alone
+    // (some of it is still real, outstanding money to be approved or
+    // rejected on its own merits).
+    if (payment.status === 'pending_approval' && isFullAmount) {
+      db.prepare(`UPDATE shul_payments SET status = 'rejected', approved_by = ?, approved_at = datetime('now'), rejected_reason = ? WHERE id = ?`)
+        .run(req.user.id, `${result.method === 'void' ? 'Voided' : 'Refunded'} before approval.`, payment.id);
+    }
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, direction, sola_ref_num, refund_of, entered_by, approved_by, approved_at, notes)
       VALUES (?,?,?,?,'sola_refund',?,0,?,?,'out',?,?,?,?,datetime('now'),?)`)
