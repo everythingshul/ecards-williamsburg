@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
 import * as giftcard from '../services/giftcard.js';
 import { sendXlsx } from '../services/xlsx.js';
-import { syncOneCard, syncAllCards } from '../services/cardSync.js';
+import { syncOneCard, syncAllCards, getTxnShapeDiagnostic } from '../services/cardSync.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { resolveFundingAnchor } from '../services/providerAccount.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
@@ -32,7 +32,12 @@ router.get('/', (req, res) => {
   // multiple seasons with different overrides has no single true answer, so
   // report the filtered season's status if one's selected, else the
   // org-wide default every season without its own override actually uses.
-  res.json({ cards: redact(rows, req.permission.hidden_fields), total, page: +page, pageSize: +pageSize, mockMode: giftcard.isMockMode(season_id || null) });
+  // txnShapeDiagnostic: see services/cardSync.js's recordTxnShapeDiagnostic
+  // — null once transactions are being recognized normally, otherwise the
+  // real customer response's keys/sample from the last sweep that couldn't
+  // find a transactions array, so the admin can see the actual shape
+  // without server console access (see the Cards page's banner).
+  res.json({ cards: redact(rows, req.permission.hidden_fields), total, page: +page, pageSize: +pageSize, mockMode: giftcard.isMockMode(season_id || null), txnShapeDiagnostic: getTxnShapeDiagnostic(req.user.org_id) });
 });
 
 // Full-detail CSV export — every field, no pagination. Must be registered before /:id.

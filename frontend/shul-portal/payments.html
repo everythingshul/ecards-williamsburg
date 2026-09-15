@@ -26,10 +26,12 @@ renderShell('/shul-portal/payments', `
 
   <div class="card" style="margin-top:16px">
     <h3 style="margin-top:0">Make a Payment</h3>
-    <div id="sola-disabled-note" style="display:none" class="small-muted">Online card payment isn't available for your shul right now.</div>
-    <div id="sola-mock-note" style="display:none" class="small-muted">Test mode — no real charge will be made.</div>
-    <div id="sola-form-wrap" style="display:none">
+    <p class="small-muted">Choose how you'd like to pay.</p>
+    <div id="method-buttons" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px"></div>
+    <div id="sola-mock-note" style="display:none;margin-top:10px" class="small-muted">Test mode — no real charge will be made.</div>
+    <div id="sola-form-wrap" style="display:none;margin-top:14px">
       <label>Amount ($)</label><input id="pay-amount" type="number" min="1" step="0.01" style="max-width:220px">
+      <div id="pay-fee-preview" class="small-muted" style="margin-top:4px"></div>
       <!-- Plain fields, not a hosted iframe — card number/CVV are typed
            straight into this page and POSTed to this app's own backend,
            which forwards them to Sola. See services/sola.js's file-level
@@ -45,7 +47,6 @@ renderShell('/shul-portal/payments', `
       <button class="btn btn-primary btn-sm" style="margin-top:14px" id="btn-pay" onclick="submitPayment()">Pay</button>
       <div id="pay-status" class="small-muted" style="margin-top:8px"></div>
     </div>
-    <button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="openRequestMethodModal()">Request a Different Payment Method</button>
   </div>
 
   <h3 style="margin-top:20px">Give to an Applicant</h3>
@@ -67,7 +68,7 @@ async function loadBalance() {
   qs('#balance-stats').innerHTML = `
     <div class="card"><div class="small-muted">Pending Approval</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.pending)}</div></div>
     <div class="card"><div class="small-muted">Total Paid</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.totalPaid)}</div></div>
-    <div class="card"><div class="small-muted">Total Distributed</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.totalDistributed)}</div></div>
+    <div class="card"><div class="small-muted">Total Distributed (including match)</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.totalDistributed)}</div></div>
     <div class="card"><div class="small-muted">Available Balance</div><div style="font-size:22px;font-weight:600">${fmtMoney(b.approved)}</div></div>
   `;
   updateCalculator();
@@ -97,12 +98,60 @@ function updateCalculator() {
   `;
 }
 
+// One equally-sized button per active payment method (Settings > Shul
+// Payments > Payment Method Options) plus Card, if online payment is
+// enabled for this shul — replaces the old layout where the card form was
+// always shown front-and-center and every other method was buried behind
+// a single "Request a Different Payment Method" link, which read as if
+// card were the "real" option and everything else an afterthought.
+// Clicking Card reveals the same real Sola form as before; clicking any
+// other method goes straight into the existing request-a-method flow
+// (see openRequestMethodModal), just pre-picked instead of needing a
+// second dropdown selection.
 async function loadPayForm() {
   payConfig = await api('/shul-payments/mine/config');
-  if (!payConfig.solaEnabled) { qs('#sola-disabled-note').style.display = 'block'; return; }
   if (payConfig.mockMode) qs('#sola-mock-note').style.display = 'block';
-  qs('#sola-form-wrap').style.display = 'block';
+  const methods = payConfig.manualPaymentMethods?.length ? payConfig.manualPaymentMethods : DEFAULT_MANUAL_PAYMENT_METHODS;
+  const buttons = [];
+  if (payConfig.solaEnabled) buttons.push({ value: '__card__', label: 'Card' });
+  methods.forEach(m => buttons.push({ value: m.value, label: m.label }));
+  qs('#method-buttons').innerHTML = buttons.map(b => `<button class="btn btn-outline" onclick="selectPaymentMethod('${esc(b.value)}')">${esc(b.label)}</button>`).join('')
+    || '<p class="small-muted">No payment methods are configured yet — contact the office.</p>';
+  updateFeePreview();
 }
+window.selectPaymentMethod = (value) => {
+  if (value === '__card__') {
+    qs('#sola-form-wrap').style.display = 'block';
+    qs('#sola-form-wrap').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } else {
+    qs('#sola-form-wrap').style.display = 'none';
+    openRequestMethodModal(value);
+  }
+};
+// Computes the same percent+flat formula services/shulPayments.js's
+// computeCardFee applies server-side (Settings > Shul Payments > Card
+// Processing Fee), purely to show it live as the shul types — the server
+// is still the one source of truth that actually charges the card, this
+// is only a preview so nobody is surprised by their statement afterward.
+// Fee is ADDED to the typed amount for what hits the card, never carved
+// out of it — see routes/shulPayments.js's file-level comment.
+function computeFeePreview(amount) {
+  const { percent = 0, flat = 0 } = payConfig?.cardFee || {};
+  if (!(amount > 0) || (!percent && !flat)) return { fee: 0, total: amount || 0 };
+  const fee = Math.max(0, Math.min(Math.round((amount * (percent / 100) + flat) * 100) / 100, amount));
+  return { fee, total: Math.round((amount + fee) * 100) / 100 };
+}
+function updateFeePreview() {
+  const amount = +qs('#pay-amount')?.value;
+  const el = qs('#pay-fee-preview');
+  if (!el) return;
+  if (!(amount > 0)) { el.textContent = ''; return; }
+  const { fee, total } = computeFeePreview(amount);
+  el.innerHTML = fee > 0
+    ? `${fmtMoney(amount)} + ${fmtMoney(fee)} processing fee = <strong>${fmtMoney(total)} charged to your card</strong>`
+    : `<strong>${fmtMoney(total)}</strong> will be charged to your card`;
+}
+qs('#pay-amount')?.addEventListener('input', updateFeePreview);
 // Light formatting as the shul types — spaces every 4 digits in the card
 // number, auto-inserts the "/" in MM/YY — purely cosmetic, both are
 // stripped back to plain digits before being sent (see submitPayment).
@@ -135,11 +184,12 @@ window.submitPayment = async () => {
   qs('#btn-pay').disabled = true;
   qs('#pay-status').textContent = '';
   try {
-    const { mock } = await api('/shul-payments/mine/sola-charge', { method: 'POST', body: { amount, xCardNum, xCVV, xExp, xZip } });
+    const { mock, chargeAmount } = await api('/shul-payments/mine/sola-charge', { method: 'POST', body: { amount, xCardNum, xCVV, xExp, xZip } });
     qs('#pay-status').textContent = mock
       ? 'Test mode: charge simulated. (No real Sola account configured — nothing further to confirm.)'
-      : 'Payment submitted — it will show as pending until the office approves it.';
-    qs('#pay-card-num').value = ''; qs('#pay-cvv').value = ''; qs('#pay-exp').value = '';
+      : `Charged ${fmtMoney(chargeAmount)} — submitted, and will show as pending until the office approves it.`;
+    qs('#pay-card-num').value = ''; qs('#pay-cvv').value = ''; qs('#pay-exp').value = ''; qs('#pay-amount').value = '';
+    updateFeePreview();
     loadBalance(); loadPayments();
   } catch (err) { qs('#pay-status').textContent = err.message; }
   qs('#btn-pay').disabled = false;
@@ -154,28 +204,40 @@ window.promptPay = () => {
   if (raw === null) return;
   const amount = +raw;
   if (!(amount > 0)) return toast('Enter a valid amount', true);
-  if (!qs('#sola-form-wrap') || qs('#sola-form-wrap').style.display === 'none') return toast('Online card payment is not enabled for your shul.', true);
+  if (!payConfig?.solaEnabled) return toast('Online card payment is not enabled for your shul — choose a payment method below instead.', true);
+  qs('#sola-form-wrap').style.display = 'block';
   qs('#pay-amount').value = amount;
+  updateFeePreview();
   qs('#sola-form-wrap').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  toast(`Enter your card details below and click Pay to charge ${fmtMoney(amount)}.`);
+  const { total } = computeFeePreview(amount);
+  toast(`Enter your card details below and click Pay to charge ${fmtMoney(total)}${total !== amount ? ` (${fmtMoney(amount)} + processing fee)` : ''}.`);
 };
 
 // Options come from Settings > Shul Payments > Payment Method Options
 // (admin-editable, see payConfig.manualPaymentMethods from loadPayForm's
 // GET /mine/config) — falls back to the same defaults every other page
 // uses if payConfig somehow hasn't loaded yet.
-window.openRequestMethodModal = () => {
+//
+// preselected: the method button the shul just clicked (see
+// selectPaymentMethod above) — since which button they clicked already
+// says which method they want, this skips the dropdown and just confirms
+// it, only asking for the optional message. Left undefined keeps the old
+// dropdown-picker behavior as a fallback for any other caller.
+window.openRequestMethodModal = (preselected) => {
   const methods = payConfig?.manualPaymentMethods?.length ? payConfig.manualPaymentMethods : DEFAULT_MANUAL_PAYMENT_METHODS;
+  const preselectedMethod = methods.find(m => m.value === preselected);
   const body = `
-    <label>Requested Method</label>
-    <select id="rm-method">${methods.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('')}</select>
+    ${preselectedMethod
+      ? `<p>Requesting to pay by <strong>${esc(preselectedMethod.label)}</strong>. The office will follow up with instructions.</p><input type="hidden" id="rm-method-fixed" value="${esc(preselectedMethod.value)}">`
+      : `<label>Requested Method</label><select id="rm-method">${methods.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('')}</select>`}
     <label>Message (optional)</label><textarea id="rm-message" rows="3"></textarea>
   `;
   openModal('Request a Different Payment Method', body, `<button class="btn btn-primary btn-sm" onclick="submitMethodRequest()">Send Request</button>`);
 };
 window.submitMethodRequest = async () => {
+  const requested_method = qs('#rm-method-fixed') ? qs('#rm-method-fixed').value : qs('#rm-method').value;
   try {
-    await api('/shul-payments/mine/request-method', { method: 'POST', body: { requested_method: qs('#rm-method').value, message: qs('#rm-message').value } });
+    await api('/shul-payments/mine/request-method', { method: 'POST', body: { requested_method, message: qs('#rm-message').value } });
     toast('Request sent — the office will follow up with you.');
     closeModal();
   } catch (err) { toast(err.message, true); }
@@ -211,8 +273,42 @@ async function loadGiveTable() {
       <td><button class="btn btn-primary btn-sm" onclick="activateFunds('${a.id}')">Activate</button></td>
     </tr>`;
   }).join('') : '<tr><td colspan="6" class="empty-state">No approved applicants yet.</td></tr>';
-  qsa('.give-amount-input').forEach(el => el.addEventListener('input', updateCalculator));
+  restoreGiveAmountDrafts();
+  qsa('.give-amount-input').forEach(el => {
+    el.addEventListener('input', () => { updateCalculator(); saveGiveAmountDraft(el); });
+  });
   updateCalculator();
+}
+
+// Typed-but-not-yet-Activated "Add Funds" amounts used to vanish on any page
+// refresh — a real report ("the amount I typed disappeared") since a shul
+// might type several applicants' amounts in before activating any of them.
+// Saved to localStorage per shul (so a browser shared across shuls can't
+// leak one shul's drafts into another's) and per applicant, restored right
+// after the table renders, cleared only once that specific applicant is
+// actually activated (see activateFunds below) — never on a bare refresh.
+function giveDraftKey() { return `ec_give_drafts_${Auth.user()?.shul_id || 'unknown'}`; }
+function loadGiveDrafts() {
+  try { return JSON.parse(localStorage.getItem(giveDraftKey()) || '{}'); } catch { return {}; }
+}
+function saveGiveAmountDraft(el) {
+  const applicantId = el.dataset.applicant;
+  const drafts = loadGiveDrafts();
+  if (el.value === '') delete drafts[applicantId];
+  else drafts[applicantId] = el.value;
+  try { localStorage.setItem(giveDraftKey(), JSON.stringify(drafts)); } catch { /* private-browsing/quota — drafts just won't persist */ }
+}
+function clearGiveAmountDraft(applicantId) {
+  const drafts = loadGiveDrafts();
+  delete drafts[applicantId];
+  try { localStorage.setItem(giveDraftKey(), JSON.stringify(drafts)); } catch { /* best-effort */ }
+}
+function restoreGiveAmountDrafts() {
+  const drafts = loadGiveDrafts();
+  qsa('.give-amount-input').forEach(el => {
+    const saved = drafts[el.dataset.applicant];
+    if (saved != null) el.value = saved;
+  });
 }
 window.activateFunds = async (applicantId) => {
   if (!(approvedBalance > 0)) return toast("You don't have any approved balance to give right now.", true);
@@ -225,6 +321,7 @@ window.activateFunds = async (applicantId) => {
     // card load, additive to whatever they already have.
     await api('/shul-payments/mine/allocate', { method: 'POST', body: { applicant_id: applicantId, amount } });
     toast('Activated');
+    clearGiveAmountDraft(applicantId);
     loadBalance(); loadGiveTable();
   } catch (err) { toast(err.message, true); }
 };

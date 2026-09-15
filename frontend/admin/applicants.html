@@ -386,6 +386,7 @@ async function openApplicant(id) {
         <label>Zip</label><input id="e-zip" value="${esc(a.zip||'')}" style="max-width:160px">
         <div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="e-yomtov" ${a.home_for_yomtov?'checked':''}><label style="margin:0">Home for Yom Tov</label></div>
         <label>Card Amount ($)</label><input id="e-card" type="number" step="0.01" value="${a.card_amount ?? ''}">
+        ${balance ? `<p class="small-muted" style="margin-top:2px">This is the approved amount, not the real card total — currently <strong>${fmtMoney(balance.remaining)}</strong> actually on the card${balance.spent > 0 ? ` (${fmtMoney(balance.spent)} spent so far)` : ''}. See the Card tab for the full breakdown.</p>` : ''}
         ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<div class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="e-provider-exempt" ${a.provider_exempt?'checked':''}><label style="margin:0">Never send to disccardpromos (one-time backfill import)</label></div>` : ''}
         <label>Comments</label><textarea id="e-comments" rows="3">${esc(a.comments||'')}</textarea>
         ${requiresShulContribution ? `<div class="divider"></div>

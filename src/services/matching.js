@@ -126,6 +126,35 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   // (possibly stale, pre-merge) provider_account_id.
   const fundingAnchor = resolveFundingAnchor(applicant);
 
+  // FIXED (2026-09) — real lost-update race, not just the live-disccard-read
+  // one already fixed earlier: this row used to get INSERTed only AFTER the
+  // `await` on the disccardpromos write below. Node only switches to another
+  // request at an `await`, so two near-simultaneous "give $1000" calls for
+  // the SAME applicant (two shuls, or the same shul double-submitting) could
+  // both run their cap/match computation (computeRealMatch above, which
+  // reads usedMatchForApplicant/usedMatch — a synchronous DB query) BEFORE
+  // either one's row existed yet — each one seeing $0 of the cap as already
+  // used, so a cap meant to stop after the first $1000 of match let a SECOND
+  // contribution slip through as if the cap were untouched. Worse, each
+  // call's disccardpromos write computed its own "new total" from the
+  // ledger at ITS OWN read time (also pre-insert), so whichever write's
+  // network round trip happened to land LAST silently overwrote the other's
+  // contribution with a total that never included it — the real cause of a
+  // reported "$3000 should be on the card, disccard only shows $2000."
+  //
+  // The row is now inserted synchronously, immediately after computing the
+  // match — with NO await in between — so a concurrent call for the same
+  // applicant can only ever see this one's cap usage as either fully
+  // present or not started, never half-applied. The disccardpromos write
+  // below reads the ledger AFTER this row is already in it, so `newTotal`
+  // is simply the applicant's current remaining total (already includes
+  // this allocation) rather than a separately-added figure — removing the
+  // add-after-read step that was the other half of the race.
+  const id = uuid();
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, shulId, applicantId, applicant.season_id, baseAmount, matchAmount, totalAmount, rate, isAdminOverride ? 1 : 0, createdBy, 'pending', null);
+
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   let giftcardStatus = 'ok', giftcardError = null;
   if (!discountId) {
@@ -135,22 +164,18 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
-    // The correct new package total is THIS applicant's own ledger (merge-
-    // group aware — see getApplicantBalances) BEFORE this allocation, plus
-    // what's being given right now — computed from our own records, never
-    // from a live disccardpromos read (see giftcard.js's syncPackageAmount
-    // for why: a live-read-then-add is a lost-update race when two shuls
-    // give to the same merged applicant close together, which is exactly
-    // the bug this replaced).
-    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
-    const newTotal = Math.round((existing.remaining + totalAmount) * 100) / 100;
+    // Ledger read AFTER this allocation's own row is already committed
+    // above — `remaining` already includes this contribution, so it's sent
+    // to disccardpromos as-is, never added to again here.
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
+    const newTotal = existing.remaining;
     // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
-    // on the actual write. This one shows the INPUT side: what our own
-    // ledger said was already there before this allocation, and what
-    // (base+match) is being added — so a wrong result can be traced to
-    // either "the ledger read the wrong existing total" or "the write
-    // itself didn't take", instead of just seeing the final number.
-    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} existingRemaining=$${existing.remaining} + thisGive=$${totalAmount} -> newTotal=$${newTotal}`);
+    // on the actual write. This one shows the INPUT side: what the ledger
+    // (now including this allocation) says the new total should be — so a
+    // wrong result can be traced to either "the ledger has the wrong total"
+    // or "the write itself didn't take", instead of just seeing the final
+    // number.
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
     try {
       await giftcard.syncPackageAmount(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, totalAmount: newTotal });
     } catch (e) {
@@ -158,11 +183,11 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
       giftcardError = e.message;
     }
   }
-
-  const id = uuid();
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, shulId, applicantId, applicant.season_id, baseAmount, matchAmount, totalAmount, rate, isAdminOverride ? 1 : 0, createdBy, giftcardStatus, giftcardError);
+  if (giftcardStatus !== 'ok') {
+    db.prepare('UPDATE shul_allocations SET giftcard_status = ?, giftcard_error = ? WHERE id = ?').run(giftcardStatus, giftcardError, id);
+  } else {
+    db.prepare('UPDATE shul_allocations SET giftcard_status = ? WHERE id = ?').run('ok', id);
+  }
 
   const row = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
   logAudit(orgId, userId, 'create', 'shul_allocation', id, null, row, ip);
@@ -195,16 +220,66 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // card number this app never retains — see cards.card_number_masked's own
   // "last 4 only, ever displayed" comment) is the one already live-tested
   // against the real API elsewhere in this file.
+  //
+  // FIXED (2026-09) — real root cause of "Undo Payment left the money on the
+  // card": a failed live-balance read here used to silently fall back to
+  // `retrievable = original.total_amount` (assume NOTHING was spent yet),
+  // which then computed a disccardpromos write as if the full original
+  // amount could be pulled back — when actually the read just failed and
+  // the true spent amount was unknown. Retries a few times (network
+  // hiccups/rate limits are usually transient); if every attempt still
+  // fails, this now REFUSES the whole undo rather than guessing — an admin
+  // can retry the undo once disccardpromos is reachable again, instead of
+  // silently reversing this shul's balance/ledger for money that may
+  // already be spent and unretrievable.
   let retrievable = original.total_amount, shortfall = 0;
   if (fundingExternalId && discountId) {
-    const customer = await giftcard.getCustomerByExternalId(original.season_id, fundingExternalId, { balances: true }).catch(() => null);
-    const pkg = customer?.packages?.find(p => String(p.id) === String(discountId));
+    let customer = null, lastError = null;
+    for (let attempt = 1; attempt <= 3 && !customer; attempt++) {
+      try {
+        customer = await giftcard.getCustomerByExternalId(original.season_id, fundingExternalId, { balances: true });
+      } catch (e) {
+        lastError = e;
+        console.error(`[matching] reverseAllocation balance check attempt ${attempt}/3 failed for allocation ${original.id}:`, e.message);
+      }
+    }
+    if (!customer) {
+      throw new Error(`Couldn't confirm how much of this is still on the card after ${lastError ? '3 attempts' : 'checking'} — disccardpromos didn't respond${lastError ? ` (${lastError.message})` : ''}. Undo was NOT performed, so nothing was changed here or on the card. Try again once disccardpromos is reachable.`);
+    }
+    const pkg = customer.packages?.find(p => String(p.id) === String(discountId));
     const currentBalance = pkg ? Number(pkg.amount) : null;
-    if (currentBalance != null && currentBalance < original.total_amount - 1e-9) {
+    if (currentBalance == null) {
+      throw new Error("Couldn't read this applicant's real balance from disccardpromos (no matching package on their account) — Undo was NOT performed, so nothing was changed here or on the card.");
+    }
+    if (currentBalance < original.total_amount - 1e-9) {
       retrievable = Math.max(0, Math.round(currentBalance * 100) / 100);
       shortfall = Math.round((original.total_amount - retrievable) * 100) / 100;
     }
   }
+
+  // Split the retrievable amount between base/match in the same proportion
+  // as the original allocation, so a partial reversal claws back match-cap
+  // room (see usedMatch() above) in proportion to what was actually pulled
+  // back, rather than over- or under-crediting either bucket.
+  const matchRatio = original.total_amount > 0 ? original.match_amount / original.total_amount : 0;
+  const reversalMatch = Math.round(retrievable * matchRatio * 100) / 100;
+  const reversalBase = Math.round((retrievable - reversalMatch) * 100) / 100;
+
+  // FIXED (2026-09) — same lost-update race as createAllocation above (see
+  // its comment for the full mechanism): this row used to get INSERTed only
+  // AFTER the disccardpromos write's `await`, so a concurrent allocation or
+  // reversal for the same applicant could read the ledger before this
+  // reversal's credit was applied and compute its own disccard write from a
+  // stale total, which could then land AFTER this one's and silently wipe
+  // out this reversal. Inserted synchronously here, right after computing
+  // the split above and BEFORE the write, so any concurrent request's own
+  // ledger read either fully includes this reversal or hasn't started yet
+  // — never half-applied.
+  const id = uuid();
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id);
+  db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
 
   // giftcardStatus/giftcardError, not a bare try/throw — CRITICAL: unlike
   // the old version of this function, a disccardpromos failure here must
@@ -222,19 +297,15 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // behind "Undo Payment doesn't remove the money."
   let giftcardStatus = 'ok', giftcardError = null;
   if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
-    // Same reasoning as createAllocation above — the live GET just above
-    // this is only for the retrievable/shortfall spend-protection check
-    // (a legitimate real-time question: "is the money actually still
-    // there to pull back"), never as the baseline for the WRITE. The write
-    // target is our own ledger's remaining total (merge-group aware) minus
-    // what's being pulled back, computed independently of that live read,
-    // so a concurrent contribution from another shul can't get silently
-    // overwritten by this reversal the way a live-read-then-subtract could.
+    // Ledger read AFTER this reversal's own row is already committed above
+    // — `remaining` already has this reversal's credit-back applied, so
+    // it's sent to disccardpromos as-is (no separate subtraction here,
+    // removing the other half of the race).
     const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
-    const newTotal = Math.max(0, Math.round((existing.remaining - retrievable) * 100) / 100);
+    const newTotal = Math.max(0, existing.remaining);
     // Diagnostic — see giftcard.js's syncPackageAmount for the matching log
     // on the actual write.
-    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} existingRemaining=$${existing.remaining} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal=$${newTotal}`);
+    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);
     try {
       await giftcard.syncPackageAmount(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, discountId, totalAmount: newTotal });
     } catch (e) {
@@ -253,21 +324,8 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // this reversal is a pure write-off — see the shortfall handling above).
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant?.id} SKIPPED disccard write — discountId=${discountId || '(none)'} retrievable=$${retrievable} accountId=${fundingAnchor?.provider_account_id || '(none)'}`);
   }
+  db.prepare('UPDATE shul_allocations SET giftcard_status = ?, giftcard_error = ? WHERE id = ?').run(giftcardStatus, giftcardError, id);
 
-  // Split the retrievable amount between base/match in the same proportion
-  // as the original allocation, so a partial reversal claws back match-cap
-  // room (see usedMatch() above) in proportion to what was actually pulled
-  // back, rather than over- or under-crediting either bucket.
-  const matchRatio = original.total_amount > 0 ? original.match_amount / original.total_amount : 0;
-  const reversalMatch = Math.round(retrievable * matchRatio * 100) / 100;
-  const reversalBase = Math.round((retrievable - reversalMatch) * 100) / 100;
-
-  const id = uuid();
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, giftcardStatus, giftcardError, original.id);
-
-  db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
   logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
   return { ...reversalRow, shortfall };

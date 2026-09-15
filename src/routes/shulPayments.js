@@ -51,6 +51,18 @@ function isActiveManualMethod(orgId, method) {
 // still lets an admin correct it later once they know the real number (e.g.
 // from a Sola statement). Both settings default to 0 (no fee tracked) until
 // an admin sets them, so existing behavior is unchanged until someone opts in.
+//
+// ADDITIVE, not subtracted: the amount the shul types in (or an admin types
+// in on their behalf) is what gets CREDITED toward their balance — the fee
+// is computed off that figure and added ON TOP as what actually gets
+// charged to the card, never carved out of what the shul asked to pay. A
+// shul typing "$100" to pay off a $100 balance used to have their card
+// charged $100 but only $96.80 credited (the fee silently eaten out of
+// their own payment, leaving them still short) — now their card is charged
+// $103.20 and the full $100 is credited. Both charge routes below show the
+// computed total to the payer BEFORE they submit (GET /mine/config and
+// GET /config both return `cardFee` so the frontend can preview it live),
+// so there's never a surprise total on the receipt either.
 function getCardFeeConfig(orgId) {
   const pct = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'card_fee_percent'`).get(orgId)?.value;
   const flat = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'card_fee_flat'`).get(orgId)?.value;
@@ -101,7 +113,7 @@ router.get('/mine/config', (req, res) => {
   // modal — active-only, since that's the one place a shul themselves picks
   // from the admin-configured list (see getManualPaymentMethods above).
   const manualPaymentMethods = getManualPaymentMethods(req.user.org_id).filter(m => m.active !== false);
-  res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode(), manualPaymentMethods });
+  res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode(), manualPaymentMethods, cardFee: getCardFeeConfig(req.user.org_id) });
 });
 
 // xCardNum/xCVV/xExp here are the REAL card number/CVV/expiration, typed
@@ -115,7 +127,11 @@ router.get('/mine/config', (req, res) => {
 // (nothing is written, the shul sees why immediately).
 router.post('/mine/sola-charge', async (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
-  const amount = +req.body?.amount;
+  // What the shul intends to have CREDITED toward their balance — the fee
+  // (see getCardFeeConfig's comment above) is computed off this figure and
+  // added on top for what actually gets charged to the card, not carved out
+  // of it.
+  const creditAmount = +req.body?.amount;
   // Stripped/normalized here too (not just client-side) since this is a
   // tampered/direct-API-call concern, not a normal-use one — the shul
   // portal's own form already sends these clean.
@@ -123,7 +139,7 @@ router.post('/mine/sola-charge', async (req, res) => {
   const xCVV = String(req.body?.xCVV || '').trim();
   const xZip = String(req.body?.xZip || '').trim();
   const xExp = String(req.body?.xExp || '').replace(/\D/g, '');
-  if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  if (!(creditAmount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   const shul = db.prepare('SELECT stripe_payments_enabled, season_id, name_en FROM shuls WHERE id = ?').get(req.user.shul_id);
   const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
@@ -132,20 +148,20 @@ router.post('/mine/sola-charge', async (req, res) => {
     if (!xCardNum || !xCVV) return res.status(400).json({ error: 'Card details are required' });
     if (xExp.length !== 4) return res.status(400).json({ error: 'Expiration date is required' });
   }
+  const fee = computeCardFee(req.user.org_id, creditAmount);
+  const chargeAmount = Math.round((creditAmount + fee) * 100) / 100;
   try {
     const result = await solaPay.chargeSale({
-      amount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
+      amount: chargeAmount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
       invoice: `${shul.name_en || 'shul'}-${Date.now()}`, comments: 'eCards shul payment',
     });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
-    const fee = computeCardFee(req.user.org_id, amount);
-    const net = Math.round((amount - fee) * 100) / 100;
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by)
       VALUES (?,?,?,?,'sola_card',?,?,?,'pending_approval',?,?,?)`)
-      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, amount, fee, net, result.refNum, result.last4 || null, req.user.id);
+      .run(id, req.user.org_id, req.user.shul_id, shul.season_id, chargeAmount, fee, creditAmount, result.refNum, result.last4 || null, req.user.id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id), req.ip);
-    res.json({ ok: true, mock: !!result.mock });
+    res.json({ ok: true, mock: !!result.mock, chargeAmount, fee, creditAmount });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -328,12 +344,15 @@ router.post('/payout', requirePermission('shul_payments', 'can_edit'), (req, res
 router.post('/admin-charge', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { shul_id, season_id } = req.body || {};
-  const amount = +req.body?.amount;
+  // Same additive-fee convention as POST /mine/sola-charge above: this is
+  // what gets CREDITED to the shul's balance, fee added on top for what
+  // actually hits the card.
+  const creditAmount = +req.body?.amount;
   const xCardNum = String(req.body?.xCardNum || '').replace(/\s/g, '');
   const xCVV = String(req.body?.xCVV || '').trim();
   const xZip = String(req.body?.xZip || '').trim();
   const xExp = String(req.body?.xExp || '').replace(/\D/g, '');
-  if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  if (!(creditAmount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   const shul = db.prepare('SELECT id, name_en FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
   if (!shul) return res.status(404).json({ error: 'Shul not found' });
   const season = db.prepare('SELECT id FROM seasons WHERE id = ? AND org_id = ?').get(season_id, req.user.org_id);
@@ -342,18 +361,18 @@ router.post('/admin-charge', requirePermission('shul_payments', 'can_edit'), asy
     if (!xCardNum || !xCVV) return res.status(400).json({ error: 'Card details are required' });
     if (xExp.length !== 4) return res.status(400).json({ error: 'Expiration date is required' });
   }
+  const fee = computeCardFee(req.user.org_id, creditAmount);
+  const chargeAmount = Math.round((creditAmount + fee) * 100) / 100;
   try {
     const result = await solaPay.chargeSale({
-      amount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
+      amount: chargeAmount, xCardNum, xCVV, xExp, xZip, xName: shul.name_en || '', xEmail: req.user.email || '',
       invoice: `${shul.name_en || 'shul'}-${Date.now()}`, comments: 'eCards admin-entered card charge',
     });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Card declined' });
-    const fee = computeCardFee(req.user.org_id, amount);
-    const net = Math.round((amount - fee) * 100) / 100;
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, sola_ref_num, card_last4, entered_by, approved_by, approved_at)
       VALUES (?,?,?,?,'sola_card',?,?,?,'approved',?,?,?,?,datetime('now'))`)
-      .run(id, req.user.org_id, shul_id, season_id, amount, fee, net, result.refNum, result.last4 || null, req.user.id, req.user.id);
+      .run(id, req.user.org_id, shul_id, season_id, chargeAmount, fee, creditAmount, result.refNum, result.last4 || null, req.user.id, req.user.id);
     const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
     res.status(201).json({ ok: true, mock: !!result.mock, payment: row });
@@ -416,12 +435,27 @@ router.put('/:id/fee', requirePermission('shul_payments', 'can_edit'), (req, res
 // "how much of this charge has already been refunded" below (that query
 // has no status filter).
 //
-// fee_amount is NEVER backed out here — see services/sola.js's file-level
-// comment on why fee_amount stays 0 for sola_card rows for now, and more
-// generally: even where a real fee IS known (a legacy stripe_card row),
-// refunding the principal never gets the processor's cut back either. The
-// notes on the refund row spell this out explicitly so it isn't a silent
-// surprise the next time someone reconciles the shul's balance.
+// amount (this route's request body / the card-side ask) vs. the balance
+// impact are tracked SEPARATELY, not assumed equal, because of the additive
+// fee model above: the original charge's `amount` column is the GROSS
+// figure that hit the card (principal + fee) while `net_amount` is only the
+// principal that was ever credited to the shul's balance. A refund/void
+// that returns the entire remaining gross to the card must still only
+// reverse the remaining PRINCIPAL on the balance side — reversing the full
+// gross would falsely leave the shul looking like they owe the fee amount,
+// even though nothing is actually still owed once the whole charge is
+// voided/refunded. alreadyRefundedGross (capping what can still be sent to
+// Sola) and alreadyRefundedNet (capping what's left to reverse on the
+// balance) are tracked from the SAME prior refund rows, just summing a
+// different column each — see the two SUMs below.
+//
+// The processing fee itself is a real cost the org already paid Sola on
+// the original sale — a plain refund (as opposed to a same-day void, which
+// cancels the sale before Sola ever collects anything) does not get that
+// fee back from Sola, regardless of how much principal comes back to the
+// shul's card. That's a sunk cost for the org, never something reflected on
+// the shul's own balance either way — feeNote below exists purely to
+// surface that fact to whichever admin is watching, not to change any math.
 router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
@@ -429,26 +463,47 @@ router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async
   if (payment.direction !== 'in') return res.status(400).json({ error: 'Only a payment the shul made can be refunded, not a payout/refund itself' });
   if (payment.method !== 'sola_card' || !payment.sola_ref_num) return res.status(400).json({ error: 'Only a Sola card payment can be refunded here — for any other method, use Pay Shul to record money sent back manually.' });
 
-  const alreadyRefunded = db.prepare(`SELECT COALESCE(SUM(-net_amount),0) t FROM shul_payments WHERE refund_of = ?`).get(payment.id).t;
-  const refundable = Math.round((payment.amount - alreadyRefunded) * 100) / 100;
+  const refundRows = db.prepare(`SELECT amount, net_amount FROM shul_payments WHERE refund_of = ?`).all(payment.id);
+  const alreadyRefundedGross = Math.round(refundRows.reduce((s, r) => s + r.amount, 0) * 100) / 100;
+  const alreadyRefundedNet = Math.round(refundRows.reduce((s, r) => s + (-r.net_amount), 0) * 100) / 100;
+  const refundable = Math.round((payment.amount - alreadyRefundedGross) * 100) / 100;
   const amount = +req.body?.amount;
   if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
   if (amount > refundable + 1e-9) return res.status(400).json({ error: `Amount ($${amount.toFixed(2)}) exceeds what's left to refund on this payment ($${refundable.toFixed(2)}).` });
+  const isFullAmount = Math.abs(amount - refundable) < 1e-9;
+  // Full/void request: close out whatever principal is still outstanding
+  // exactly (avoids any rounding drift from the ratio below). Genuine
+  // partial request: split proportionally to the original charge's own
+  // principal/gross ratio — the only defensible split when only some of a
+  // blended principal+fee charge is coming back.
+  const principalPortion = isFullAmount
+    ? Math.round((payment.net_amount - alreadyRefundedNet) * 100) / 100
+    : Math.round((amount * (payment.net_amount / payment.amount)) * 100) / 100;
 
   try {
-    const result = await solaPay.refundTransaction({ refNum: payment.sola_ref_num, amount });
+    // Void first (cancels the original sale outright, same-day, before it
+    // settles) and only fall back to a real refund when the void is
+    // rejected — see services/sola.js's voidOrRefund for why a void is only
+    // even attempted when this request covers the ENTIRE remaining
+    // refundable amount (voiding always cancels the whole original sale, so
+    // a genuinely partial ask can't go through void without over-returning
+    // money).
+    const result = await solaPay.voidOrRefund({ refNum: payment.sola_ref_num, amount, isFullAmount });
     if (!result.approved) return res.status(400).json({ error: result.error || 'Refund failed' });
-    const feeNote = payment.fee_amount > 0
-      ? ` Note for admin: this payment had a $${payment.fee_amount.toFixed(2)} processing fee that is NOT automatically refunded/removed from the shul's balance — only the $${amount.toFixed(2)} principal is reflected here.`
+    const feeNote = payment.fee_amount > 0 && result.method === 'refund'
+      ? ` Note for admin: this payment had a $${payment.fee_amount.toFixed(2)} processing fee that Sola does not return on a refund (only on a same-day void) — the org doesn't get that portion back even though the shul's balance is being fully reversed for their principal.`
       : '';
+    const methodNote = result.method === 'void'
+      ? ' (voided — the original charge never settled, so nothing actually hit the card.)'
+      : (result.voidAttemptError ? ` (refunded — void wasn't possible: ${result.voidAttemptError})` : '');
     const refundStatus = payment.status === 'approved' ? 'approved' : 'rejected';
     const id = uuid();
     db.prepare(`INSERT INTO shul_payments (id, org_id, shul_id, season_id, method, amount, fee_amount, net_amount, status, direction, sola_ref_num, refund_of, entered_by, approved_by, approved_at, notes)
       VALUES (?,?,?,?,'sola_refund',?,0,?,?,'out',?,?,?,?,datetime('now'),?)`)
-      .run(id, req.user.org_id, payment.shul_id, payment.season_id, amount, -amount, refundStatus, result.refNum, payment.id, req.user.id, req.user.id, `Refund of payment ${payment.id}.${feeNote}`.trim());
+      .run(id, req.user.org_id, payment.shul_id, payment.season_id, amount, -principalPortion, refundStatus, result.refNum, payment.id, req.user.id, req.user.id, `${result.method === 'void' ? 'Voided' : 'Refund of'} payment ${payment.id}.${methodNote}${feeNote}`.trim());
     const row = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(id);
     logAudit(req.user.org_id, req.user.id, 'create', 'shul_payment', id, null, row, req.ip);
-    res.status(201).json({ ok: true, payment: row, feeNote: feeNote || null });
+    res.status(201).json({ ok: true, payment: row, feeNote: feeNote || null, method: result.method });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

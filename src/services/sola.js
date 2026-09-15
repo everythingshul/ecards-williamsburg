@@ -114,3 +114,49 @@ export async function refundTransaction({ refNum, amount }) {
   }
   return { approved: true, refNum: data.xRefNum, mock: false };
 }
+
+// Voids the ORIGINAL sale outright (cc:Void) — cancels it before it ever
+// settles, same-day, rather than crediting money back after the fact.
+// Cardknox only accepts a void while the original sale is still sitting in
+// the open batch (typically until that night's cutoff); once it's settled,
+// cc:Void comes back declined/errored and cc:Refund (above) is the only way
+// left to return the money. There is no partial-void concept here — a void
+// cancels the WHOLE original transaction, so voidOrRefund below only ever
+// attempts one when the requested amount is the full remaining balance.
+export async function voidTransaction({ refNum }) {
+  if (isSolaMockMode() || String(refNum).startsWith('mock_')) {
+    return { approved: true, refNum: `mock_void_${Date.now()}`, mock: true };
+  }
+  const data = await post({ xCommand: 'cc:Void', xRefNum: refNum });
+  if (data.xResult !== 'A') {
+    return { approved: false, error: data.xError || data.xStatus || 'Void failed', refNum: data.xRefNum || null };
+  }
+  return { approved: true, refNum: data.xRefNum, mock: false };
+}
+
+// Single entry point routes/shulPayments.js's POST /:id/refund calls instead
+// of refundTransaction() directly — tries a void first (same-day
+// cancellation, no processing fee retained by the gateway since the sale
+// never settles) and only falls back to a real refund when the void is
+// rejected, which Cardknox does automatically once the original sale has
+// settled (usually the next business day). isFullAmount must be true for
+// void to even be attempted — voiding always cancels the ENTIRE original
+// sale, so a genuinely partial refund request (less than what's left owed)
+// would over-return money if it went through void; that case skips straight
+// to a real (partial) refund. Returns the same {approved, refNum, error,
+// mock} shape as both underlying calls, plus `method: 'void' | 'refund'` so
+// the caller can log/report which one actually happened.
+export async function voidOrRefund({ refNum, amount, isFullAmount }) {
+  if (isFullAmount) {
+    const voided = await voidTransaction({ refNum });
+    if (voided.approved) return { ...voided, method: 'void' };
+    // Void's rejection reason (almost always "already settled") is worth
+    // keeping around for the caller even though a refund succeeding makes
+    // the overall operation a success — see shulPayments.js's use of
+    // voidAttemptError.
+    const refunded = await refundTransaction({ refNum, amount });
+    return { ...refunded, method: 'refund', voidAttemptError: voided.error || null };
+  }
+  const refunded = await refundTransaction({ refNum, amount });
+  return { ...refunded, method: 'refund' };
+}

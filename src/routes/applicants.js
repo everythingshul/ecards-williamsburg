@@ -135,7 +135,11 @@ export function maskForShul(records, role, orgId) {
   };
   const mask = (r) => {
     const rec = { ...r, approval_status: r.approval_status === 'rejected' ? 'pending' : r.approval_status, duplicate_status: null, duplicate_of_applicant_id: null, is_paused: 0 };
-    if (!cardVisible) delete rec.card_amount;
+    // loaded/spent/remaining (the REAL gift-card balance, see
+    // services/applicantBalance.js) are the same category of $ info as
+    // card_amount — gated behind the same toggle, or turning card amounts
+    // off for a shul would do nothing once these were added alongside it.
+    if (!cardVisible) { delete rec.card_amount; delete rec.loaded; delete rec.spent; delete rec.remaining; }
     // Internal-only, not a configurable hidden field — a shul should never
     // even know this column exists, same boundary as applicant_notes.
     delete rec.permanent_comments;
@@ -229,12 +233,13 @@ router.get('/', (req, res) => {
   const offset = (Math.max(1, +page) - 1) * +pageSize;
   const rows = db.prepare(`SELECT a.*, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a LEFT JOIN shuls s ON s.id = a.shul_id LEFT JOIN shuls ps ON ps.id = a.previous_shul_id ${where} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...params, +pageSize, offset);
   // Real gift-card balance (loaded/spent/remaining), merge-group aware —
-  // admin-only (see services/applicantBalance.js); a shul-portal viewer
-  // never gets these fields at all, not even zeroed out.
-  const withBalance = req.user.role === 'shul' ? rows : (() => {
-    const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
-    return rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
-  })();
+  // see services/applicantBalance.js. Sent to a shul-portal viewer too (was
+  // admin-only until a direct report that "Card Amount" in the shul portal
+  // doesn't reflect the real total on the card — card_amount is only ever
+  // the approval-time intended amount, never updated after Add Funds/spend,
+  // so the shul had no way to see the real current figure at all).
+  const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
+  const withBalance = rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
   // Merged applicants collapse to ONE row per real person (admin view only
   // — a shul-portal viewer only ever sees its own shul's own row anyway, so
   // there's nothing to collapse there). Each collapsed row displays the
@@ -408,7 +413,15 @@ router.get('/:id', (req, res) => {
   // all), so their query stays exactly as narrowly scoped as before.
   const cardApplicantIds = isAdminViewer ? getMergeGroupIds(req.user.org_id, [applicant.id]) : [applicant.id];
   const cards = db.prepare(`SELECT * FROM cards WHERE applicant_id IN (${cardApplicantIds.map(() => '?').join(',')}) ORDER BY created_at DESC`).all(...cardApplicantIds);
-  const balance = isAdminViewer ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 }) : null;
+  // Sent to a shul-portal viewer too (see the identical change on GET /'s
+  // list route above) — card_amount alone never reflected the real current
+  // total once Add Funds/spend happened after approval. Gated behind the
+  // same Settings > Organization > Shul Portal "card amount visible" toggle
+  // as card_amount itself (see maskForShul) — this field is a separate
+  // top-level key, not part of the `applicant` object maskForShul runs on,
+  // so it needs its own check here rather than relying on that masking.
+  const cardAmountVisible = !isAdminViewer ? db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_card_amount_visible'`).get(req.user.org_id)?.value !== '0' : true;
+  const balance = (isAdminViewer || cardAmountVisible) ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 }) : null;
   // Transactions tab (admin-only) — real money moved, by which shul, and
   // every store purchase — both merge-group aware via cardApplicantIds
   // above, same reasoning as cards/balance: this is genuinely "the whole

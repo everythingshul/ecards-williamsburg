@@ -20,6 +20,7 @@ renderShell('/admin/shul-transactions', `
     <select id="f-shul"><option value="">All Shuls</option></select>
     <select id="f-season"><option value="">All Seasons</option></select>
     <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+    <input id="p-search" placeholder="Search shul, method, ref#…" style="max-width:240px">
   </div>
   <div class="tabs">
     <button class="active" id="tab-payments-btn">Payments</button>
@@ -58,6 +59,7 @@ renderShell('/admin/shul-transactions', `
         <div><label style="margin-top:0">Season</label><select id="ac-season"><option value="">Select a season…</option></select></div>
       </div>
       <label style="margin-top:10px">Amount ($)</label><input id="ac-amount" type="number" min="0.01" step="0.01" style="max-width:220px">
+      <div id="ac-fee-preview" class="small-muted" style="margin-top:4px"></div>
       <label style="margin-top:10px">Card Number</label><input id="ac-card-num" placeholder="1234 1234 1234 1234" maxlength="19" style="max-width:420px" autocomplete="cc-number" inputmode="numeric">
       <div class="grid-2" style="max-width:420px">
         <div><label style="margin-top:0">Expiration (MM/YY)</label><input id="ac-exp" placeholder="MM/YY" maxlength="5" autocomplete="cc-exp" inputmode="numeric"></div>
@@ -160,12 +162,36 @@ let lastPayments = [];
 async function loadPayments() {
   const { payments } = await api('/shul-payments?' + currentFilterParams());
   lastPayments = payments;
+  renderPaymentsTable();
+}
+// Client-side search over whatever's already loaded (shul name, method
+// label, ref#/check#, notes) — this list is unpaginated and already fully
+// fetched per the current shul/season/status filters, same pattern as the
+// Shul Totals tab's own search box, so no server round-trip is needed per
+// keystroke.
+function renderPaymentsTable() {
+  const q = (qs('#p-search')?.value || '').trim().toLowerCase();
+  const payments = q ? lastPayments.filter(p =>
+    (p.shul_name || '').toLowerCase().includes(q) ||
+    (MANUAL_METHOD_LABEL[p.method] || p.method || '').toLowerCase().includes(q) ||
+    (p.manual_ref || '').toLowerCase().includes(q) ||
+    (p.notes || '').toLowerCase().includes(q)
+  ) : lastPayments;
   // Refunds are their own rows (method sola_refund, refund_of pointing back
   // at the original charge) — summed here just to know how much of each
   // charge is still refundable and to show a small "Refunded: $X" note;
   // the server independently enforces the real cap on every refund request.
+  // Summed by `amount` (the actual card-side refund/void amount), NOT
+  // `net_amount` — net_amount on a refund row is only the balance-side
+  // principal reversal (see the server's identical POST /:id/refund
+  // comment on why those two figures differ once a charge has a fee), and
+  // using it here would understate how much of the card charge is still
+  // refundable once any of these payments carried a processing fee.
+  // Summed from the FULL unfiltered list (lastPayments), not the search
+  // results, so a refund's own row matching/not-matching the search text
+  // never throws off "how much is still refundable" on the row it refunds.
   const refundedByPaymentId = {};
-  payments.forEach(p => { if (p.refund_of) refundedByPaymentId[p.refund_of] = (refundedByPaymentId[p.refund_of] || 0) + (-p.net_amount); });
+  lastPayments.forEach(p => { if (p.refund_of) refundedByPaymentId[p.refund_of] = (refundedByPaymentId[p.refund_of] || 0) + p.amount; });
   qs('#tbody-payments').innerHTML = payments.length ? payments.map(p => {
     const refunded = refundedByPaymentId[p.id] || 0;
     // Refundable regardless of approval status — the real Sola charge
@@ -205,10 +231,10 @@ window.rejectPayment = async (id) => {
 window.openRefundModal = (id) => {
   const p = lastPayments.find(x => x.id === id);
   if (!p) return;
-  const refunded = lastPayments.filter(x => x.refund_of === id).reduce((s, x) => s + (-x.net_amount), 0);
+  const refunded = lastPayments.filter(x => x.refund_of === id).reduce((s, x) => s + x.amount, 0);
   const refundable = Math.round((p.amount - refunded) * 100) / 100;
   const feeWarning = p.fee_amount > 0
-    ? `<p class="small-muted" style="color:var(--danger,#b91c1c)">This payment had a ${fmtMoney(p.fee_amount)} processing fee. Refunding does NOT automatically return that fee — it stays collected regardless of how much of the principal you refund here.</p>`
+    ? `<p class="small-muted" style="color:var(--danger,#b91c1c)">This payment had a ${fmtMoney(p.fee_amount)} processing fee. A same-day void (attempted automatically first) gets it back; a real refund after that doesn't — either way, the shul's own balance is fully reversed for their principal, the fee is only ever a cost to the office.</p>`
     : '';
   const body = `
     <p class="small-muted">Refunding ${esc(p.shul_name || '')}'s ${fmtMoney(p.amount)} card payment. Up to ${fmtMoney(refundable)} can still be refunded.</p>
@@ -299,13 +325,36 @@ qs('#ac-exp')?.addEventListener('input', () => {
   el.value = v;
 });
 let acMockMode = false;
+let acCardFee = { percent: 0, flat: 0 };
 async function loadAdminChargeConfig() {
   try {
     const cfg = await api('/shul-payments/config');
     acMockMode = !!cfg.mockMode;
+    acCardFee = cfg.cardFee || acCardFee;
     qs('#ac-mock-note').style.display = acMockMode ? 'block' : 'none';
   } catch { /* best-effort — the form still works, just without the mock-mode note */ }
 }
+// Same additive-fee preview as the shul portal's own payment form (see
+// shul-portal/payments.html) — the amount typed here is what gets credited
+// to the shul's balance, the fee is added on top for what actually hits
+// their card, and this shows that total before the admin submits.
+function acFeePreview(amount) {
+  const { percent = 0, flat = 0 } = acCardFee;
+  if (!(amount > 0) || (!percent && !flat)) return { fee: 0, total: amount || 0 };
+  const fee = Math.max(0, Math.min(Math.round((amount * (percent / 100) + flat) * 100) / 100, amount));
+  return { fee, total: Math.round((amount + fee) * 100) / 100 };
+}
+function updateAcFeePreview() {
+  const amount = +qs('#ac-amount')?.value;
+  const el = qs('#ac-fee-preview');
+  if (!el) return;
+  if (!(amount > 0)) { el.textContent = ''; return; }
+  const { fee, total } = acFeePreview(amount);
+  el.innerHTML = fee > 0
+    ? `${fmtMoney(amount)} + ${fmtMoney(fee)} processing fee = <strong>${fmtMoney(total)} charged to the card</strong>`
+    : `<strong>${fmtMoney(total)}</strong> will be charged to the card`;
+}
+qs('#ac-amount')?.addEventListener('input', updateAcFeePreview);
 // Card number/CVV are read straight from this page's own inputs and POSTed
 // to this app's backend, which forwards them to Sola — no hosted iframe.
 // Never logged. See services/sola.js for the PCI-scope tradeoff.
@@ -326,9 +375,10 @@ window.submitAdminCharge = async () => {
   qs('#btn-ac').disabled = true;
   qs('#ac-status').textContent = '';
   try {
-    const { mock } = await api('/shul-payments/admin-charge', { method: 'POST', body: { shul_id, season_id, amount, xCardNum, xCVV, xExp, xZip } });
-    qs('#ac-status').textContent = mock ? 'Test mode: charge simulated.' : 'Charged and approved.';
+    const { mock, payment } = await api('/shul-payments/admin-charge', { method: 'POST', body: { shul_id, season_id, amount, xCardNum, xCVV, xExp, xZip } });
+    qs('#ac-status').textContent = mock ? 'Test mode: charge simulated.' : `Charged ${fmtMoney(payment?.amount ?? amount)} and approved.`;
     qs('#ac-amount').value = ''; qs('#ac-card-num').value = ''; qs('#ac-cvv').value = ''; qs('#ac-exp').value = ''; qs('#ac-zip').value = '';
+    updateAcFeePreview();
     loadPayments();
   } catch (err) { qs('#ac-status').textContent = err.message; }
   qs('#btn-ac').disabled = false;
@@ -422,11 +472,23 @@ function renderShulTotals() {
     const cmp = typeof av === 'number' ? av - bv : String(av || '').localeCompare(String(bv || ''));
     return dir === 'ASC' ? cmp : -cmp;
   });
-  qs('#tbody-shultotals').innerHTML = rows.length ? rows.map(s => `<tr>
+  qs('#tbody-shultotals').innerHTML = rows.length ? rows.map(s => `<tr style="cursor:pointer" onclick="openShulPayments('${s.id}')" title="View this shul's full payment list">
       <td>${esc(s.nameEn || '')}</td><td dir="rtl">${esc(s.nameHe || '')}</td><td>${fmtMoney(s.totalPaid)}</td>
     </tr>`).join('') : '<tr><td colspan="3" class="empty-state">No shuls match.</td></tr>';
 }
+// Clicking a Shul Totals row jumps to the Payments tab filtered to just
+// that shul — Shul Totals itself is a lifetime, all-seasons rollup (no
+// per-transaction detail), so this is how you get from "here's their
+// total" to the actual list of payments behind it, without leaving the page.
+window.openShulPayments = (shulId) => {
+  state.shul_id = shulId;
+  state.season_id = '';
+  switchTab('payments');
+  qs('#f-season').value = '';
+  populateShulFilter('f-shul', '').then(() => { qs('#f-shul').value = shulId; });
+}
 qs('#st-search').addEventListener('input', renderShulTotals);
+qs('#p-search').addEventListener('input', renderPaymentsTable);
 qs('#panel-shultotals').querySelector('thead').addEventListener('click', (e) => {
   const th = e.target.closest('th[data-sort]');
   if (!th) return;
@@ -442,6 +504,7 @@ function switchTab(t) {
   activeTab = t;
   TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
   qs('#f-status').style.display = t === 'payments' ? '' : 'none';
+  qs('#p-search').style.display = t === 'payments' ? '' : 'none';
   // Shul Totals is a lifetime, all-seasons rollup with its own search box —
   // the shul/season filters above the tabs don't apply to it.
   qs('#f-shul').style.display = t === 'shultotals' ? 'none' : '';
