@@ -183,7 +183,7 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     // read-then-compute-absolute-total approach could.
     console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount}`);
     try {
-      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, discountId, amount: totalAmount });
+      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, amount: totalAmount });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;

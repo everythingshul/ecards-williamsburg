@@ -363,7 +363,7 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
   const liveBalance = pkg ? Number(pkg.amount) : 0;
   const gap = Math.round((ledger.remaining - liveBalance) * 100) / 100;
   if (gap <= 0.01) return { skipped: 'already at or above target', liveBalance, target: ledger.remaining };
-  await giftcard.addFunds(applicant.season_id, { customerId: anchor.provider_account_id, discountId, amount: gap });
+  await giftcard.addFunds(applicant.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, discountId, amount: gap });
   return { credited: gap, liveBalance, target: ledger.remaining };
 }
 
@@ -422,9 +422,10 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       // remaining figure (merge-group aware — this applicant's own
       // approved card_amount, plus anything else already on file for the
       // group) is exactly the right amount to CREDIT.
+      const anchor = resolveFundingAnchor(a);
       const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
       try {
-        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, discountId, amount: ledger.remaining });
+        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, amount: ledger.remaining });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }

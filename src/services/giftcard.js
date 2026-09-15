@@ -250,15 +250,46 @@ export async function refundCard(seasonId, { cardNum, amount }) {
 // ledger) rather than one allocation's own delta through this endpoint.
 // Kept here, correct and ready to use, in case a future call site
 // genuinely wants an incremental add instead of a forced absolute total.
-export async function addFunds(seasonId, { customerId, discountId, amount }) {
+export async function addFunds(seasonId, { customerId, externalId, discountId, amount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
   const delta = Math.round(amount * 100) / 100;
   if (!(delta > 0)) return { success: true, skipped: true };
-  console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} discount_id=${discountId} -> crediting +$${delta}`);
+  // VERIFIED (2026-09-16) — even this confirmed, discount_id-explicit
+  // endpoint turned out to report success on a write that didn't actually
+  // land (a fresh give, no exception thrown, package still read $0
+  // afterward). Reads the package's real balance BEFORE and AFTER the
+  // call (when externalId is available) and throws if the OBSERVED change
+  // doesn't match what was requested, instead of trusting a 200 response —
+  // same principle as setPackageAmountAbsolute's own verification. discount_id
+  // is sent as a plain integer here (it's stored as TEXT in this app's own
+  // settings table — a stray string where disccardpromos expects a number
+  // is exactly the kind of silent-mismatch this verification is designed
+  // to catch, whether that turns out to be the actual cause or not).
+  let before = null;
+  if (externalId) {
+    try {
+      const customerBefore = await getCustomerByExternalId(seasonId, externalId, { balances: true });
+      const pkgBefore = customerBefore?.packages?.find(p => String(p.id) === String(discountId));
+      before = pkgBefore ? Number(pkgBefore.amount) : null;
+    } catch (e) {
+      console.error(`[giftcard] addFunds pre-write balance read failed (verification will be skipped):`, e.message);
+    }
+  }
+  console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} discount_id=${discountId} before=${before} -> crediting +$${delta}`);
   const result = await call(seasonId, '/v1/add-funds/', { method: 'POST', body: JSON.stringify({
-    discount_id: discountId, amount: delta, customer_id: Number(normalizeCustomerId(customerId)),
+    discount_id: Number(discountId), amount: delta, customer_id: Number(normalizeCustomerId(customerId)),
   }) });
   console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} response=${JSON.stringify(result)}`);
+  if (externalId && before != null) {
+    const customerAfter = await getCustomerByExternalId(seasonId, externalId, { balances: true });
+    const pkgAfter = customerAfter?.packages?.find(p => String(p.id) === String(discountId));
+    const after = pkgAfter ? Number(pkgAfter.amount) : null;
+    const observedDelta = after != null ? Math.round((after - before) * 100) / 100 : null;
+    console.log(`[giftcard] addFunds customer_id=${normalizeCustomerId(customerId)} VERIFY before=${before} after=${after} observedDelta=${observedDelta} requestedDelta=${delta}`);
+    if (observedDelta == null || Math.abs(observedDelta - delta) > 0.01) {
+      throw new Error(`disccardpromos' add-funds call reported success, but package ${discountId}'s real balance changed by $${observedDelta ?? '(unreadable)'} instead of the $${delta} requested (before=$${before}, after=$${after ?? '(not found)'}). The write did NOT actually take effect as expected.`);
+    }
+  }
   return result;
 }
 
