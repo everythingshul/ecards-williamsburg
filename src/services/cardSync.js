@@ -275,20 +275,21 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
 // otherwise compare against the exact same two numbers.
 //
 // FIXED (2026-09) — this used to flag ANY disagreement, in either
-// direction. Since services/applicantBalance.js's `remaining` (this
-// function's "expected") deliberately does NOT subtract real store spend
-// (spend can't be confirmed at all until disccardpromos' transactions-array
-// field name is fixed — see the Cards page's diagnostic banner), a real
-// balance LOWER than expected is the normal, permanent result of genuine
-// spend this app just can't see yet — not a bug, and flagging it kept
-// producing exactly the recurring false-positive mismatch emails reported
-// multiple times. Only the OTHER direction — disccardpromos showing MORE
-// money than we ever loaded — is actually impossible under correct
-// operation (nothing outside this app's own ledger-driven writes should
-// ever add to a customer's package) and still worth a real alert. So only
-// `actual > expected` (real balance higher than our ledger) opens a flag;
-// `actual <= expected` auto-resolves any existing flag instead, since
-// that's now the expected steady state until transaction sync is fixed.
+// direction. `expected` here is `loaded` (the full total ever granted, per
+// this app's own ledger) — NOT `remaining` (loaded minus this app's own
+// locally-tracked spend), confirmed (2026-09-16) disccardpromos deducts
+// real store purchases from "amount" automatically on its own side. So a
+// real balance LOWER than expected is the normal, permanent result of
+// genuine spend disccardpromos has already deducted on its end — not a bug,
+// and flagging it kept producing exactly the recurring false-positive
+// mismatch emails reported multiple times. Only the OTHER direction —
+// disccardpromos showing MORE money than we ever loaded — is actually
+// impossible under correct operation (nothing outside this app's own
+// ledger-driven writes should ever add to a customer's package) and still
+// worth a real alert. So only `actual > expected` (real balance higher than
+// our ledger) opens a flag; `actual <= expected` auto-resolves any existing
+// flag instead, since that's the expected steady state once any real
+// spending has happened.
 //
 // customerOverride: same convention as syncApplicantCards above — pass an
 // already-fetched customer (or explicit null) to skip this function's own
@@ -310,7 +311,7 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
   if (!customer) return null;
   const pkg = (customer.packages || []).find(p => String(p.id) === String(discountId));
   const actual = Math.round((pkg ? Number(pkg.amount) || 0 : 0) * 100) / 100;
-  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.remaining ?? 0;
+  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.loaded ?? 0;
   const diff = Math.round((actual - expected) * 100) / 100;
 
   const existing = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE org_id = ? AND applicant_id = ? AND status = 'open'`).get(orgId, applicant.id);

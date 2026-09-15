@@ -176,10 +176,16 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     // before/after numbers instead of silently lying again.
     //
     // Ledger read AFTER this allocation's own row is already committed
-    // above — `remaining` already includes this contribution, so it's sent
-    // to disccardpromos as-is, never added to again here.
-    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
-    const newTotal = existing.remaining;
+    // above — `loaded` already includes this contribution, so it's sent to
+    // disccardpromos as-is, never added to again here. Pushes `loaded` (the
+    // full total ever granted), not `remaining` (loaded minus this app's
+    // own locally-tracked spend) — confirmed (2026-09-16) that
+    // disccardpromos deducts real store purchases from whatever "amount" is
+    // set automatically, on its own side, going forward. Subtracting this
+    // app's own (separately unreliable) spend tracking before writing would
+    // double-count that deduction.
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { loaded: totalAmount };
+    const newTotal = existing.loaded;
     console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
     try {
       await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: newTotal, discountId });
@@ -378,11 +384,12 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   let giftcardStatus = 'ok', giftcardError = null;
   if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
     // Ledger read AFTER this reversal's own row is already committed above
-    // — `remaining` already has this reversal's credit-back applied, so
-    // it's sent to disccardpromos as-is (no separate subtraction here,
-    // removing the other half of the race).
-    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: 0 };
-    const newTotal = Math.max(0, existing.remaining);
+    // — `loaded` already has this reversal's credit-back applied, so it's
+    // sent to disccardpromos as-is (no separate subtraction here, removing
+    // the other half of the race). Pushes `loaded`, not `remaining` — see
+    // createAllocation's identical note above.
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { loaded: 0 };
+    const newTotal = Math.max(0, existing.loaded);
     // Diagnostic — see giftcard.js's setPackageAmountAbsolute for the
     // matching log on the actual write.
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);

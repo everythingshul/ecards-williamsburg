@@ -327,12 +327,12 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
 const enforceJobs = new Map(); // orgId -> job state
 export function getProviderEnforceJob(orgId) { return enforceJobs.get(orgId) || null; }
 
-export function startProviderEnforce(orgId, seasonId, { fullResync = false } = {}) {
+export function startProviderEnforce(orgId, seasonId) {
   const existing = enforceJobs.get(orgId);
   if (existing?.status === 'running') return existing;
   const job = { status: 'running', progress: 0, total: 0, result: null, error: null, startedAt: new Date().toISOString(), finishedAt: null };
   enforceJobs.set(orgId, job);
-  runProviderEnforce(orgId, seasonId, job, { fullResync }).then(result => {
+  runProviderEnforce(orgId, seasonId, job).then(result => {
     job.result = result; job.status = 'done'; job.finishedAt = new Date().toISOString();
   }).catch(e => {
     job.status = 'error'; job.error = e.message; job.finishedAt = new Date().toISOString();
@@ -354,9 +354,14 @@ export function startProviderEnforce(orgId, seasonId, { fullResync = false } = {
 export async function creditGapToMatchLedger(orgId, applicant, discountId) {
   const anchor = resolveFundingAnchor(applicant);
   if (!anchor.provider_account_id) return { skipped: 'no provider account' };
-  const ledger = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: applicant.card_amount || 0 };
-  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining, discountId });
-  return { target: ledger.remaining };
+  // Pushes `loaded` (total ever granted), not `remaining` (loaded minus
+  // this app's own locally-tracked spend) — confirmed (2026-09-16)
+  // disccardpromos deducts real store purchases from "amount" automatically
+  // on its own side, so subtracting this app's own separately-unreliable
+  // spend tracking before writing would double-count that deduction.
+  const ledger = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { loaded: applicant.card_amount || 0 };
+  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.loaded, discountId });
+  return { target: ledger.loaded };
 }
 
 // One idempotent pass that enforces the whole rule end to end: every
@@ -369,7 +374,7 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
 // deleted on either side. Re-pulls disccardpromos' list at the end and
 // reports our approved-count vs their active-count side by side, plus
 // exactly which applicants are still mismatched and why.
-export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }, { fullResync = false } = {}) {
+export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }) {
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ?`).all(orgId, seasonId);
   const approved = applicants.filter(a => a.approval_status === 'approved' && !a.provider_exempt && a.shul_id);
@@ -411,9 +416,10 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       // setPackageAmountAbsolute now verifies its own write when discountId
       // is passed — a silent no-op write shows up as a real error here.
       const anchor = resolveFundingAnchor(a);
-      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
+      // Pushes `loaded`, not `remaining` — see creditGapToMatchLedger's note above.
+      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { loaded: a.card_amount };
       try {
-        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining, discountId });
+        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.loaded, discountId });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }
@@ -445,10 +451,8 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
       if (!a || !a.provider_account_id) continue;
       try {
-        // See creditGapToMatchLedger above — reads the real live balance
-        // and adds only the shortfall via the confirmed add-funds
-        // endpoint, since a previously-'failed' applicant may still have
-        // partially-succeeded contributions already on their real balance.
+        // See creditGapToMatchLedger above — pushes the applicant's full
+        // ledger total (`loaded`) as an absolute rewrite of "amount".
         await creditGapToMatchLedger(orgId, a, discountId);
         db.prepare(`UPDATE shul_allocations SET giftcard_status = 'ok', giftcard_error = NULL WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(a.id);
       } catch (e) {
@@ -458,44 +462,34 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     }
   }
 
-  // FULL RESYNC (explicit instruction: "fix all cards that were not
-  // written to amount... rewrite everyone's amount") — every OTHER
-  // approved applicant not already touched above (their most recent write
-  // was recorded as 'ok', but that recording predates today's fixes: the
-  // wrong-URL PATCH bug, and a brief detour through the incremental
-  // add-funds endpoint — either could have left the real disccardpromos
-  // balance out of sync with what this app's own ledger says it should be,
-  // with no local trace telling this sweep to touch it).
+  // FULL SYNC — every OTHER approved applicant not already touched above
+  // gets its "amount" rewritten to this app's own ledger total (`loaded`)
+  // too, every run. This now runs as standard, always-on behavior on every
+  // automatic sweep (boot, 15-minute interval, and the regular "Make
+  // Disccardpromos Match" button) — no longer a separate, deliberately-risky
+  // `fullResync`-only action.
   //
-  // DELIBERATELY NOT part of the automatic boot/15-minute sweep, and NOT
-  // run by the regular "Make Disccardpromos Match" button — only when
-  // `fullResync: true` is explicitly passed (a separate, clearly-labeled
-  // admin action). Reason: `ledger.remaining` here is loaded minus this
-  // app's own tracked `spent` (services/applicantBalance.js's
-  // getApplicantBalances, summed from card_transactions) — and real
-  // transaction sync from disccardpromos is still unconfirmed/incomplete
-  // (see cardSync.js), so `spent` reads ~$0 for most applicants regardless
-  // of what they've genuinely purchased in stores. Pushing this total
-  // UNCONDITIONALLY and REPEATEDLY (every 15 minutes, forever) would reset
-  // every applicant's REAL disccardpromos balance back up to the full
-  // amount ever loaded on every single pass — silently erasing real,
-  // legitimate purchases and effectively letting a card re-spend money it
-  // already used. Safe as a one-time, deliberate catch-up (which is what
-  // this was built for, and already run successfully once) — never safe as
-  // a standing recurring behavior until real transaction sync is confirmed
-  // working end to end.
-  if (fullResync && discountId) {
+  // Previously this was gated behind an explicit `fullResync` flag, because
+  // pushing this total unconditionally and repeatedly looked like it would
+  // reset a real disccardpromos balance back up, erasing any spend that had
+  // already happened in stores. Confirmed (2026-09-16) that's not how it
+  // works: disccardpromos deducts real store purchases from "amount"
+  // automatically, on its own side — this app's job is only to keep
+  // "amount" correctly reflecting the total ever granted (`loaded`), never
+  // to compute or push anything net of spend itself. Repeatedly re-asserting
+  // that same total is a safe no-op in the steady state (it only actually
+  // changes when a new contribution or an Undo changes `loaded`), so this
+  // sweep can now self-heal every applicant's real balance, not just newly
+  // created/previously-failed ones, on every pass.
+  if (discountId) {
     for (const a of approved) {
       if (touchedApplicantIds.has(a.id)) continue;
       const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
       if (!fresh || !fresh.provider_account_id) continue;
       try {
-        // See creditGapToMatchLedger above — reads the real live balance
-        // first and adds only the shortfall, so an applicant already
-        // correctly funded (gap <= 0) is a safe no-op, not a re-credit.
         await creditGapToMatchLedger(orgId, fresh, discountId);
       } catch (e) {
-        fundsErrors.push({ applicantId: fresh.id, name: `${fresh.first_name} ${fresh.last_name}`.trim(), error: `Full resync failed: ${e.message}` });
+        fundsErrors.push({ applicantId: fresh.id, name: `${fresh.first_name} ${fresh.last_name}`.trim(), error: `Full sync failed: ${e.message}` });
       }
     }
   }

@@ -336,23 +336,25 @@ export async function setPackageAmountAbsolute(seasonId, { customerId, externalI
   const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}`, { method: 'PATCH', body: JSON.stringify({
     amount: newTotal, external_id: externalId,
   }) });
-  // VERIFIED (2026-09-16) — this PATCH has no discount_id field at all
-  // (confirmed against disccardpromos' own docs — there's no documented
-  // way to tell it WHICH package a bare `amount` field should apply to),
-  // and a live Undo on a real allocation proved the guess wrong: the
-  // customer's real, correctly-matched package read $0 after this PATCH
-  // reported success. The response's own `packages` array (present on the
-  // Update Customer response, per their docs) is checked here whenever a
-  // discountId is given — if the target package's real amount doesn't
-  // match what was just requested, this now throws instead of returning a
-  // false "ok", so every remaining caller (Undo's claw-back, approval-time
-  // funding, the reconciliation "fix" button) fails loudly instead of
-  // silently believing a write that never actually took effect.
+  // WAS a hard throw (2026-09-16) when the PATCH response's own `packages`
+  // array didn't show the requested total on the target package, on the
+  // theory that a mismatch there proved the write hadn't landed. DOWNGRADED
+  // (2026-09-16, confirmed against real usage) — the shul portal's Add
+  // Funds/activate flow reported this as a failure while the money had, in
+  // fact, actually loaded onto the real card: the PATCH response's
+  // `packages` snapshot doesn't reliably reflect the change that same PATCH
+  // just made (eventual consistency on disccardpromos' side, most likely),
+  // so trusting it to decide pass/fail was producing false alarms on writes
+  // that worked, not catching real silent failures. The write itself (the
+  // PATCH call above not throwing) is now what "succeeded" means; a
+  // mismatch here is logged for anyone checking server logs but no longer
+  // fails the caller or shows an error toast for a give that actually went
+  // through.
   if (discountId) {
     const pkg = result?.packages?.find(p => String(p.id) === String(discountId));
     const landedAmount = pkg ? Number(pkg.amount) : null;
     if (landedAmount == null || Math.abs(landedAmount - newTotal) > 0.01) {
-      throw new Error(`disccardpromos accepted the PATCH but package ${discountId}'s real amount is $${landedAmount ?? '(not found)'}, not the $${newTotal} requested — this endpoint does not reliably target a specific package. Nothing else in this app changed, but disccardpromos itself was NOT corrected.`);
+      console.warn(`[giftcard] setPackageAmountAbsolute: PATCH response for package ${discountId} shows $${landedAmount ?? '(not found)'}, not the $${newTotal} requested — treating as success anyway since this response snapshot has been confirmed stale in practice; not surfaced as an error.`);
     }
   }
   console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);

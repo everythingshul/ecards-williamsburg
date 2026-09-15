@@ -125,7 +125,11 @@ async function fixOneFlag(orgId, userId, flag) {
   if (!discountId) throw new Error('No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).');
   const fundingAnchor = resolveFundingAnchor(applicant);
   if (!fundingAnchor.provider_account_id) throw new Error('This applicant has no disccardpromos account on file.');
-  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.remaining ?? 0;
+  // Pushes `loaded`, not `remaining` — see services/matching.js's
+  // createAllocation for why (disccardpromos deducts real store spend from
+  // "amount" automatically, so this app must never subtract its own
+  // locally-tracked spend before writing).
+  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.loaded ?? 0;
   await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: expected, discountId });
   db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
     .run(userId, flag.id);
