@@ -223,7 +223,7 @@ function trackPageview() {
 // out of sync until the automatic retry sweep catches it.
 function reversalToastMessage(reversal, verb) {
   const parts = [];
-  if (reversal?.shortfall > 0) parts.push(`$${reversal.shortfall.toFixed(2)} had already been spent and couldn't be retrieved`);
+  if (reversal?.shortfall > 0) parts.push(`${fmtMoney(reversal.shortfall)} had already been spent and couldn't be retrieved`);
   if (reversal?.giftcard_status === 'failed') parts.push(`disccardpromos wasn't updated yet — it'll retry automatically (the shul's balance was still restored)`);
   return parts.length ? [`${verb} — but ${parts.join('; ')}.`, true] : [verb, false];
 }
@@ -264,7 +264,15 @@ function esignConsentChecked(idPrefix) {
   return true;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function fmtMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
+// Thousands-separated everywhere in the app — every page calls this one
+// shared function for any dollar figure (lists, totals, dashboards, stat
+// tiles, ...), so fixing it here fixes it systemwide in one place. Handles
+// a negative value too (some callers pass a raw net_amount/diff without
+// pre-abs()ing it) rather than producing "$-1,000.00".
+function fmtMoney(n) {
+  const num = Number(n) || 0;
+  return (num < 0 ? '-$' : '$') + Math.abs(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function fmtDate(d) { if (!d) return ''; return new Date(d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z')).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
 function fmtDateTime(d) { if (!d) return ''; return new Date(d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z')).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
 function badge(text, cls) { return `<span class="badge badge-${esc(cls || text)}">${esc((text || '').replace(/_/g, ' '))}</span>`; }
@@ -767,7 +775,7 @@ async function showOtherSeasons(entityLabel, endpoint, reopen) {
       ${rows.map(r => data.matches
         ? `<tr><td>${esc(r.season_name || 'Unknown season')}</td><td>${badge(r.status || r.approval_status || '', r.status || r.approval_status || '')}</td>
              <td><button class="btn btn-sm btn-outline" onclick="closeModal(); ${reopen}('${r.id}')">Open</button></td></tr>`
-        : `<tr><td>${esc(r.season_name || 'Unknown season')}</td><td>${r.txn_count} transaction(s), $${(+r.total_purchases).toFixed(2)} in purchases</td><td></td></tr>`
+        : `<tr><td>${esc(r.season_name || 'Unknown season')}</td><td>${r.txn_count} transaction(s), ${fmtMoney(+r.total_purchases)} in purchases</td><td></td></tr>`
       ).join('')}</tbody></table>` : `<p class="small-muted">No other seasons found for this ${entityLabel} yet.</p>`;
     openModal(`${entityLabel}: Other Seasons`, body, `<button class="btn btn-outline btn-sm" onclick="closeModal()">Close</button>`);
   } catch (err) { toast(err.message, true); }

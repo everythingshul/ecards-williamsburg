@@ -114,27 +114,34 @@ export function getApplicantBalances(orgId, applicantIds) {
 }
 
 // Org-wide (optionally season-scoped) funds summary for routes/dashboard.js
-// and routes/donorDashboard.js — approvedFunds is a plain SUM of every
-// approved applicant's own card_amount (each one a genuine distinct
-// contribution, even within a merge group — see routes/applicants.js's
-// fundingAnchor), but totalSpent has to go through getApplicantBalances and
-// dedupe by merge group, or a merged group's shared real balance (see that
-// function's own comment) would get counted once per member instead of once
-// per real disccardpromos account.
+// and routes/donorDashboard.js.
+//
+// FIXED (2026-09) — approvedFunds ("Total Loaded") used to be a plain SUM
+// of card_amount, which is only the approval-time BASE amount — it never
+// included any match or any subsequent shul-portal "Give" top-up
+// (shul_allocations), so it understated the real total on every card the
+// moment matching or a second Give action happened. "Total Loaded" must be
+// the total amount actually on the card AFTER matching — exactly what
+// getApplicantBalances' own `loaded` already computes per applicant/merge
+// group (card_amount + every shul_allocations row, base+match combined).
+// This now sums THAT figure instead, deduped by merge group so a shared
+// disccardpromos account isn't counted once per member (same reasoning as
+// totalSpent below, which already worked this way).
 export function orgFundsSummary(orgId, seasonId) {
   const seasonClause = seasonId ? ' AND season_id = ?' : '';
   const seasonParams = seasonId ? [seasonId] : [];
-  const approved = db.prepare(`SELECT id, merge_group_id, card_amount FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).all(orgId, ...seasonParams);
-  const approvedFunds = Math.round(approved.reduce((s, a) => s + (a.card_amount || 0), 0) * 100) / 100;
-  if (!approved.length) return { approvedFunds, totalSpent: 0 };
+  const approved = db.prepare(`SELECT id, merge_group_id FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).all(orgId, ...seasonParams);
+  if (!approved.length) return { approvedFunds: 0, totalSpent: 0 };
   const balances = getApplicantBalances(orgId, approved.map(a => a.id));
   const seenGroups = new Set();
-  let totalSpent = 0;
+  let approvedFunds = 0, totalSpent = 0;
   for (const a of approved) {
     const groupKey = a.merge_group_id || a.id;
     if (seenGroups.has(groupKey)) continue;
     seenGroups.add(groupKey);
-    totalSpent += balances.get(a.id)?.spent || 0;
+    const b = balances.get(a.id);
+    approvedFunds += b?.loaded || 0;
+    totalSpent += b?.spent || 0;
   }
-  return { approvedFunds, totalSpent: Math.round(totalSpent * 100) / 100 };
+  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: Math.round(totalSpent * 100) / 100 };
 }
