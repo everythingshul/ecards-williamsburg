@@ -126,7 +126,7 @@ async function fixOneFlag(orgId, userId, flag) {
   const fundingAnchor = resolveFundingAnchor(applicant);
   if (!fundingAnchor.provider_account_id) throw new Error('This applicant has no disccardpromos account on file.');
   const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.remaining ?? 0;
-  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: expected });
+  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: expected, discountId });
   db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
     .run(userId, flag.id);
   return expected;

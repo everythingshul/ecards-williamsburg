@@ -283,7 +283,7 @@ export async function addFunds(seasonId, { customerId, discountId, amount }) {
 // package, true today only because every applicant uses a single org-wide
 // Package/Discount ID (disccardpromos_discount_id in Settings). If
 // disccardpromos ever documents a real debit endpoint, replace this.
-export async function setPackageAmountAbsolute(seasonId, { customerId, externalId, totalAmount }) {
+export async function setPackageAmountAbsolute(seasonId, { customerId, externalId, totalAmount, discountId }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
   const newTotal = Math.max(0, Math.round(totalAmount * 100) / 100);
   // Diagnostic, always-on (not gated behind a debug flag) — this is the
@@ -300,6 +300,25 @@ export async function setPackageAmountAbsolute(seasonId, { customerId, externalI
   const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}`, { method: 'PATCH', body: JSON.stringify({
     amount: newTotal, external_id: externalId,
   }) });
+  // VERIFIED (2026-09-16) — this PATCH has no discount_id field at all
+  // (confirmed against disccardpromos' own docs — there's no documented
+  // way to tell it WHICH package a bare `amount` field should apply to),
+  // and a live Undo on a real allocation proved the guess wrong: the
+  // customer's real, correctly-matched package read $0 after this PATCH
+  // reported success. The response's own `packages` array (present on the
+  // Update Customer response, per their docs) is checked here whenever a
+  // discountId is given — if the target package's real amount doesn't
+  // match what was just requested, this now throws instead of returning a
+  // false "ok", so every remaining caller (Undo's claw-back, approval-time
+  // funding, the reconciliation "fix" button) fails loudly instead of
+  // silently believing a write that never actually took effect.
+  if (discountId) {
+    const pkg = result?.packages?.find(p => String(p.id) === String(discountId));
+    const landedAmount = pkg ? Number(pkg.amount) : null;
+    if (landedAmount == null || Math.abs(landedAmount - newTotal) > 0.01) {
+      throw new Error(`disccardpromos accepted the PATCH but package ${discountId}'s real amount is $${landedAmount ?? '(not found)'}, not the $${newTotal} requested — this endpoint does not reliably target a specific package. Nothing else in this app changed, but disccardpromos itself was NOT corrected.`);
+    }
+  }
   console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);
   return result;
 }

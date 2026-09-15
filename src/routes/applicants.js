@@ -20,7 +20,7 @@ import { lockApplicantCards } from '../services/cardSync.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
-  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, resolveFundingAnchor } from '../services/providerAccount.js';
+  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger } from '../services/providerAccount.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -1014,29 +1014,20 @@ router.post('/:id/approve', requirePermission('applicants', 'can_edit'), async (
         if (!discountId) {
           providerFundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — card amount was not loaded.';
         } else {
-          // Must target the merge group's PRIMARY identity, not this
-          // applicant's own — acctResult.accountId already resolves to the
-          // shared account for the common case, but a secondary that
-          // already carried its own separate provider_account_id from
-          // before the merge (ensureProviderAccount only reconciles a row
-          // that had NO account yet) would otherwise still get its money
-          // routed to that stale, separate disccardpromos customer instead
-          // of being summed onto the group's real one. See
-          // services/providerAccount.js's resolveFundingAnchor.
-          const fundingAnchor = resolveFundingAnchor(applicant);
-          // Absolute total from our own ledger (merge-group aware), never a
-          // live disccardpromos read-then-add — this applicant's row was
-          // already UPDATEd to approved/card_amount above, so the ledger
-          // already reflects this approval's own contribution. See
-          // giftcard.js's setPackageAmountAbsolute for why (a live-read-
-          // then-add races when two shuls' contributions land close
-          // together, silently undercounting instead of summing).
-          const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: amount };
-          // Diagnostic — see giftcard.js's setPackageAmountAbsolute for the
-          // matching log on the actual write.
-          console.log(`[applicants] approve applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id || acctResult.accountId} thisAmount=$${amount} ledgerRemaining=$${ledger.remaining}`);
+          // creditGapToMatchLedger (services/providerAccount.js) reads
+          // disccardpromos' real current balance and adds only the
+          // shortfall via the confirmed, discount_id-explicit
+          // POST /v1/add-funds/ — see its own header comment for why the
+          // 'amount' PATCH this used to call was replaced (a live Undo on
+          // a real allocation proved it doesn't reliably credit the
+          // configured package at all). Must target the merge group's
+          // PRIMARY identity, not this applicant's own — re-fetching fresh
+          // here (not the `applicant` var from before ensureProviderAccount
+          // ran above) so resolveFundingAnchor sees a brand-new account id
+          // if one was just created this request, not a stale null.
+          const freshApplicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.id);
           try {
-            await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining });
+            await creditGapToMatchLedger(req.user.org_id, freshApplicant, discountId);
           } catch (e) {
             providerFundsError = e.message;
             console.error('[giftcard] failed to load funds on approval:', e.message);
@@ -1273,15 +1264,13 @@ router.post('/mass-approve', requirePermission('applicants', 'can_edit'), async 
         scheduleProviderEnforceSoon(req.user.org_id, `account write failed on mass-approve for applicant ${applicant.id}`);
       }
       if (accountOk && amount > 0 && discountId) {
-        // See the single /:id/approve route's identical comment — must
-        // target the merge group's PRIMARY identity, not this applicant's
-        // own, or a secondary with a stale pre-merge account gets its money
-        // routed to a separate disccardpromos customer instead of summed.
-        const fundingAnchor = resolveFundingAnchor(applicant);
-        // Absolute total from our own ledger, never a live read-then-add —
-        // see the single /:id/approve route's identical comment.
-        const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: amount };
-        try { await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining }); }
+        // See the single /:id/approve route's identical comment — uses
+        // creditGapToMatchLedger (confirmed add-funds endpoint, reads the
+        // real balance and adds only the shortfall) instead of the
+        // unconfirmed 'amount' PATCH. Re-fetch fresh so a brand-new account
+        // created just above this request is picked up.
+        const freshApplicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.id);
+        try { await creditGapToMatchLedger(req.user.org_id, freshApplicant, discountId); }
         catch (e) {
           providerErrors++;
           providerErrorDetails.push(`${applicant.first_name} ${applicant.last_name}: card not loaded — ${e.message}`);
@@ -1629,15 +1618,14 @@ router.post('/:id/retry-provider-sync', requireSuperAdmin, async (req, res) => {
     const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
     if (!discountId) fundsError = 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
     else {
-      // See the /:id/approve route's identical comment — must target the
-      // merge group's PRIMARY identity, not this applicant's own, and use
-      // the ledger's absolute total rather than re-adding card_amount as a
-      // delta (which would double-count if a previous attempt partially
-      // succeeded — retrying should always converge to the correct total,
-      // not pile another delta on top of an unknown starting point).
-      const fundingAnchor = resolveFundingAnchor(applicant);
-      const ledger = getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { remaining: applicant.card_amount };
-      try { await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id || acctResult.accountId, externalId: fundingAnchor.external_id, totalAmount: ledger.remaining }); }
+      // See the /:id/approve route's identical comment — creditGapToMatchLedger
+      // reads disccardpromos' real balance and adds only the shortfall via
+      // the confirmed add-funds endpoint, so a retry always converges to
+      // the correct total without double-counting a partially-succeeded
+      // earlier attempt. Re-fetch fresh so a brand-new account created just
+      // above this request is picked up.
+      const freshApplicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicant.id);
+      try { await creditGapToMatchLedger(req.user.org_id, freshApplicant, discountId); }
       catch (e) { fundsError = e.message; }
     }
   }

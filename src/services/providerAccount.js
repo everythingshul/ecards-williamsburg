@@ -340,6 +340,33 @@ export function startProviderEnforce(orgId, seasonId, { fullResync = false } = {
   return job;
 }
 
+// Corrects an EXISTING account's balance to match this app's own ledger
+// total, without the unconfirmed (and now, per a live read on a real
+// allocation, evidenced-broken) 'amount' PATCH: reads disccardpromos' real
+// current balance for the applicant's package, then adds only the
+// shortfall via the confirmed, discount_id-explicit POST /v1/add-funds/.
+// Used for catch-up/retry paths only (an existing account may already
+// carry money from a previous successful add-funds call, so blindly
+// re-adding the WHOLE ledger total would double-credit) — createAllocation
+// itself never needs this, since a brand-new allocation's own delta is
+// always exactly what to add, no live read required. A negative or
+// negligible gap (ledger already at or below live balance — nothing owed,
+// or a real spend already accounts for the difference) is a no-op, not an
+// error.
+export async function creditGapToMatchLedger(orgId, applicant, discountId) {
+  const anchor = resolveFundingAnchor(applicant);
+  if (!anchor.provider_account_id) return { skipped: 'no provider account' };
+  const ledger = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: applicant.card_amount || 0 };
+  const customer = await giftcard.getCustomerByExternalId(applicant.season_id, anchor.external_id, { balances: true });
+  if (!customer) throw new Error("Couldn't reach disccardpromos to read this applicant's current balance.");
+  const pkg = customer.packages?.find(p => String(p.id) === String(discountId));
+  const liveBalance = pkg ? Number(pkg.amount) : 0;
+  const gap = Math.round((ledger.remaining - liveBalance) * 100) / 100;
+  if (gap <= 0.01) return { skipped: 'already at or above target', liveBalance, target: ledger.remaining };
+  await giftcard.addFunds(applicant.season_id, { customerId: anchor.provider_account_id, discountId, amount: gap });
+  return { credited: gap, liveBalance, target: ledger.remaining };
+}
+
 // One idempotent pass that enforces the whole rule end to end: every
 // approved, non-exempt applicant holds exactly one ACTIVE disccardpromos
 // customer (a merge group shares one, per ensureProviderAccount above);
@@ -386,20 +413,18 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     for (const applicantId of createdApplicantIds) {
       const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
       if (!(a.card_amount > 0) || !a.provider_account_id) continue;
-      // A newly-created account for a merge secondary is created under the
-      // group's PRIMARY identity (see ensureProviderAccount's `anchor`
-      // resolution above) — so the external_id on this PATCH must be the
-      // primary's, not this member's own, or the just-correctly-set
-      // external_id gets silently overwritten right back to the wrong value.
-      // Absolute total from our own ledger (merge-group aware — this
-      // applicant's own approved card_amount, plus anything else already on
-      // file for the group), never a live-read-then-add — see giftcard.js's
-      // setPackageAmountAbsolute for why (the lost-update race that was
-      // undercounting a second shul's contribution).
-      const anchor = resolveFundingAnchor(a);
+      // REVERTED (2026-09-16) — see services/matching.js's createAllocation
+      // for the evidence: the 'amount' PATCH doesn't reliably credit the
+      // configured package (a real allocation's live read came back $0 on
+      // the correct, matched package). Back to the confirmed, discount_id-
+      // explicit POST /v1/add-funds/. This is the first-ever fund load for
+      // a JUST-created account (balance starts at $0), so the ledger's
+      // remaining figure (merge-group aware — this applicant's own
+      // approved card_amount, plus anything else already on file for the
+      // group) is exactly the right amount to CREDIT.
       const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
       try {
-        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining });
+        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, discountId, amount: ledger.remaining });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }
@@ -430,11 +455,12 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       touchedApplicantIds.add(applicantId);
       const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
       if (!a || !a.provider_account_id) continue;
-      const anchor = resolveFundingAnchor(a);
-      if (!anchor.provider_account_id) continue;
-      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: 0 };
       try {
-        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining });
+        // See creditGapToMatchLedger above — reads the real live balance
+        // and adds only the shortfall via the confirmed add-funds
+        // endpoint, since a previously-'failed' applicant may still have
+        // partially-succeeded contributions already on their real balance.
+        await creditGapToMatchLedger(orgId, a, discountId);
         db.prepare(`UPDATE shul_allocations SET giftcard_status = 'ok', giftcard_error = NULL WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(a.id);
       } catch (e) {
         db.prepare(`UPDATE shul_allocations SET giftcard_error = ? WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(e.message, a.id);
@@ -474,11 +500,11 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
       if (touchedApplicantIds.has(a.id)) continue;
       const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
       if (!fresh || !fresh.provider_account_id) continue;
-      const anchor = resolveFundingAnchor(fresh);
-      if (!anchor.provider_account_id) continue;
-      const ledger = getApplicantBalances(orgId, [fresh.id]).get(fresh.id) || { remaining: fresh.card_amount || 0 };
       try {
-        await giftcard.setPackageAmountAbsolute(fresh.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining });
+        // See creditGapToMatchLedger above — reads the real live balance
+        // first and adds only the shortfall, so an applicant already
+        // correctly funded (gap <= 0) is a safe no-op, not a re-credit.
+        await creditGapToMatchLedger(orgId, fresh, discountId);
       } catch (e) {
         fundsErrors.push({ applicantId: fresh.id, name: `${fresh.first_name} ${fresh.last_name}`.trim(), error: `Full resync failed: ${e.message}` });
       }

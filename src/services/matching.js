@@ -164,24 +164,26 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
-    // REVERTED (2026-09-15, explicit instruction): push the FULL computed
-    // total via the 'amount' PATCH (setPackageAmountAbsolute), not just
-    // this one allocation's own delta via the incremental add-funds
-    // endpoint. Example from the request: shul 1 gives $100 (+$100 match =
-    // $200), shul 2 gives $50 (+$50 match = $100) — disccardpromos' amount
-    // field must end up at $300 (both combined), computed from THIS APP'S
-    // OWN ledger (services/applicantBalance.js's getApplicantBalances —
-    // merge-group aware), never a separate delta add.
-    //
-    // Ledger read AFTER this allocation's own row is already committed
-    // above — `remaining` already includes this contribution, so it's sent
-    // to disccardpromos as-is, never added to again here (removes the
-    // lost-update race a live-read-then-add would have).
-    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
-    const newTotal = existing.remaining;
-    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
+    // REVERTED AGAIN (2026-09-16) — direct evidence the 'amount' PATCH
+    // does not actually credit the configured package: a live Undo read
+    // on a real allocation came back `package id=352 amount=0` — a
+    // correctly-matched, real package on the right customer, genuinely
+    // reading $0 despite a real $20 give recorded as giftcard_status='ok'.
+    // The 'amount' PATCH has no discount_id field at all (confirmed
+    // against disccardpromos' own docs — see giftcard.js's
+    // setPackageAmountAbsolute) — it was always a guess that a bare
+    // top-level `amount` field maps onto a specific package, and this is
+    // now hard evidence that guess is wrong. POST /v1/add-funds/ is the
+    // ONLY endpoint disccardpromos actually documents for crediting a
+    // SPECIFIC package (it takes discount_id explicitly) — back to that,
+    // for exactly this allocation's own delta (base+match combined). No
+    // ledger read needed: the increment happens atomically on
+    // disccardpromos' own side, so two near-simultaneous contributions for
+    // the same applicant can't race each other out the way a
+    // read-then-compute-absolute-total approach could.
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount}`);
     try {
-      await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: newTotal });
+      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, discountId, amount: totalAmount });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
@@ -386,7 +388,7 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     // matching log on the actual write.
     console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);
     try {
-      await giftcard.setPackageAmountAbsolute(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, totalAmount: newTotal });
+      await giftcard.setPackageAmountAbsolute(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, totalAmount: newTotal, discountId });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
