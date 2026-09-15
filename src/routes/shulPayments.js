@@ -220,7 +220,15 @@ router.post('/mine/allocate', async (req, res) => {
       orgId: req.user.org_id, userId: req.user.id, shulId: req.user.shul_id, applicantId: req.body?.applicant_id,
       baseAmount: +req.body?.amount, createdBy: req.user.id, isAdminOverride: false, ip: req.ip,
     });
-    res.status(201).json({ ok: true, allocation: { id: row.id, base_amount: row.base_amount } });
+    // giftcard_status/giftcard_error included — a failed disccardpromos push
+    // (bad Package/Discount ID, no provider account yet, a network error)
+    // used to come back here as plain "ok: true" with nothing distinguishing
+    // it from a real success: the shul's own balance/ledger always updates
+    // (that's this app's own money-tracking, and correctly never blocked on
+    // the external write — see createAllocation's own comment), but the
+    // money silently never reached the real card. Surfaced so the frontend
+    // can warn instead of reporting a clean "Activated" either way.
+    res.status(201).json({ ok: true, allocation: { id: row.id, base_amount: row.base_amount, giftcard_status: row.giftcard_status, giftcard_error: row.giftcard_error } });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -496,23 +504,30 @@ router.post('/:id/refund', requirePermission('shul_payments', 'can_edit'), async
     const methodNote = result.method === 'void'
       ? ' (voided — the original charge never settled, so nothing actually hit the card.)'
       : (result.voidAttemptError ? ` (refunded — void wasn't possible: ${result.voidAttemptError})` : '');
-    const refundStatus = payment.status === 'approved' ? 'approved' : 'rejected';
+    // 'refunded' (not 'rejected') — a refund/void is never a rejection, it's
+    // money that genuinely went back to the shul's card, and showing
+    // "Rejected" on it read as if the payment had been declined/denied
+    // rather than paid back. Same bucket-exclusion effect as 'rejected' for
+    // every balance query below (pendingBalance/approvedBalance only ever
+    // match 'pending_approval'/'approved' specifically), just the correct
+    // label.
+    const refundStatus = payment.status === 'approved' ? 'approved' : 'refunded';
     // FIXED — a payment refunded/voided while still 'pending_approval' used
     // to stay in that status forever: services/shulBalance.js's
     // pendingBalance() sums net_amount for every 'pending_approval' row
-    // unconditionally, and the refund row above lands in 'rejected' (a
+    // unconditionally, and the refund row above lands in 'refunded' (a
     // different bucket, since the original was never 'approved' — see this
     // route's file-level comment), so nothing ever offset it. The shul kept
     // seeing that money as "pending" indefinitely even though it had
     // already been sent back to their card. A full refund/void closes the
     // original out completely — nothing is left to ever approve — so it
-    // moves to 'rejected' too, matching the refund row's own bucket and
+    // moves to 'refunded' too, matching the refund row's own bucket and
     // dropping both out of Pending Balance together. A genuine PARTIAL
     // refund of a still-pending payment leaves the original's status alone
     // (some of it is still real, outstanding money to be approved or
     // rejected on its own merits).
     if (payment.status === 'pending_approval' && isFullAmount) {
-      db.prepare(`UPDATE shul_payments SET status = 'rejected', approved_by = ?, approved_at = datetime('now'), rejected_reason = ? WHERE id = ?`)
+      db.prepare(`UPDATE shul_payments SET status = 'refunded', approved_by = ?, approved_at = datetime('now'), rejected_reason = ? WHERE id = ?`)
         .run(req.user.id, `${result.method === 'void' ? 'Voided' : 'Refunded'} before approval.`, payment.id);
     }
     const id = uuid();

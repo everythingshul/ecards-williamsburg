@@ -410,6 +410,41 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     fundsErrors.push({ applicantId: null, name: null, error: 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — new accounts were created but no funds were loaded onto them.' });
   }
 
+  // Retry any allocation that never made it onto the real card the first
+  // time (services/matching.js's createAllocation never blocks on this
+  // write failing — the shul's own balance/ledger is the source of truth
+  // and always updates — so a bad discount ID, a dropped network request,
+  // or disccardpromos being briefly down just left giftcard_status='failed'
+  // sitting there with nobody watching it, and the money never actually
+  // arrived on the card despite this app showing the give as successful).
+  // This 15-minute sweep is the self-heal: any STILL-approved applicant
+  // (already excluding the brand-new accounts just funded above, which
+  // already got the ledger's current total) with at least one failed
+  // allocation gets the ledger's current total re-pushed once — success
+  // clears every one of that applicant's failed rows at once (the push is
+  // the applicant's whole remaining total, not per-row, so one push always
+  // resolves every outstanding failure for them together).
+  if (discountId) {
+    const failedApplicantIds = db.prepare(`
+      SELECT DISTINCT applicant_id FROM shul_allocations
+      WHERE org_id = ? AND season_id = ? AND giftcard_status = 'failed'
+    `).all(orgId, seasonId).map(r => r.applicant_id).filter(id => !createdApplicantIds.has(id));
+    for (const applicantId of failedApplicantIds) {
+      const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
+      if (!a || a.approval_status !== 'approved' || !a.provider_account_id) continue;
+      const anchor = resolveFundingAnchor(a);
+      if (!anchor.provider_account_id) continue;
+      const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount || 0 };
+      try {
+        await giftcard.syncPackageAmount(a.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, discountId, totalAmount: ledger.remaining });
+        db.prepare(`UPDATE shul_allocations SET giftcard_status = 'ok', giftcard_error = NULL WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(a.id);
+      } catch (e) {
+        db.prepare(`UPDATE shul_allocations SET giftcard_error = ? WHERE applicant_id = ? AND giftcard_status = 'failed'`).run(e.message, a.id);
+        fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Retry of a previously-failed card load still failing: ${e.message}` });
+      }
+    }
+  }
+
   let deactivated = 0;
   if (!isMock) {
     // Reuse the same index pulled at the top of this run rather than a

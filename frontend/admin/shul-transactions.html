@@ -19,7 +19,7 @@ renderShell('/admin/shul-transactions', `
   <div class="toolbar">
     <select id="f-shul"><option value="">All Shuls</option></select>
     <select id="f-season"><option value="">All Seasons</option></select>
-    <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+    <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="refunded">Refunded</option></select>
     <input id="p-search" placeholder="Search shul, method, ref#…" style="max-width:240px">
   </div>
   <div class="tabs">
@@ -213,7 +213,7 @@ function renderPaymentsTable() {
       <td>${p.direction === 'out' ? '-' : ''}${fmtMoney(p.amount)}${refunded > 0 ? `<div class="small-muted">Refunded: ${fmtMoney(refunded)}</div>` : ''}</td>
       <td>${fmtMoney(p.fee_amount)}${p.direction === 'in' ? ` <button class="btn btn-outline btn-sm" style="padding:1px 6px" onclick="openFeeModal('${p.id}')">Edit</button>` : ''}</td>
       <td>${p.direction === 'out' ? '-' : ''}${fmtMoney(Math.abs(p.net_amount))}</td>
-      <td>${badge(p.status, p.status === 'approved' ? 'active' : (p.status === 'rejected' ? 'rejected' : 'pending'))}</td>
+      <td>${badge(p.status, p.status === 'approved' ? 'active' : ((p.status === 'rejected' || p.status === 'refunded') ? 'rejected' : 'pending'))}</td>
       <td>${esc(p.manual_ref||'')}</td>
       <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
       <td>${fmtDateTime(p.created_at)}</td>
@@ -438,8 +438,17 @@ window.submitAdminAllocation = async () => {
   if (!applicant_id) return toast('Select an applicant', true);
   if (!(amount > 0)) return toast('Enter a valid amount', true);
   try {
-    await api('/shul-payments/allocate', { method: 'POST', body: { shul_id, applicant_id, amount, is_admin_override: qs('#al-override').checked } });
-    toast('Given');
+    const { allocation } = await api('/shul-payments/allocate', { method: 'POST', body: { shul_id, applicant_id, amount, is_admin_override: qs('#al-override').checked } });
+    // A failed disccardpromos push means the shul's balance/ledger here
+    // updated normally but the money never actually reached the real card
+    // (bad Package/Discount ID, no provider account, a network error) — see
+    // services/matching.js's createAllocation, which never aborts on this
+    // since the local ledger is the source of truth either way.
+    if (allocation?.giftcard_status === 'failed') {
+      toast(`Recorded, but the card wasn't updated: ${allocation.giftcard_error || 'unknown error'}`, true);
+    } else {
+      toast('Given');
+    }
     qs('#al-amount').value = ''; qs('#al-override').checked = false;
     loadAllocations();
   } catch (err) { toast(err.message, true); }
