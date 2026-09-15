@@ -26,28 +26,22 @@ import { db } from '../db.js';
 // a merged person still gets the real combined balance, not just whatever
 // happens to be attached to that one row.
 //
-// FIXED (2026-09) — `remaining` used to be derived as loaded minus spend
-// summed from card_transactions, which depends on disccardpromos' real
-// transactions-array field name — never confirmed, so that sum silently
-// stayed at 0 and "remaining" ran ahead of reality by however much had
-// actually been spent. This was the real cause behind both blank $0.00
-// dashboard totals (Total Spent has the identical formula) and recurring
-// balance-mismatch emails (this exact "expected" figure is what got
-// compared against disccard's real balance). Every card's package
-// `amount` IS reliably readable, confirmed and already used elsewhere
-// (services/cardSync.js keeps cards.amount fresh from it every sync) — now
-// persisted per applicant as disccard_balance and used here directly as
-// `remaining` whenever a sync has actually populated it, with `spent`
-// BACK-COMPUTED as loaded minus that real balance instead of forward-summed
-// from individual transactions. Falls back to the old transaction-summed
-// computation only for an applicant who has never synced yet (disccard_balance
-// still null — e.g. mock mode, or brand new) so nothing regresses before the
-// first real sync runs.
+// `spent` is deliberately, strictly "money actually spent in stores" —
+// summed from card_transactions, nothing else. A brief 2026-09 attempt to
+// back-compute it as loaded-minus-disccard's-real-balance (so it wouldn't
+// read $0 while the transactions sync was broken) was reverted per direct
+// product direction: that conflated "spent in stores" with "any reason the
+// real balance is lower than our ledger," which is a different, less
+// trustworthy claim — this app doesn't assert a real transaction happened
+// unless it actually captured one. Until disccardpromos' transactions-array
+// field name is confirmed (see services/cardSync.js's diagnostic banner),
+// `spent` correctly reads 0 rather than a guessed figure, and `remaining`
+// is exactly `loaded - spent` — "how much of what was loaded hasn't been
+// used in stores YET, as far as this app can currently confirm."
 export function getApplicantBalances(orgId, applicantIds) {
   const result = new Map();
   if (!applicantIds.length) return result;
-  const cols = 'id, merge_group_id, approval_status, card_amount, disccard_balance, disccard_balance_synced_at';
-  const rows = db.prepare(`SELECT ${cols} FROM applicants WHERE org_id = ? AND id IN (${applicantIds.map(() => '?').join(',')})`).all(orgId, ...applicantIds);
+  const rows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount FROM applicants WHERE org_id = ? AND id IN (${applicantIds.map(() => '?').join(',')})`).all(orgId, ...applicantIds);
   if (!rows.length) return result;
 
   // Group key: an applicant's merge_group_id if it has one, else its own id
@@ -63,7 +57,7 @@ export function getApplicantBalances(orgId, applicantIds) {
   }
   const trueGroupKeys = [...new Set(rows.filter(r => r.merge_group_id).map(r => r.merge_group_id))];
   if (trueGroupKeys.length) {
-    const memberRows = db.prepare(`SELECT ${cols} FROM applicants WHERE org_id = ? AND merge_group_id IN (${trueGroupKeys.map(() => '?').join(',')})`).all(orgId, ...trueGroupKeys);
+    const memberRows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount FROM applicants WHERE org_id = ? AND merge_group_id IN (${trueGroupKeys.map(() => '?').join(',')})`).all(orgId, ...trueGroupKeys);
     for (const r of memberRows) {
       idsByGroup.get(r.merge_group_id)?.add(r.id);
       applicantById.set(r.id, r);
@@ -78,36 +72,20 @@ export function getApplicantBalances(orgId, applicantIds) {
   // nets a full or partial reversal to the right remainder.
   const allocatedRows = db.prepare(`SELECT applicant_id, COALESCE(SUM(total_amount),0) t FROM shul_allocations WHERE applicant_id IN (${placeholders}) GROUP BY applicant_id`).all(...allMemberIds);
   const allocatedById = new Map(allocatedRows.map(r => [r.applicant_id, r.t]));
-  // Only used as a fallback for a group with no real disccard_balance synced
-  // yet — see the function comment above. Same negative-amount-is-a-purchase
-  // convention as cards.js's /by-shul.
+  // Same negative-amount-is-a-purchase convention as cards.js's /by-shul.
   const spentRows = db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
     FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.applicant_id IN (${placeholders}) GROUP BY c.applicant_id`).all(...allMemberIds);
   const spentById = new Map(spentRows.map(r => [r.applicant_id, r.spent]));
 
   for (const idSet of idsByGroup.values()) {
-    let loaded = 0, transactionSpent = 0;
-    // A merge group's real disccard balance is only ever synced onto
-    // whichever member's own external_id disccard actually knows the
-    // shared account under (in practice the PRIMARY — see
-    // services/cardSync.js's syncApplicantCards) — pick the most recently
-    // synced non-null reading across the whole group rather than assuming
-    // it's any one specific member.
-    let realBalance = null, realBalanceSyncedAt = null;
+    let loaded = 0, spent = 0;
     for (const id of idSet) {
       const a = applicantById.get(id);
       if (a?.approval_status === 'approved') loaded += a.card_amount || 0;
       loaded += allocatedById.get(id) || 0;
-      transactionSpent += spentById.get(id) || 0;
-      if (a?.disccard_balance != null && (realBalanceSyncedAt == null || a.disccard_balance_synced_at > realBalanceSyncedAt)) {
-        realBalance = a.disccard_balance;
-        realBalanceSyncedAt = a.disccard_balance_synced_at;
-      }
+      spent += spentById.get(id) || 0;
     }
-    loaded = Math.round(loaded * 100) / 100;
-    const rounded = realBalance != null
-      ? { loaded, spent: Math.round(Math.max(0, loaded - realBalance) * 100) / 100, remaining: Math.round(realBalance * 100) / 100 }
-      : { loaded, spent: Math.round(transactionSpent * 100) / 100, remaining: Math.round((loaded - transactionSpent) * 100) / 100 };
+    const rounded = { loaded: Math.round(loaded * 100) / 100, spent: Math.round(spent * 100) / 100, remaining: Math.round((loaded - spent) * 100) / 100 };
     for (const id of idSet) result.set(id, rounded);
   }
   return result;

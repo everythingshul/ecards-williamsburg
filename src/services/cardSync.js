@@ -163,13 +163,6 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   // newly-discovered card was recorded locally with a $0 amount regardless
   // of its real balance.
   const balance = (customer.packages || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-  // Persisted onto the applicant row this customer object was actually
-  // fetched for (see applicants.disccard_balance's own comment in db.js) —
-  // this is the one reliably-readable disccardpromos figure, and
-  // services/applicantBalance.js uses it directly instead of trying to
-  // derive spend from card_transactions, which depends on the still-
-  // unconfirmed transactions-array field name.
-  db.prepare(`UPDATE applicants SET disccard_balance = ?, disccard_balance_synced_at = datetime('now') WHERE id = ?`).run(balance, applicant.id);
   let discovered = 0;
   for (const masked of remoteMasked) {
     if (known.has(masked)) continue;
@@ -271,20 +264,31 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
 }
 
 // Compares our own ledger (approval-time card_amount + every shul_allocation
-// since, minus spend — see services/applicantBalance.js, merge-group aware)
-// against disccardpromos' real remaining balance for the same customer, and
-// flags a mismatch for an admin to review. `applicant` must be a merge-
-// group's funding anchor (the primary, or a standalone applicant — see
+// since — see services/applicantBalance.js, merge-group aware) against
+// disccardpromos' real remaining balance for the same customer, and flags a
+// mismatch for an admin to review. `applicant` must be a merge-group's
+// funding anchor (the primary, or a standalone applicant — see
 // routes/applicants.js's fundingAnchor for the same concept) since that's
 // whose external_id the one real shared disccardpromos customer is known
 // under; calling this once per anchor (not once per group member) is the
 // caller's responsibility (see syncAllCards below) since every member would
 // otherwise compare against the exact same two numbers.
-// Never auto-corrects either side — this app doesn't assume which one is
-// wrong. A newly-detected mismatch emails the org's support address (once,
-// not on every sweep) and opens a card_reconciliation_flags row; a flag
-// that's no longer reproducing (the numbers now agree, within a cent) is
-// auto-resolved on the next sweep rather than needing a manual dismiss.
+//
+// FIXED (2026-09) — this used to flag ANY disagreement, in either
+// direction. Since services/applicantBalance.js's `remaining` (this
+// function's "expected") deliberately does NOT subtract real store spend
+// (spend can't be confirmed at all until disccardpromos' transactions-array
+// field name is fixed — see the Cards page's diagnostic banner), a real
+// balance LOWER than expected is the normal, permanent result of genuine
+// spend this app just can't see yet — not a bug, and flagging it kept
+// producing exactly the recurring false-positive mismatch emails reported
+// multiple times. Only the OTHER direction — disccardpromos showing MORE
+// money than we ever loaded — is actually impossible under correct
+// operation (nothing outside this app's own ledger-driven writes should
+// ever add to a customer's package) and still worth a real alert. So only
+// `actual > expected` (real balance higher than our ledger) opens a flag;
+// `actual <= expected` auto-resolves any existing flag instead, since
+// that's now the expected steady state until transaction sync is fixed.
 //
 // customerOverride: same convention as syncApplicantCards above — pass an
 // already-fetched customer (or explicit null) to skip this function's own
@@ -310,7 +314,9 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
   const diff = Math.round((actual - expected) * 100) / 100;
 
   const existing = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE org_id = ? AND applicant_id = ? AND status = 'open'`).get(orgId, applicant.id);
-  if (Math.abs(diff) <= 0.01) {
+  // Only actual > expected (real balance higher than our own ledger) is a
+  // genuine anomaly — see this function's own comment above.
+  if (diff <= 0.01) {
     if (existing) db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(existing.id);
     return null;
   }
@@ -335,8 +341,8 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
 async function notifyReconciliationMismatch(orgId, applicant, flag) {
   const org = db.prepare('SELECT support_email FROM organizations WHERE id = ?').get(orgId);
   if (!org?.support_email) { console.error('[cardSync] reconciliation mismatch found for applicant', applicant.id, 'but no Settings > Organization support email is set to notify'); return; }
-  const subject = `Card balance mismatch: ${applicant.first_name || ''} ${applicant.last_name || ''}`.trim();
-  const body = `<p>Our records and disccardpromos disagree about this applicant's remaining card balance.</p>
+  const subject = `Card balance higher than expected: ${applicant.first_name || ''} ${applicant.last_name || ''}`.trim();
+  const body = `<p>disccardpromos shows MORE money on this applicant's card than we ever loaded onto it — that shouldn't be possible unless something outside this app added funds, or our own ledger missed a load.</p>
     <p><strong>${esc(applicant.first_name || '')} ${esc(applicant.last_name || '')}</strong> (external ID ${esc(applicant.external_id || '')})</p>
     <p>Our ledger says: <strong>$${flag.expected_amount.toFixed(2)}</strong><br>disccardpromos says: <strong>$${flag.actual_amount.toFixed(2)}</strong></p>
     <p>This has been flagged for review — see this applicant's Cards tab in the admin.</p>`;

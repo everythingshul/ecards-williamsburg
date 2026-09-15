@@ -40,7 +40,7 @@ renderShell('/admin/cards', `
     </div>
   </div>
   <div id="panel-recon" style="display:none">
-    <p class="small-muted">An applicant whose real disccardpromos balance doesn't match what our own records say it should be — checked automatically on every sync. "Fix on disccardpromos" pushes our ledger's number to disccardpromos, actually correcting the real balance (not just dismissing the flag); "Mark Resolved" only clears the flag without changing anything.</p>
+    <p class="small-muted">An applicant whose real disccardpromos balance is HIGHER than what our own ledger ever loaded onto their card — checked automatically on every sync. This never fires just because real spend has reduced the balance below our ledger (this app can't confirm individual store transactions yet, so that's expected, not a mismatch) — only money showing up that we never put there. "Fix on disccardpromos" pushes our ledger's number to disccardpromos, actually correcting the real balance (not just dismissing the flag); "Mark Resolved" only clears the flag without changing anything.</p>
     <div class="pill-row" style="margin-bottom:10px"><button class="btn btn-sm btn-primary" id="btn-fix-all-recon">Fix All on disccardpromos</button></div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Applicant</th><th>Our Ledger</th><th>disccardpromos</th><th>Difference</th><th>Detected</th><th></th></tr></thead>
