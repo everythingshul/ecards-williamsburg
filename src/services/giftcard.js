@@ -243,13 +243,18 @@ export async function refundCard(seasonId, { cardNum, amount }) {
 // always has and uses) }. `amount` here IS a delta (must be > 0 — the real
 // API rejects 0/negative with "Amount must be greater than zero").
 //
-// NOT CURRENTLY CALLED (2026-09-15, explicit instruction): every
-// create/reconcile write in this app was switched back to
-// setPackageAmountAbsolute below, pushing the FULL computed total (every
-// shul's combined base+match for this applicant, from this app's own
-// ledger) rather than one allocation's own delta through this endpoint.
-// Kept here, correct and ready to use, in case a future call site
-// genuinely wants an incremental add instead of a forced absolute total.
+// NOT CURRENTLY CALLED (2026-09-16, explicit instruction): every
+// create/reconcile write in this app is back on setPackageAmountAbsolute
+// below, pushing the FULL computed total (every shul's combined base+match
+// for this applicant, from this app's own ledger) rather than a delta
+// through this endpoint. Tried twice this session (both directions) — a
+// live before/after read here proved add-funds has the SAME failure mode
+// the PATCH does: a genuinely new allocation still read $0 on the
+// correctly-matched package after this call reported success, so
+// switching endpoints alone doesn't fix anything; the real cause is still
+// unconfirmed. Kept here, with its own before/after verification built in,
+// in case a future call site or a confirmed fix from disccardpromos'
+// team makes an incremental add the right tool again.
 export async function addFunds(seasonId, { customerId, externalId, discountId, amount }) {
   if (isMockMode(seasonId)) return { success: true, mock: true };
   const delta = Math.round(amount * 100) / 100;

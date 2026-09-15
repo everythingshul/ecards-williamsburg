@@ -341,30 +341,22 @@ export function startProviderEnforce(orgId, seasonId, { fullResync = false } = {
 }
 
 // Corrects an EXISTING account's balance to match this app's own ledger
-// total, without the unconfirmed (and now, per a live read on a real
-// allocation, evidenced-broken) 'amount' PATCH: reads disccardpromos' real
-// current balance for the applicant's package, then adds only the
-// shortfall via the confirmed, discount_id-explicit POST /v1/add-funds/.
-// Used for catch-up/retry paths only (an existing account may already
-// carry money from a previous successful add-funds call, so blindly
-// re-adding the WHOLE ledger total would double-credit) — createAllocation
-// itself never needs this, since a brand-new allocation's own delta is
-// always exactly what to add, no live read required. A negative or
-// negligible gap (ledger already at or below live balance — nothing owed,
-// or a real spend already accounts for the difference) is a no-op, not an
-// error.
+// total. REVERTED (2026-09-16, explicit instruction) from the add-funds/
+// live-gap approach back to a plain absolute push — add-funds turned out
+// to have the SAME failure mode as the 'amount' PATCH (a genuinely new
+// allocation still read $0 on the correctly-matched package afterward), so
+// switching endpoints didn't fix anything. giftcard.js's
+// setPackageAmountAbsolute now verifies its own write (reads the PATCH
+// response's own packages array, throws if the real amount doesn't match
+// what was requested) whenever discountId is passed, so a write that
+// silently fails to land shows up as a real, visible error here insteadof
+// a false "ok" the way it used to.
 export async function creditGapToMatchLedger(orgId, applicant, discountId) {
   const anchor = resolveFundingAnchor(applicant);
   if (!anchor.provider_account_id) return { skipped: 'no provider account' };
   const ledger = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: applicant.card_amount || 0 };
-  const customer = await giftcard.getCustomerByExternalId(applicant.season_id, anchor.external_id, { balances: true });
-  if (!customer) throw new Error("Couldn't reach disccardpromos to read this applicant's current balance.");
-  const pkg = customer.packages?.find(p => String(p.id) === String(discountId));
-  const liveBalance = pkg ? Number(pkg.amount) : 0;
-  const gap = Math.round((ledger.remaining - liveBalance) * 100) / 100;
-  if (gap <= 0.01) return { skipped: 'already at or above target', liveBalance, target: ledger.remaining };
-  await giftcard.addFunds(applicant.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, discountId, amount: gap });
-  return { credited: gap, liveBalance, target: ledger.remaining };
+  await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: anchor.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining, discountId });
+  return { target: ledger.remaining };
 }
 
 // One idempotent pass that enforces the whole rule end to end: every
@@ -413,19 +405,15 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
     for (const applicantId of createdApplicantIds) {
       const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
       if (!(a.card_amount > 0) || !a.provider_account_id) continue;
-      // REVERTED (2026-09-16) — see services/matching.js's createAllocation
-      // for the evidence: the 'amount' PATCH doesn't reliably credit the
-      // configured package (a real allocation's live read came back $0 on
-      // the correct, matched package). Back to the confirmed, discount_id-
-      // explicit POST /v1/add-funds/. This is the first-ever fund load for
-      // a JUST-created account (balance starts at $0), so the ledger's
-      // remaining figure (merge-group aware — this applicant's own
-      // approved card_amount, plus anything else already on file for the
-      // group) is exactly the right amount to CREDIT.
+      // REVERTED AGAIN (2026-09-16, explicit instruction) — add-funds had
+      // the same failure mode as the 'amount' PATCH (a genuinely new
+      // allocation still read $0 afterward), so back to the absolute push.
+      // setPackageAmountAbsolute now verifies its own write when discountId
+      // is passed — a silent no-op write shows up as a real error here.
       const anchor = resolveFundingAnchor(a);
       const ledger = getApplicantBalances(orgId, [a.id]).get(a.id) || { remaining: a.card_amount };
       try {
-        await giftcard.addFunds(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, discountId, amount: ledger.remaining });
+        await giftcard.setPackageAmountAbsolute(a.season_id, { customerId: a.provider_account_id, externalId: anchor.external_id, totalAmount: ledger.remaining, discountId });
       } catch (e) {
         fundsErrors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: e.message });
       }

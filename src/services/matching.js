@@ -164,26 +164,25 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
     giftcardStatus = 'failed';
     giftcardError = 'This applicant has no disccardpromos account on file yet — funds cannot be loaded.';
   } else {
-    // REVERTED AGAIN (2026-09-16) — direct evidence the 'amount' PATCH
-    // does not actually credit the configured package: a live Undo read
-    // on a real allocation came back `package id=352 amount=0` — a
-    // correctly-matched, real package on the right customer, genuinely
-    // reading $0 despite a real $20 give recorded as giftcard_status='ok'.
-    // The 'amount' PATCH has no discount_id field at all (confirmed
-    // against disccardpromos' own docs — see giftcard.js's
-    // setPackageAmountAbsolute) — it was always a guess that a bare
-    // top-level `amount` field maps onto a specific package, and this is
-    // now hard evidence that guess is wrong. POST /v1/add-funds/ is the
-    // ONLY endpoint disccardpromos actually documents for crediting a
-    // SPECIFIC package (it takes discount_id explicitly) — back to that,
-    // for exactly this allocation's own delta (base+match combined). No
-    // ledger read needed: the increment happens atomically on
-    // disccardpromos' own side, so two near-simultaneous contributions for
-    // the same applicant can't race each other out the way a
-    // read-then-compute-absolute-total approach could.
-    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount}`);
+    // REVERTED AGAIN (2026-09-16, explicit instruction) — add-funds turned
+    // out to have the SAME failure mode as the 'amount' PATCH: a genuinely
+    // NEW allocation still read $0 on the correctly-matched package after
+    // add-funds reported success, so switching endpoints didn't fix it.
+    // Back to rewriting the absolute 'amount' — now with the verification
+    // giftcard.js's setPackageAmountAbsolute does on every call (reads the
+    // PATCH response's own packages array and throws if the target
+    // package's real amount doesn't match what was requested), so if this
+    // still doesn't work, the NEXT attempt fails loudly with the real
+    // before/after numbers instead of silently lying again.
+    //
+    // Ledger read AFTER this allocation's own row is already committed
+    // above — `remaining` already includes this contribution, so it's sent
+    // to disccardpromos as-is, never added to again here.
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { remaining: totalAmount };
+    const newTotal = existing.remaining;
+    console.log(`[matching] createAllocation applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} thisGive=$${totalAmount} -> newTotal (ledger, already includes this)=$${newTotal}`);
     try {
-      await giftcard.addFunds(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, discountId, amount: totalAmount });
+      await giftcard.setPackageAmountAbsolute(applicant.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingAnchor.external_id, totalAmount: newTotal, discountId });
     } catch (e) {
       giftcardStatus = 'failed';
       giftcardError = e.message;
