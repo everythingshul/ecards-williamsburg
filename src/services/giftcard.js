@@ -515,9 +515,20 @@ export async function findCustomerByExternalId(seasonId, externalId) {
 // carries the external_id we sent, disambiguating "by-external-id doesn't
 // exist as a route" from "it exists but external_id isn't stored/matched
 // the way we assumed."
-export async function getCustomerById(seasonId, customerId) {
+// Also the fallback for a money read (services/matching.js's
+// reverseAllocation) when the by-external-id lookup 404s — a stored
+// provider_account_id is the more reliable handle, since an external_id can
+// be wiped by any PATCH that omitted it. Same balances/transactions flags
+// as getCustomerByExternalId; suppressNotFound turns a 404 into null.
+export async function getCustomerById(seasonId, customerId, { balances = false, transactions = false, suppressNotFound = false } = {}) {
   if (isMockMode(seasonId)) return null;
-  return call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`);
+  const qs = [balances && 'balances=true', transactions && 'transactions=true'].filter(Boolean).join('&');
+  try {
+    return await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/${qs ? `?${qs}` : ''}`);
+  } catch (e) {
+    if (e.status === 404 && suppressNotFound) return null;
+    throw e;
+  }
 }
 
 // Live-tested 2026-08-19: disccardpromos silently drops external_id from

@@ -7,6 +7,7 @@ import { createAllocation, reverseAllocation, shulDisplayMatch } from '../servic
 import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
+import { sendXlsx } from '../services/xlsx.js';
 
 const router = Router();
 
@@ -189,6 +190,33 @@ router.post('/mine/request-method', async (req, res) => {
   res.status(201).json({ ok: true });
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+// Shul's own downloadable report: one row per applicant this shul has given
+// money to, with ONLY this shul's own base money (never the match, never
+// any other shul's contribution — same privacy rule as /mine/allocations
+// below). Reversals are separate negative rows on the same applicant_id, so
+// a plain SUM(base_amount) already nets an Undo out. Registered before
+// /mine/allocations so Express doesn't swallow it as that route's suffix.
+router.get('/mine/allocations/export', (req, res) => {
+  if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const seasonId = req.query.season_id || null;
+  const rows = db.prepare(`SELECT a.external_id, a.first_name, a.last_name, s.name AS season_name,
+      COALESCE(SUM(sa.base_amount), 0) AS given, COUNT(CASE WHEN sa.reversal_of IS NULL THEN 1 END) AS gives,
+      MIN(sa.created_at) AS first_given_at, MAX(sa.created_at) AS last_given_at
+    FROM shul_allocations sa
+    LEFT JOIN applicants a ON a.id = sa.applicant_id
+    LEFT JOIN seasons s ON s.id = sa.season_id
+    WHERE sa.shul_id = ?${seasonId ? ' AND sa.season_id = ?' : ''}
+    GROUP BY sa.applicant_id ORDER BY a.last_name, a.first_name`).all(req.user.shul_id, ...(seasonId ? [seasonId] : []));
+  const out = rows.map(r => ({
+    'Applicant ID': r.external_id || '', 'First Name': r.first_name || '', 'Last Name': r.last_name || '',
+    'Season': r.season_name || '', 'Amount Given by Our Shul': Math.round(r.given * 100) / 100,
+    'Number of Gives': r.gives, 'First Given': r.first_given_at, 'Last Given': r.last_given_at,
+  }));
+  const total = Math.round(out.reduce((s, r) => s + r['Amount Given by Our Shul'], 0) * 100) / 100;
+  out.push({ 'Applicant ID': '', 'First Name': 'TOTAL', 'Last Name': '', 'Season': '', 'Amount Given by Our Shul': total, 'Number of Gives': '', 'First Given': '', 'Last Given': '' });
+  sendXlsx(res, `our-applicants-${Date.now()}.xlsx`, out);
+});
 
 router.get('/mine/allocations', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
@@ -621,6 +649,40 @@ router.post('/allocations/:id/reverse', requirePermission('shul_payments', 'can_
 // (not-yet-reversed) distribution at all, block the delete and offer to
 // undo all of them first (POST again with confirmUndoAll: true) — once none
 // remain (never happened, or already undone), deletion proceeds.
+// Moves a payment — any method, card ones included — to a different shul.
+// Gated by its own explicit-grant permission (shul_payment_transfer, see
+// middleware/permissions.js), not the general shul_payments edit: it
+// silently changes which shul's balance real money counts toward. Any
+// refund rows linked to this payment (refund_of) move with it so the pair
+// never straddles two shuls. Refused when the SOURCE shul has already given
+// out more than it would have left without this payment — that would push
+// its approved balance negative; the admin must Undo gives first.
+router.put('/:id/transfer', requirePermission('shul_payment_transfer', 'can_edit'), (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+  if (payment.refund_of) return res.status(400).json({ error: 'Move the original payment instead — its refund rows move with it.' });
+  const { shul_id } = req.body || {};
+  if (!shul_id || shul_id === payment.shul_id) return res.status(400).json({ error: 'Pick a different shul to move this to.' });
+  const target = db.prepare('SELECT id, name_en FROM shuls WHERE id = ? AND org_id = ?').get(shul_id, req.user.org_id);
+  if (!target) return res.status(404).json({ error: 'Shul not found' });
+  if (payment.status === 'approved' && payment.direction === 'in') {
+    const linkedNet = db.prepare(`SELECT COALESCE(SUM(net_amount),0) n FROM shul_payments WHERE refund_of = ? AND status = 'approved'`).get(payment.id).n;
+    const remainingAfter = Math.round((approvedBalance(payment.shul_id) - payment.net_amount - linkedNet) * 100) / 100;
+    if (remainingAfter < -1e-9) {
+      return res.status(400).json({ error: `Can't move this: without it, the current shul would be $${Math.abs(remainingAfter).toFixed(2)} short of what it has already given out to applicants. Undo some of that shul's gives first.` });
+    }
+  }
+  const from = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(payment.shul_id);
+  const move = db.transaction(() => {
+    db.prepare('UPDATE shul_payments SET shul_id = ? WHERE id = ? OR refund_of = ?').run(target.id, payment.id, payment.id);
+  });
+  move();
+  const updated = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(payment.id);
+  logAudit(req.user.org_id, req.user.id, 'transfer', 'shul_payment', payment.id, payment, { ...updated, moved_from: from?.name_en || payment.shul_id, moved_to: target.name_en }, req.ip);
+  res.json({ ok: true, payment: updated, from: from?.name_en || null, to: target.name_en });
+});
+
 // Admin edit of a manually-entered payment (wire/check/cash/quickpay/other,
 // in either direction). A real card transaction (sola_card/sola_refund/
 // legacy stripe_card) is never editable — it moved real money through a

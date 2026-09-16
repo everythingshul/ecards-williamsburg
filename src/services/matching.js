@@ -316,18 +316,38 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // conclusion is correct) or it doesn't (the read itself, or which
   // package/customer it hit, is wrong — a real bug to chase from here).
   let rawDiagnostic = null;
-  if (!neverLoaded && fundingExternalId && discountId) {
-    let customer = null, lastError = null;
+  if (!neverLoaded && discountId && (fundingExternalId || fundingAnchor?.provider_account_id)) {
+    // Two handles, tried in order: the anchor's external_id, then the stored
+    // customer id. FOUND (2026-09-16): an Undo kept failing with
+    // "disccardpromos didn't respond" when in fact it HAD responded — a 404
+    // on by-external-id (the customer isn't registered under that
+    // external_id any more; any PATCH that omitted it wipes it), which
+    // getCustomerByExternalId returns as null, indistinguishable here from
+    // a network failure. The by-id lookup is what a stored
+    // provider_account_id is for. Only a real error on every attempt refuses
+    // the Undo; a customer genuinely absent under BOTH handles falls through
+    // to this app's own ledger below (there is no live card to read).
+    let customer = null, lastError = null, notFound = false;
     for (let attempt = 1; attempt <= 3 && !customer; attempt++) {
       try {
-        customer = await giftcard.getCustomerByExternalId(original.season_id, fundingExternalId, { balances: true });
+        if (fundingExternalId) customer = await giftcard.getCustomerByExternalId(original.season_id, fundingExternalId, { balances: true });
+        if (!customer && fundingAnchor?.provider_account_id) customer = await giftcard.getCustomerById(original.season_id, fundingAnchor.provider_account_id, { balances: true, suppressNotFound: true });
+        if (!customer) { notFound = true; break; }
       } catch (e) {
         lastError = e;
         console.error(`[matching] reverseAllocation balance check attempt ${attempt}/3 failed for allocation ${original.id}:`, e.message);
       }
     }
+    if (!customer && !notFound) {
+      throw new Error(`Couldn't confirm how much of this is still on the card after 3 attempts — disccardpromos didn't respond (${lastError?.message || 'unknown error'}). Undo was NOT performed, so nothing was changed here or on the card. Try again once disccardpromos is reachable.`);
+    }
     if (!customer) {
-      throw new Error(`Couldn't confirm how much of this is still on the card after ${lastError ? '3 attempts' : 'checking'} — disccardpromos didn't respond${lastError ? ` (${lastError.message})` : ''}. Undo was NOT performed, so nothing was changed here or on the card. Try again once disccardpromos is reachable.`);
+      // Not on disccardpromos under either handle — nothing live to read.
+      // Use this app's own ledger (loaded minus synced store purchases).
+      const local = getApplicantBalances(orgId, [applicant.id]).get(applicant.id);
+      customer = { id: null, packages: [], amount: null };
+      rawDiagnostic = { externalIdQueried: fundingExternalId, customerIdQueried: fundingAnchor?.provider_account_id, discountIdConfigured: discountId, customerIdReturned: null, packagesReturned: [], committedAmount: null, liveBalance: local?.remaining ?? null, balanceSource: 'local ledger (customer not found on disccardpromos)' };
+      console.warn(`[matching] reverseAllocation: customer not found on disccardpromos for allocation ${original.id} (external_id=${fundingExternalId}, id=${fundingAnchor?.provider_account_id}) — using local ledger remaining=${local?.remaining}`);
     }
     // ROOT CAUSE FOUND (STORE-TRANSACTIONS-INSTRUCTIONS.md, confirmed
     // against the live API): this used to read `pkg.amount`, which

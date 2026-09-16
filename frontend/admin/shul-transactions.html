@@ -217,7 +217,7 @@ function renderPaymentsTable() {
       <td>${esc(p.manual_ref||'')}</td>
       <td>${esc(p.entered_by_first||'')} ${esc(p.entered_by_last||'')}</td>
       <td>${fmtDateTime(p.created_at)}</td>
-      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}${isCardMethod ? '' : `<button class="btn btn-outline btn-sm" onclick="openEditPaymentModal('${p.id}')">Edit</button> <button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button>`}</td>
+      <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}${isCardMethod ? (Auth.can('shul_payment_transfer') && !p.refund_of ? `<button class="btn btn-outline btn-sm" onclick="openEditPaymentModal('${p.id}')">Edit</button>` : '') : `<button class="btn btn-outline btn-sm" onclick="openEditPaymentModal('${p.id}')">Edit</button> <button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button>`}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
 }
@@ -278,14 +278,29 @@ window.submitFee = async (id) => {
 // Edit a manually-entered payment (any non-card method, either direction).
 // Card transactions never get this button — Refund (full/partial) is the
 // only way to change one, see the server's PUT /:id check.
-window.openEditPaymentModal = (id) => {
+// "Move to another shul" lives inside this same modal, gated by its own
+// permission (shul_payment_transfer — see Users & Permissions). For a card
+// transaction that's the ONLY thing shown (nothing else about a real card
+// charge is editable — see the server's PUT /:id); for a manual entry it's
+// one extra field above the normal ones.
+const CARD_METHODS = ['sola_card', 'sola_refund', 'stripe_card'];
+window.openEditPaymentModal = async (id) => {
   const p = lastPayments.find(x => x.id === id);
   if (!p) return;
+  const isCard = CARD_METHODS.includes(p.method);
+  const canMove = Auth.can('shul_payment_transfer') && !p.refund_of;
+  if (isCard && !canMove) return;
   const methodOptions = Object.entries(MANUAL_METHOD_LABEL)
-    .filter(([v]) => !['sola_card', 'sola_refund', 'stripe_card'].includes(v))
+    .filter(([v]) => !CARD_METHODS.includes(v))
     .map(([v, l]) => `<option value="${esc(v)}"${v === p.method ? ' selected' : ''}>${esc(l)}</option>`).join('');
-  const body = `
+  const moveField = canMove ? `
+    <label>Shul <span class="small-muted">(move this transaction to a different shul${isCard ? '' : ' — its balance follows'})</span></label>
+    <select id="ep-shul"><option value="">Loading…</option></select>` : '';
+  const body = isCard ? `
+    <p class="small-muted">${esc(p.shul_name || '')}'s ${fmtMoney(Math.abs(p.amount))} card transaction. A real card charge can't be edited — only refunded (full or partial) — but it can be moved to a different shul; any refund rows linked to it move with it.</p>
+    ${moveField}` : `
     <p class="small-muted">${esc(p.shul_name || '')} — ${p.direction === 'out' ? 'paid to shul' : 'paid in'}. Changing the amount changes what counts toward their balance (fee stays ${fmtMoney(p.fee_amount)}).</p>
+    ${moveField}
     <label>Method</label><select id="ep-method">${methodOptions}</select>
     <label>Amount ($)</label><input id="ep-amount" type="number" min="0.01" step="0.01" value="${Math.abs(p.amount)}">
     <div class="grid-2">
@@ -295,18 +310,32 @@ window.openEditPaymentModal = (id) => {
     <label>Ref# / Check#</label><input id="ep-ref" value="${esc(p.manual_ref || '')}">
     <label>Notes</label><textarea id="ep-notes" rows="2">${esc(p.notes || '')}</textarea>
   `;
-  openModal('Edit Transaction', body, `<button class="btn btn-primary btn-sm" onclick="submitEditPayment('${id}')">Save</button>`);
+  openModal(isCard ? 'Move Transaction' : 'Edit Transaction', body, `<button class="btn btn-primary btn-sm" onclick="submitEditPayment('${id}', ${isCard})">Save</button>`);
+  if (canMove) {
+    await populateShulPicker('ep-shul');
+    const sel = qs('#ep-shul');
+    if (sel) { sel.querySelector('option[value=""]').textContent = `Keep with ${p.shul_name || 'current shul'}`; sel.value = ''; }
+  }
 };
-window.submitEditPayment = async (id) => {
-  const amount = +qs('#ep-amount').value;
-  if (!(amount > 0)) return toast('Enter a valid amount', true);
+window.submitEditPayment = async (id, isCard) => {
+  const p = lastPayments.find(x => x.id === id);
+  const newShul = qs('#ep-shul')?.value || '';
   try {
-    await api(`/shul-payments/${id}`, { method: 'PUT', body: {
-      method: qs('#ep-method').value, amount,
-      manual_date: qs('#ep-date').value, manual_time: qs('#ep-time').value, manual_ref: qs('#ep-ref').value.trim(),
-      notes: qs('#ep-notes').value,
-    } });
-    toast('Transaction updated');
+    let moved = null;
+    if (newShul && newShul !== p?.shul_id) {
+      if (!confirm(`Move this transaction to ${qs('#ep-shul').selectedOptions[0].textContent}?\n\nIt will count toward that shul's balance instead of ${p?.shul_name || 'the current shul'}'s.`)) return;
+      moved = await api(`/shul-payments/${id}/transfer`, { method: 'PUT', body: { shul_id: newShul } });
+    }
+    if (!isCard) {
+      const amount = +qs('#ep-amount').value;
+      if (!(amount > 0)) return toast('Enter a valid amount', true);
+      await api(`/shul-payments/${id}`, { method: 'PUT', body: {
+        method: qs('#ep-method').value, amount,
+        manual_date: qs('#ep-date').value, manual_time: qs('#ep-time').value, manual_ref: qs('#ep-ref').value.trim(),
+        notes: qs('#ep-notes').value,
+      } });
+    }
+    toast(moved ? `Moved to ${moved.to}${isCard ? '' : ' and updated'}` : 'Transaction updated');
     closeModal();
     loadPayments();
   } catch (err) { toast(err.message, true); }

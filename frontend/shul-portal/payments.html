@@ -49,7 +49,10 @@ renderShell('/shul-portal/payments', `
     </div>
   </div>
 
-  <h3 style="margin-top:20px">Give to an Applicant</h3>
+  <div class="flex-between" style="margin-top:20px;align-items:center;flex-wrap:wrap;gap:8px">
+    <h3 style="margin:0">Give to an Applicant</h3>
+    <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/shul-payments/mine/allocations/export', 'our-applicants.xlsx')" title="Every applicant you've given money to and how much of your shul's own money went to each (match not included)">Download Report</button>
+  </div>
   <p class="small-muted">Funded from your Approved Balance. You can add more to an applicant who already received money this season, but you can't take back what's already been given.</p>
   <div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Applicant</th><th>Given</th><th>Matched</th><th>Total</th><th>Add Funds</th><th></th></tr></thead>
     <tbody id="give-tbody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table></div>
