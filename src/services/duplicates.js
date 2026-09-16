@@ -7,7 +7,13 @@ const norm = (s) => (s || '').toString().trim().toLowerCase().replace(/[^a-z0-9]
 // demographic data only, not status/shul/source/system fields, which aren't
 // something to "merge" (each member keeps its own shul_id, approval_status,
 // etc. — only the primary's copy of these actual data fields changes).
-const MERGE_FIELDS = ['first_name', 'last_name', 'marital_status', 'home_phone', 'husband_cell', 'wife_cell', 'email',
+// Exported — routes/applicants.js's collapseMergedApplicantRows uses the
+// same list to decide which fields of a merged row are safe to show as the
+// primary's curated version (real identity/submitted data the admin
+// explicitly composited at merge time) versus which must stay this row's
+// OWN truth (approval_status, provider_account_id, id, ... — operational
+// state specific to each shul's actual submission, never "merged").
+export const MERGE_FIELDS = ['first_name', 'last_name', 'marital_status', 'home_phone', 'husband_cell', 'wife_cell', 'email',
   'address', 'city', 'state', 'zip', 'preferred_contact_method', 'preferred_number', 'num_children', 'home_for_yomtov',
   'comments', 'card_amount'];
 

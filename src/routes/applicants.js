@@ -3,7 +3,7 @@ import multer from 'multer';
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth, requireAdmin } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
-import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone } from '../services/duplicates.js';
+import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, MERGE_FIELDS } from '../services/duplicates.js';
 import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
 import { sendSmsChecked } from '../services/sms.js';
 import * as giftcard from '../services/giftcard.js';
@@ -21,6 +21,7 @@ import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
   scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger } from '../services/providerAccount.js';
+import { reverseAllocation } from '../services/matching.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -243,15 +244,31 @@ router.get('/', (req, res) => {
   // Merged applicants collapse to ONE row per real person (admin view only
   // — a shul-portal viewer only ever sees its own shul's own row anyway, so
   // there's nothing to collapse there). Each collapsed row displays the
-  // merge-group PRIMARY's own submitted data with a `mergeShuls` list of
-  // every contributing shul in join order; a secondary's own originally-
-  // submitted fields are still reachable from GET /:id's mergeGroup. This
-  // is a same-PAGE dedup, not a group-aware COUNT/OFFSET — `total` still
-  // counts raw rows, so a page can legitimately render fewer than pageSize
-  // items when two members of the same group both landed on it. Getting
-  // the count exactly right would need a much larger rewrite of every
-  // filter above to be merge-group-aware at the SQL level; this trades a
-  // little pagination precision for a correct, simple collapse.
+  // merge-group PRIMARY's own curated identity/contact fields (MERGE_FIELDS
+  // — see services/duplicates.js — exactly the fields an admin explicitly
+  // composited at merge time) with a `mergeShuls` list of every contributing
+  // shul in join order; a secondary's own originally-submitted fields are
+  // still reachable from GET /:id's mergeGroup. This is a same-PAGE dedup,
+  // not a group-aware COUNT/OFFSET — `total` still counts raw rows, so a
+  // page can legitimately render fewer than pageSize items when two members
+  // of the same group both landed on it. Getting the count exactly right
+  // would need a much larger rewrite of every filter above to be merge-
+  // group-aware at the SQL level; this trades a little pagination precision
+  // for a correct, simple collapse.
+  //
+  // FIXED (2026-09) — this used to spread the ENTIRE primary row over a
+  // secondary's, including `id`, `approval_status`, `is_paused`, and
+  // `provider_account_id` — none of which are "submitted data" to curate;
+  // they're each shul's own operational state. A real report: an admin
+  // filtered to (or otherwise acted on) a specific shul's applicant who was
+  // a merge-group secondary, clicked Approve, and — because the row's `id`
+  // silently pointed at the PRIMARY the whole time — actually approved a
+  // completely different shul's submission. The secondary they meant to
+  // approve stayed 'pending' with no disccardpromos account, while the list
+  // kept showing it as whatever the primary's own status happened to be.
+  // Now only MERGE_FIELDS are substituted; every operational field (id
+  // included) stays this row's own truth, so Approve/Reject always act on
+  // the record actually being displayed.
   const finalRows = req.user.role === 'shul' ? withBalance : collapseMergedApplicantRows(req.user.org_id, withBalance);
   // Internal disccardpromos reconciliation status — super_admin only (see
   // GET /provider-sync-summary below for the full reasoning); never sent to
@@ -277,11 +294,14 @@ function collapseMergedApplicantRows(orgId, rows) {
     if (seenGroups.has(groupKey)) continue;
     seenGroups.add(groupKey);
     if (r.merge_group_id && r.merge_group_id !== r.id && primaryById.has(r.merge_group_id)) {
-      // Substitute the primary's own submitted data, but keep this row's
-      // already-computed (group-shared) balance figures rather than
-      // re-fetching — loaded/spent/remaining are identical for every
-      // member of a group by construction (see applicantBalance.js).
-      out.push({ ...primaryById.get(r.merge_group_id), loaded: r.loaded, spent: r.spent, remaining: r.remaining });
+      // Substitute only the primary's curated MERGE_FIELDS (name/contact/
+      // etc — see the comment above) onto THIS row — never its id, status,
+      // or any other operational field, so this stays the exact record
+      // Approve/Reject/etc will act on.
+      const primary = primaryById.get(r.merge_group_id);
+      const curated = {};
+      for (const f of MERGE_FIELDS) curated[f] = primary[f];
+      out.push({ ...r, ...curated });
     } else {
       out.push(r);
     }
@@ -1179,6 +1199,79 @@ router.post('/:id/soft-reject', requirePermission('applicants', 'can_edit'), asy
   res.json({ ok: true, cardLockErrors });
 });
 
+// Removes ONE member of a merged applicant from its shul entirely (the "x"
+// on a shul pill in the admin profile). Admin-only; works on an approved
+// member too, unlike Soft Reject. Money-safe by construction:
+//  - any outstanding give from that shul to this member is undone first
+//    (real claw-back via reverseAllocation, same confirmUndoAll handshake
+//    as DELETE /shul-payments/:id), never silently deleted — the history
+//    rows stay so the group's `loaded` ledger keeps netting correctly.
+//  - the row itself is detached (shul_id → NULL, previous_shul_id kept,
+//    status soft_rejected) rather than hard-deleted, so its allocation
+//    history, notes, and audit trail survive and its approval-time
+//    card_amount simply stops counting toward the shared card.
+//  - the shared disccardpromos customer is only locked when NO other
+//    member of the group is still approved; otherwise it stays live and
+//    its committed amount is re-pushed to the new (lower) ledger total.
+//  - if the removed member was the group's PRIMARY, the earliest-created
+//    remaining member is promoted (every member's merge_group_id repointed)
+//    so the group still has an anchor; the next amount push re-keys the
+//    customer's external_id to the new primary (every PATCH sends it).
+router.post('/:id/remove-from-shul', requirePermission('applicants', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!applicant) return res.status(404).json({ error: 'Not found' });
+  if (!applicant.merge_group_id) return res.status(400).json({ error: 'This applicant isn\'t part of a merged group — use Soft Reject, Reject, or Delete instead.' });
+  if (!applicant.shul_id) return res.status(400).json({ error: 'This record isn\'t currently assigned to a shul.' });
+
+  const outstanding = db.prepare(`SELECT sa.*, s.name_en AS shul_name FROM shul_allocations sa LEFT JOIN shuls s ON s.id = sa.shul_id
+    WHERE sa.applicant_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL`).all(applicant.id);
+  if (outstanding.length && !req.body?.confirmUndoAll) {
+    return res.status(409).json({
+      error: `This shul has given this applicant money ${outstanding.length} time(s) that hasn't been undone — removing them undoes those gives first (whatever is still unspent goes back to the shul's balance).`,
+      requiresUndoAll: true,
+      activeAllocations: outstanding.map(a => ({ id: a.id, shul_name: a.shul_name, total_amount: a.total_amount })),
+    });
+  }
+  const failures = [];
+  for (const alloc of outstanding) {
+    try { await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip }); }
+    catch (e) { failures.push({ id: alloc.id, error: e.message }); }
+  }
+  if (failures.length) return res.status(500).json({ error: 'Some of this shul\'s gives could not be undone, so the applicant was not removed. Any that did succeed stay undone — retry to finish.', failures });
+
+  const groupId = applicant.merge_group_id;
+  const before = { shul_id: applicant.shul_id, approval_status: applicant.approval_status, merge_group_id: groupId };
+  db.prepare(`UPDATE applicants SET shul_id = NULL, previous_shul_id = ?, approval_status = 'soft_rejected', updated_at = datetime('now') WHERE id = ?`).run(applicant.shul_id, applicant.id);
+
+  let newPrimaryId = groupId;
+  if (groupId === applicant.id) {
+    const successor = db.prepare(`SELECT id FROM applicants WHERE merge_group_id = ? AND id != ? ORDER BY (approval_status = 'approved') DESC, created_at ASC LIMIT 1`).get(groupId, applicant.id);
+    if (successor) {
+      newPrimaryId = successor.id;
+      db.prepare(`UPDATE applicants SET merge_group_id = ? WHERE merge_group_id = ?`).run(newPrimaryId, groupId);
+    }
+  }
+  logAudit(req.user.org_id, req.user.id, 'remove-from-shul', 'applicant', applicant.id, before,
+    { shul_id: null, previous_shul_id: applicant.shul_id, approval_status: 'soft_rejected', merge_group_id: newPrimaryId, undone: outstanding.length }, req.ip);
+
+  const stillApproved = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE (id = ? OR merge_group_id = ?) AND approval_status = 'approved'`).get(newPrimaryId, newPrimaryId).c;
+  let cardLockErrors = [], providerError = null;
+  if (!stillApproved) {
+    ({ errors: cardLockErrors } = await lockApplicantCards(req.user.org_id, applicant));
+  } else {
+    // Group still live: re-push its (now lower) ledger total so the card's
+    // committed amount drops this member's approval-time card_amount.
+    const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
+    const anchor = db.prepare('SELECT * FROM applicants WHERE id = ?').get(newPrimaryId);
+    if (discountId && anchor?.provider_account_id) {
+      try { await creditGapToMatchLedger(req.user.org_id, anchor, discountId); }
+      catch (e) { providerError = e.message; scheduleProviderEnforceSoon(req.user.org_id, `amount re-push failed after remove-from-shul for applicant ${applicant.id}`); }
+    }
+  }
+  res.json({ ok: true, undone: outstanding.length, newPrimaryId, cardLockErrors, providerError });
+});
+
 router.post('/mass-reject', requirePermission('applicants', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const { ids } = req.body || {};
@@ -1674,9 +1767,12 @@ router.post('/provider-audit', requireSuperAdmin, (req, res) => {
 // automatically (boot, every 15 minutes, and shortly after any logged
 // disccardpromos write failure — see index.js and scheduleProviderEnforceSoon)
 // so this button is a manual "do it now" rather than the only way it runs.
+// fullSync: true — this is the one human-initiated "do it now" click (see
+// services/providerAccount.js's runProviderEnforce comment on why the
+// automatic boot/15-minute sweep no longer sets this itself).
 router.post('/provider-enforce', requireSuperAdmin, (req, res) => {
   const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
   if (!seasonId) return res.status(400).json({ error: 'No season to enforce' });
-  res.json(startProviderEnforce(req.user.org_id, seasonId));
+  res.json(startProviderEnforce(req.user.org_id, seasonId, { fullSync: true }));
 });
 export default router;

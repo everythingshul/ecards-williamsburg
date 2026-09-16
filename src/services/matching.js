@@ -225,7 +225,7 @@ function buildReversalNote({ neverLoaded, total, retrievable, shortfall, rawDiag
   // shortfall is real; if they don't, the read (or which package/customer
   // it hit) is wrong, and this is the exact evidence needed to chase that.
   const diag = (shortfall > 0 && rawDiagnostic)
-    ? ` [Live read: disccardpromos external_id=${rawDiagnostic.externalIdQueried}, customer id=${rawDiagnostic.customerIdReturned}, package id=${rawDiagnostic.discountIdConfigured} amount=${rawDiagnostic.matchedPackageAmount}]`
+    ? ` [Live read: disccardpromos external_id=${rawDiagnostic.externalIdQueried}, customer id=${rawDiagnostic.customerIdReturned}, committed amount=${rawDiagnostic.committedAmount}, spendable balance=${rawDiagnostic.liveBalance} (from ${rawDiagnostic.balanceSource})]`
     : '';
   if (neverLoaded) {
     return `Full ${fmt(total)} returned to the shul's balance. This allocation had never actually reached the applicant's card in the first place (an earlier sync issue), so there was nothing to retrieve.`;
@@ -329,12 +329,31 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     if (!customer) {
       throw new Error(`Couldn't confirm how much of this is still on the card after ${lastError ? '3 attempts' : 'checking'} — disccardpromos didn't respond${lastError ? ` (${lastError.message})` : ''}. Undo was NOT performed, so nothing was changed here or on the card. Try again once disccardpromos is reachable.`);
     }
+    // ROOT CAUSE FOUND (STORE-TRANSACTIONS-INSTRUCTIONS.md, confirmed
+    // against the live API): this used to read `pkg.amount`, which
+    // disccardpromos ALWAYS returns as null — Number(null) is 0, so every
+    // Undo concluded "balance is $0, the whole give was already spent" no
+    // matter what was really on the card. The real, currently-spendable
+    // figure is `packages[].balance` (only present with ?balances=true,
+    // which this read passes). If the configured package isn't matched by
+    // id, the sum of every package balance is the next-best live number;
+    // if the live payload has no balance at all, this app's own ledger
+    // (loaded minus synced store purchases — see applicantBalance.js) is
+    // the fallback rather than refusing or guessing $0.
     const pkg = customer.packages?.find(p => String(p.id) === String(discountId));
-    const currentBalance = pkg ? Number(pkg.amount) : null;
-    rawDiagnostic = { externalIdQueried: fundingExternalId, discountIdConfigured: discountId, customerIdReturned: customer.id, packagesReturned: customer.packages, matchedPackageAmount: currentBalance };
+    const pkgBalance = pkg && pkg.balance != null ? Number(pkg.balance) : null;
+    const summedBalance = (customer.packages || []).reduce((s, p) => s + (p.balance != null ? Number(p.balance) : 0), 0);
+    const hasAnyBalance = (customer.packages || []).some(p => p.balance != null);
+    let currentBalance = pkgBalance ?? (hasAnyBalance ? summedBalance : null);
+    let balanceSource = pkgBalance != null ? 'package.balance' : (hasAnyBalance ? 'sum(packages[].balance)' : null);
+    if (currentBalance == null) {
+      const local = getApplicantBalances(orgId, [applicant.id]).get(applicant.id);
+      if (local) { currentBalance = local.remaining; balanceSource = 'local ledger (loaded - synced spend)'; }
+    }
+    rawDiagnostic = { externalIdQueried: fundingExternalId, discountIdConfigured: discountId, customerIdReturned: customer.id, packagesReturned: customer.packages, committedAmount: customer.amount ?? null, liveBalance: currentBalance, balanceSource };
     console.log(`[matching] reverseAllocation LIVE READ for allocation ${original.id}:`, JSON.stringify(rawDiagnostic));
     if (currentBalance == null) {
-      throw new Error("Couldn't read this applicant's real balance from disccardpromos (no matching package on their account) — Undo was NOT performed, so nothing was changed here or on the card.");
+      throw new Error("Couldn't determine this applicant's real balance — disccardpromos returned no package balance and this app has no local ledger for them. Undo was NOT performed, so nothing was changed here or on the card.");
     }
     if (currentBalance < original.total_amount - 1e-9) {
       retrievable = Math.max(0, Math.round(currentBalance * 100) / 100);

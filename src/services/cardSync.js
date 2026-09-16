@@ -9,6 +9,11 @@ import { scheduleProviderEnforceSoon } from './providerAccount.js';
 // per process lifetime, not per applicant/sweep.
 let loggedTransactionShapeOnce = false;
 
+// Last 4 digits of any masked card string, whatever mask convention it uses
+// (`****1123`, `************1123`, `**** **** **** 1123`) — the only card
+// identifier every side agrees on. See syncApplicantCards.
+function last4(masked) { return String(masked ?? '').replace(/\D/g, '').slice(-4); }
+
 // Persisted counterpart to the console-only diagnostic below — the
 // deployed environment gives admins no server console access, so a
 // diagnostic that ONLY ever printed to console.log was invisible to anyone
@@ -150,25 +155,29 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
     }
   }
   if (!customer) return { discovered: 0, removed: 0, transactionsSynced: 0 };
-  const remoteMasked = new Set(Array.isArray(customer.active_cards) ? customer.active_cards : []);
+  // Card matching is by LAST 4 DIGITS everywhere (STORE-TRANSACTIONS-
+  // INSTRUCTIONS.md §4/§6): disccardpromos' active_cards use `****1123`,
+  // its transactions' `card` field uses `************1123`, and whatever
+  // this app stored at assign time may be a third convention. Exact-string
+  // matching made every sync "remove" a real card and then "discover" it
+  // again as a phantom duplicate.
+  const remoteCards = Array.isArray(customer.active_cards) ? customer.active_cards.map(String) : [];
+  const remoteLast4 = new Set(remoteCards.map(last4));
   const localActive = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ? AND status IN ('assigned','activated')`).all(applicant.id);
-  const known = new Set(localActive.map(c => c.card_number_masked));
+  const knownLast4 = new Set(localActive.map(c => last4(c.card_number_masked)));
 
-  // Package balance is the customer's aggregate — the best per-card figure
-  // available, since disccardpromos doesn't expose a per-card balance
-  // without a stable card id to ask about. `amount` (not `balance`) is the
-  // real field name on a package per giftcard.js's own documented shape
-  // (id/name/amount/rate) — this previously read `.balance`, which doesn't
-  // exist on the real object and always evaluated to 0, so every
-  // newly-discovered card was recorded locally with a $0 amount regardless
-  // of its real balance.
-  const balance = (customer.packages || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+  // `packages[].balance` is the real, currently-spendable balance (confirmed
+  // — it's what decreases as they spend). `packages[].amount` is ALWAYS
+  // null on the real API and must never be read; the committed total lives
+  // on the top-level `amount` instead (see reconcileApplicantBalance).
+  const balance = Math.round((customer.packages || []).reduce((sum, p) => sum + (Number(p.balance) || 0), 0) * 100) / 100;
   let discovered = 0;
-  for (const masked of remoteMasked) {
-    if (known.has(masked)) continue;
+  for (const masked of remoteCards) {
+    if (knownLast4.has(last4(masked))) continue;
     db.prepare(`INSERT INTO cards (id, org_id, applicant_id, season_id, card_number_masked, provider_card_id, status, amount, assigned_at, activated_at)
       VALUES (?,?,?,?,?,NULL,'activated',?,datetime('now'),datetime('now'))`)
       .run(uuid(), orgId, applicant.id, applicant.season_id, masked, balance);
+    knownLast4.add(last4(masked));
     discovered++;
   }
   // FIXED (2026-09) — real root cause of "Card Amount doesn't show the
@@ -181,9 +190,9 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   // balance. Every ACTIVE card now gets its `amount` refreshed to the same
   // current package balance on every sync, same as a newly-discovered one.
   if (localActive.length) {
-    const updateAmount = db.prepare(`UPDATE cards SET amount = ? WHERE id = ?`);
+    const updateAmount = db.prepare(`UPDATE cards SET amount = ?, last_synced_at = datetime('now') WHERE id = ?`);
     for (const local of localActive) {
-      if (!remoteMasked.has(local.card_number_masked)) continue; // about to be deactivated below, not refreshed
+      if (!remoteLast4.has(last4(local.card_number_masked))) continue; // about to be deactivated below, not refreshed
       updateAmount.run(balance, local.id);
     }
   }
@@ -191,7 +200,7 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   let removed = 0;
   const deactivate = db.prepare(`UPDATE cards SET status='deactivated', deactivated_at=datetime('now') WHERE id = ?`);
   for (const local of localActive) {
-    if (remoteMasked.has(local.card_number_masked)) continue;
+    if (remoteLast4.has(last4(local.card_number_masked))) continue;
     deactivate.run(local.id);
     removed++;
   }
@@ -228,39 +237,56 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   } else if (rawTxns.length) {
     clearTxnShapeDiagnostic(orgId);
   }
-  let transactionsSynced = 0;
+  let transactionsSynced = 0, unattributed = 0, malformed = 0;
   if (rawTxns.length) {
     const allLocal = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ?`).all(applicant.id);
-    const cardIdByMasked = new Map(allLocal.map(c => [c.card_number_masked, c.id]));
-    // The overwhelmingly common case is one card per applicant — if that's
-    // true here, attribute every transaction to it even if the per-
-    // transaction card-identifying field turns out to use a name this app
-    // doesn't recognize yet (transactions=true's exact response shape isn't
-    // documented beyond the flag's existence — field names below are a
-    // best guess, matched defensively like every other disccardpromos
-    // response in this file). Only genuinely ambiguous (multi-card,
-    // unmatched) transactions get skipped, and logged rather than silently
-    // dropped, so a real shape mismatch is at least visible in server logs
-    // instead of reproducing the exact "transactions don't show up" bug
-    // this change fixes.
+    const cardIdByLast4 = new Map(allLocal.map(c => [last4(c.card_number_masked), c.id]));
     const singleCardId = allLocal.length === 1 ? allLocal[0].id : null;
     const insertTxn = db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload)
       VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    // CONFIRMED transaction shape (STORE-TRANSACTIONS-INSTRUCTIONS.md §3) —
+    // the ONLY fields that exist: id (bare number), timestamp, disccardPaid
+    // (always positive; the amount charged to the card), cartAmount, card
+    // (`************1123`), vendor. No type/balance_after/store_name/
+    // occurred_at/amount — every previous guess at those names silently
+    // produced undefined, which is why no store spend ever synced.
+    //  - provider_txn_id is String(id): binding a raw JS integer into a TEXT
+    //    column stores "320972.0", and a later run then inserts "320972" as
+    //    a duplicate.
+    //  - amount is stored NEGATIVE for a purchase (-disccardPaid): every
+    //    total in this app (applicantBalance.js, cards.js) sums
+    //    `CASE WHEN amount < 0 THEN -amount` — storing the positive figure
+    //    as-is would exclude every real purchase from every total.
+    //  - each entry is its own try/catch: one malformed entry used to abort
+    //    the whole array and silently drop everything after it.
     for (const t of rawTxns) {
-      const masked = t.card_number || t.masked_card_number || t.card || t.card_number_masked || t.card_last4;
-      const cardId = (masked && cardIdByMasked.get(masked)) || singleCardId;
-      if (!cardId) {
-        console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no recognized card field) — raw: ${JSON.stringify(t).slice(0, 300)}`);
-        continue;
+      try {
+        const cardId = cardIdByLast4.get(last4(t.card)) || singleCardId;
+        if (!cardId) {
+          unattributed++;
+          console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no last-4 match) — raw: ${JSON.stringify(t).slice(0, 300)}`);
+          continue;
+        }
+        const paid = Number(t.disccardPaid ?? t.cartAmount);
+        if (t.id == null || !Number.isFinite(paid)) {
+          malformed++;
+          console.warn(`[cardSync] malformed transaction for applicant ${applicant.id} skipped — raw: ${JSON.stringify(t).slice(0, 300)}`);
+          continue;
+        }
+        const type = t.type || (paid < 0 ? 'refund' : 'purchase');
+        const amount = type === 'purchase' ? -Math.abs(paid) : Math.abs(paid);
+        const storeName = t.vendor || t.store_name || t.merchant || '';
+        const result = insertTxn.run(uuid(), cardId, String(t.id), type, amount, null, storeName, resolveStoreId(orgId, storeName), t.timestamp || t.occurred_at || null, JSON.stringify(t));
+        if (result.changes) transactionsSynced++;
+      } catch (e) {
+        malformed++;
+        console.warn(`[cardSync] transaction insert threw for applicant ${applicant.id}: ${e.message} — raw: ${JSON.stringify(t).slice(0, 300)}`);
       }
-      const storeName = t.store_name || t.merchant || '';
-      const result = insertTxn.run(uuid(), cardId, t.id || t.transaction_id, t.type || (t.amount < 0 ? 'purchase' : 'refund'), t.amount, t.balance_after ?? null, storeName, resolveStoreId(orgId, storeName), t.occurred_at || t.date, JSON.stringify(t));
-      if (result.changes) transactionsSynced++;
     }
     db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE applicant_id = ?`).run(applicant.id);
   }
 
-  return { discovered, removed, transactionsSynced };
+  return { discovered, removed, transactionsSynced, unattributed, malformed };
 }
 
 // Compares our own ledger (approval-time card_amount + every shul_allocation
@@ -274,22 +300,14 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
 // caller's responsibility (see syncAllCards below) since every member would
 // otherwise compare against the exact same two numbers.
 //
-// FIXED (2026-09) — this used to flag ANY disagreement, in either
-// direction. `expected` here is `loaded` (the full total ever granted, per
-// this app's own ledger) — NOT `remaining` (loaded minus this app's own
-// locally-tracked spend), confirmed (2026-09-16) disccardpromos deducts
-// real store purchases from "amount" automatically on its own side. So a
-// real balance LOWER than expected is the normal, permanent result of
-// genuine spend disccardpromos has already deducted on its end — not a bug,
-// and flagging it kept producing exactly the recurring false-positive
-// mismatch emails reported multiple times. Only the OTHER direction —
-// disccardpromos showing MORE money than we ever loaded — is actually
-// impossible under correct operation (nothing outside this app's own
-// ledger-driven writes should ever add to a customer's package) and still
-// worth a real alert. So only `actual > expected` (real balance higher than
-// our ledger) opens a flag; `actual <= expected` auto-resolves any existing
-// flag instead, since that's the expected steady state once any real
-// spending has happened.
+// Compares this app's `loaded` (the full total ever granted, per its own
+// ledger) against disccardpromos' TOP-LEVEL `amount` — the committed total
+// last written there, which does not move as the customer spends (real
+// spend shows up in `packages[].balance` instead, and is deliberately NOT
+// part of this comparison). Because both sides are "committed" figures, a
+// disagreement in either direction is a real drift worth a flag; the
+// earlier one-direction rule existed only because this used to read
+// `packages[].amount` (always null) and mistook spend for drift.
 //
 // customerOverride: same convention as syncApplicantCards above — pass an
 // already-fetched customer (or explicit null) to skip this function's own
@@ -309,15 +327,20 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
     }
   }
   if (!customer) return null;
-  const pkg = (customer.packages || []).find(p => String(p.id) === String(discountId));
-  const actual = Math.round((pkg ? Number(pkg.amount) || 0 : 0) * 100) / 100;
+  // CONFIRMED (STORE-TRANSACTIONS-INSTRUCTIONS.md): reconcile against the
+  // TOP-LEVEL `amount` — the committed total this app last wrote, which
+  // does NOT move as the customer spends — never `packages[].amount`
+  // (always null; reading it as 0 made every account look out of sync).
+  // Since this is the committed figure rather than a spendable balance, a
+  // mismatch in EITHER direction is real: lower means a write was lost or
+  // failed, higher means something outside this app's ledger added funds.
+  if (customer.amount == null) return null;
+  const actual = Math.round(Number(customer.amount) * 100) / 100;
   const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.loaded ?? 0;
   const diff = Math.round((actual - expected) * 100) / 100;
 
   const existing = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE org_id = ? AND applicant_id = ? AND status = 'open'`).get(orgId, applicant.id);
-  // Only actual > expected (real balance higher than our own ledger) is a
-  // genuine anomaly — see this function's own comment above.
-  if (diff <= 0.01) {
+  if (Math.abs(diff) <= 0.01) {
     if (existing) db.prepare(`UPDATE card_reconciliation_flags SET status = 'resolved', resolved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(existing.id);
     return null;
   }
@@ -342,8 +365,9 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
 async function notifyReconciliationMismatch(orgId, applicant, flag) {
   const org = db.prepare('SELECT support_email FROM organizations WHERE id = ?').get(orgId);
   if (!org?.support_email) { console.error('[cardSync] reconciliation mismatch found for applicant', applicant.id, 'but no Settings > Organization support email is set to notify'); return; }
-  const subject = `Card balance higher than expected: ${applicant.first_name || ''} ${applicant.last_name || ''}`.trim();
-  const body = `<p>disccardpromos shows MORE money on this applicant's card than we ever loaded onto it — that shouldn't be possible unless something outside this app added funds, or our own ledger missed a load.</p>
+  const higher = flag.actual_amount > flag.expected_amount;
+  const subject = `Card amount ${higher ? 'higher' : 'lower'} than expected: ${applicant.first_name || ''} ${applicant.last_name || ''}`.trim();
+  const body = `<p>disccardpromos' committed amount for this applicant doesn't match this app's ledger${higher ? ' — it shows MORE than we ever loaded, which shouldn\'t be possible unless something outside this app added funds' : ' — it shows LESS than we loaded, which usually means a write was lost or failed'}. (This compares committed totals, not spendable balance — real store spend is not counted as a mismatch.)</p>
     <p><strong>${esc(applicant.first_name || '')} ${esc(applicant.last_name || '')}</strong> (external ID ${esc(applicant.external_id || '')})</p>
     <p>Our ledger says: <strong>$${flag.expected_amount.toFixed(2)}</strong><br>disccardpromos says: <strong>$${flag.actual_amount.toFixed(2)}</strong></p>
     <p>This has been flagged for review — see this applicant's Cards tab in the admin.</p>`;
@@ -395,12 +419,17 @@ export async function syncAllCards(orgId) {
     return index ? (index.byExt.get(String(a.external_id)) ?? null) : undefined;
   };
 
-  let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0;
+  // Real counts, surfaced in the "Sync All" toast (frontend/admin/cards.html)
+  // — a fetch/index failure must never look identical to "nothing new",
+  // which is how a sweep failing for half the org once passed as healthy.
+  const indexPullsFailed = seasonIds.filter(s => !giftcard.isMockMode(s) && !indexBySeason.get(s)).length;
+  let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0, unattributed = 0, malformed = 0, failed = 0;
   for (const applicant of applicants) {
     try {
-      const { discovered, removed, transactionsSynced } = await syncApplicantCards(orgId, applicant, customerFor(applicant));
-      cardsDiscovered += discovered; cardsRemoved += removed; totalSynced += transactionsSynced;
-    } catch (e) { console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
+      const r = await syncApplicantCards(orgId, applicant, customerFor(applicant));
+      cardsDiscovered += r.discovered || 0; cardsRemoved += r.removed || 0; totalSynced += r.transactionsSynced || 0;
+      unattributed += r.unattributed || 0; malformed += r.malformed || 0;
+    } catch (e) { failed++; console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
   }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares
@@ -419,5 +448,5 @@ export async function syncAllCards(orgId) {
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
-  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags };
+  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed };
 }

@@ -621,6 +621,39 @@ router.post('/allocations/:id/reverse', requirePermission('shul_payments', 'can_
 // (not-yet-reversed) distribution at all, block the delete and offer to
 // undo all of them first (POST again with confirmUndoAll: true) — once none
 // remain (never happened, or already undone), deletion proceeds.
+// Admin edit of a manually-entered payment (wire/check/cash/quickpay/other,
+// in either direction). A real card transaction (sola_card/sola_refund/
+// legacy stripe_card) is never editable — it moved real money through a
+// processor, so the only honest changes to it are a full or partial Refund
+// (POST /:id/refund) or the processing-fee override (PUT /:id/fee).
+// net_amount is recomputed from the new amount minus the existing fee so
+// services/shulBalance.js's SUM stays right without touching the fee.
+router.put('/:id', requirePermission('shul_payments', 'can_edit'), (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+  if (['sola_card', 'sola_refund', 'stripe_card'].includes(payment.method)) {
+    return res.status(400).json({ error: 'A card transaction can\'t be edited — it charged/refunded a real card. Use Refund (full or partial) to reverse it instead.' });
+  }
+  const { method, amount, manual_date, manual_time, manual_ref, notes } = req.body || {};
+  const newMethod = method ?? payment.method;
+  if (newMethod !== payment.method && !isActiveManualMethod(req.user.org_id, newMethod)) return res.status(400).json({ error: 'That payment method is not currently offered — check Settings > Shul Payments.' });
+  const gross = amount == null ? payment.amount : Math.abs(+amount);
+  if (!(gross > 0)) return res.status(400).json({ error: 'Amount must be greater than $0' });
+  if (payment.fee_amount > gross + 1e-9) return res.status(400).json({ error: `The existing fee ($${payment.fee_amount.toFixed(2)}) can't exceed the new amount ($${gross.toFixed(2)}) — lower the fee first.` });
+  const net = Math.round((gross - payment.fee_amount) * 100) / 100;
+  // direction 'out' rows (Pay Shul) are stored negative — keep that sign.
+  const signedAmount = payment.direction === 'out' ? -gross : gross;
+  const signedNet = payment.direction === 'out' ? -net : net;
+  const date = manual_date ?? payment.manual_date, time = manual_time ?? payment.manual_time, ref = manual_ref ?? payment.manual_ref;
+  if (!date || !time || !ref) return res.status(400).json({ error: 'Date, time, and Ref#/Check# are all required' });
+  db.prepare(`UPDATE shul_payments SET method = ?, amount = ?, net_amount = ?, manual_date = ?, manual_time = ?, manual_ref = ?, notes = ? WHERE id = ?`)
+    .run(newMethod, signedAmount, signedNet, date, time, ref, notes ?? payment.notes ?? '', payment.id);
+  const updated = db.prepare('SELECT * FROM shul_payments WHERE id = ?').get(payment.id);
+  logAudit(req.user.org_id, req.user.id, 'update', 'shul_payment', payment.id, payment, updated, req.ip);
+  res.json({ ok: true, payment: updated });
+});
+
 router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);

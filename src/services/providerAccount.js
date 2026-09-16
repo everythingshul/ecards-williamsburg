@@ -327,12 +327,12 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
 const enforceJobs = new Map(); // orgId -> job state
 export function getProviderEnforceJob(orgId) { return enforceJobs.get(orgId) || null; }
 
-export function startProviderEnforce(orgId, seasonId) {
+export function startProviderEnforce(orgId, seasonId, { fullSync = false } = {}) {
   const existing = enforceJobs.get(orgId);
   if (existing?.status === 'running') return existing;
   const job = { status: 'running', progress: 0, total: 0, result: null, error: null, startedAt: new Date().toISOString(), finishedAt: null };
   enforceJobs.set(orgId, job);
-  runProviderEnforce(orgId, seasonId, job).then(result => {
+  runProviderEnforce(orgId, seasonId, job, { fullSync }).then(result => {
     job.result = result; job.status = 'done'; job.finishedAt = new Date().toISOString();
   }).catch(e => {
     job.status = 'error'; job.error = e.message; job.finishedAt = new Date().toISOString();
@@ -374,7 +374,7 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
 // deleted on either side. Re-pulls disccardpromos' list at the end and
 // reports our approved-count vs their active-count side by side, plus
 // exactly which applicants are still mismatched and why.
-export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }) {
+export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, total: 0 }, { fullSync = false } = {}) {
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ?`).all(orgId, seasonId);
   const approved = applicants.filter(a => a.approval_status === 'approved' && !a.provider_exempt && a.shul_id);
@@ -464,24 +464,25 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
 
   // FULL SYNC — every OTHER approved applicant not already touched above
   // gets its "amount" rewritten to this app's own ledger total (`loaded`)
-  // too, every run. This now runs as standard, always-on behavior on every
-  // automatic sweep (boot, 15-minute interval, and the regular "Make
-  // Disccardpromos Match" button) — no longer a separate, deliberately-risky
-  // `fullResync`-only action.
-  //
-  // Previously this was gated behind an explicit `fullResync` flag, because
-  // pushing this total unconditionally and repeatedly looked like it would
-  // reset a real disccardpromos balance back up, erasing any spend that had
-  // already happened in stores. Confirmed (2026-09-16) that's not how it
-  // works: disccardpromos deducts real store purchases from "amount"
-  // automatically, on its own side — this app's job is only to keep
-  // "amount" correctly reflecting the total ever granted (`loaded`), never
-  // to compute or push anything net of spend itself. Repeatedly re-asserting
-  // that same total is a safe no-op in the steady state (it only actually
-  // changes when a new contribution or an Undo changes `loaded`), so this
-  // sweep can now self-heal every applicant's real balance, not just newly
-  // created/previously-failed ones, on every pass.
-  if (discountId) {
+  // too. Gated behind `fullSync` (2026-09-16, REVERTED after a real
+  // incident) — briefly made this unconditional on every run, including the
+  // automatic 15-minute sweep, on the theory that it's now always a safe
+  // no-op (see creditGapToMatchLedger's comment: disccardpromos deducts
+  // real spend from "amount" on its own side, so re-asserting the same
+  // total repeatedly shouldn't erase anything). That reasoning about the
+  // MONEY was fine — what it missed is that every one of these calls is
+  // also a write to provider_call_log (services/apiCallLog.js), request
+  // and response body included. Multiplying that by every approved
+  // applicant, every 15 minutes, forever, filled the org's disk within
+  // hours and took the whole app down (every request needs the DB) faster
+  // than the existing 30-day/24-hour log-pruning job could ever catch up.
+  // So: automatic (boot + 15-minute interval) runs no longer do this pass
+  // at all — same as before that incident, only new-account and
+  // previously-failed applicants get touched automatically. The admin's
+  // "Make Disccardpromos Match" button passes `fullSync: true` so a human
+  // can still trigger a real, one-off full self-heal on demand, without it
+  // ever running unattended on a 15-minute timer.
+  if (fullSync && discountId) {
     for (const a of approved) {
       if (touchedApplicantIds.has(a.id)) continue;
       const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);

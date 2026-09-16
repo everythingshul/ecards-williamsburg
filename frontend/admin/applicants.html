@@ -211,7 +211,7 @@ async function refreshProviderSyncModal() {
       <button class="btn btn-sm btn-outline" onclick="runProviderJob('provider-audit', 'psync-audit-result')">Run Full Audit</button>
       <button class="btn btn-sm btn-primary" onclick="runProviderJob('provider-enforce', 'psync-enforce-result')">Make Disccardpromos Match</button>
     </div>
-    <p class="small-muted" style="margin-top:6px">Also runs automatically every 15 minutes — pushes every approved applicant's full computed amount to disccardpromos (disccardpromos itself deducts real store purchases from that amount automatically, so this is always safe to re-run).</p>
+    <p class="small-muted" style="margin-top:6px">Click this to push every approved applicant's full computed amount to disccardpromos, even ones that already looked fine — safe to re-run any time (disccardpromos itself deducts real store purchases from that amount automatically). The automatic background sync (every 15 minutes) only creates missing accounts and retries previously-failed ones — it does not repeat this full pass on its own, to avoid flooding the Logs with a provider call per applicant every 15 minutes.</p>
     <div id="psync-audit-result" style="margin-top:10px"></div>
     <div id="psync-enforce-result" style="margin-top:10px"></div>
   `;
@@ -355,9 +355,14 @@ async function openApplicant(id) {
           const ordinal = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
           return `<div class="divider"></div><div style="color:var(--text-muted);background:#f9efe0;padding:8px 12px;border-radius:6px">
             <strong>Same person, enrolled through ${all.length} record${all.length === 1 ? '' : 's'} — one shared gift card account, each shul's own contribution counted separately:</strong>
-            <ol style="margin:6px 0 0;padding-left:20px">
-              ${all.map((m, i) => `<li>${m.id === a.id ? '<strong>' : ''}${esc(m.first_name)} ${esc(m.last_name)} — ${esc(m.shul_name || (m.previous_shul_name ? `previously ${m.previous_shul_name}` : 'no shul'))} (${badge(m.approval_status, m.approval_status)})${m.id === a.id ? ' — viewing this one</strong>' : ''} <span class="small-muted">(${ordinal(i + 1)} to add them)</span></li>`).join('')}
-            </ol>
+            <div class="pill-row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
+              ${all.map((m, i) => `<span class="pill" style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 10px;border-radius:999px;background:#fff;border:1px solid var(--border,#ddd)${m.id === a.id ? ';box-shadow:0 0 0 2px var(--brand-gold,#c9a227) inset' : ''}" title="${esc(m.first_name)} ${esc(m.last_name)} — ${ordinal(i + 1)} to add them${m.id === a.id ? ' (viewing this record)' : ''}">
+                <span>${esc(m.shul_name || (m.previous_shul_name ? `Removed (was ${m.previous_shul_name})` : 'No shul'))}</span>
+                ${badge(m.approval_status, m.approval_status)}
+                ${m.shul_id ? `<button type="button" aria-label="Remove from ${esc(m.shul_name || 'this shul')}" title="Remove this applicant from ${esc(m.shul_name || 'this shul')}" onclick="removeFromShul('${m.id}','${esc(m.shul_name || 'this shul')}','${id}')" style="border:0;background:transparent;cursor:pointer;font-size:15px;line-height:1;padding:0 2px;color:var(--danger,#b91c1c)">&times;</button>` : ''}
+              </span>`).join('')}
+            </div>
+            <p class="small-muted" style="margin:6px 0 0">Click a pill's &times; to remove this applicant from that shul entirely (you'll be asked to confirm).</p>
           </div>`;
         })() : ''}
         <div class="divider"></div>
@@ -536,6 +541,35 @@ window.softRejectApplicant = async (memberId, fromId) => {
     toast(r.cardLockErrors?.length ? `Soft rejected, but card lock failed: ${r.cardLockErrors.join('; ')}` : 'Soft rejected', !!r.cardLockErrors?.length);
     closeModal(); load();
   } catch (err) { toast(err.message, true); }
+};
+// The "x" on a shul pill in a merged applicant's profile — see the server's
+// POST /:id/remove-from-shul for exactly what it does (undo that shul's
+// outstanding gives first, detach the record, keep the shared card live if
+// another member is still approved). Two-step confirm: a plain warning,
+// then — only if that shul still has un-undone gives — a second one that
+// lists the actual dollar amounts about to be pulled back.
+window.removeFromShul = async (memberId, shulName, viewingId) => {
+  if (!confirm(`Remove this applicant from ${shulName} entirely?\n\nThat shul's record of them will be detached (marked Soft Reject) and will no longer count toward the shared gift card. Any money ${shulName} gave them that hasn't been undone yet will be undone first — whatever is still unspent goes back to the shul's balance.\n\nThe other shul(s) on this applicant are not affected.`)) return;
+  const done = (r) => {
+    const warn = [];
+    if (r.cardLockErrors?.length) warn.push(`card lock failed: ${r.cardLockErrors.join('; ')}`);
+    if (r.providerError) warn.push(`disccardpromos amount update failed (will retry automatically): ${r.providerError}`);
+    toast(`Removed from ${shulName}${r.undone ? ` — ${r.undone} give(s) undone` : ''}${warn.length ? ` — but ${warn.join('; ')}` : ''}`, !!warn.length);
+    closeModal(); load();
+    if (viewingId && viewingId !== memberId) openApplicant(viewingId);
+  };
+  try {
+    done(await api(`/applicants/${memberId}/remove-from-shul`, { method: 'POST' }));
+  } catch (err) {
+    if (err.data?.requiresUndoAll) {
+      const list = err.data.activeAllocations.map(a => `${fmtMoney(a.total_amount)} from ${a.shul_name || shulName}`).join(', ');
+      if (!confirm(`${err.message}\n\nOutstanding: ${list}\n\nUndo these now and remove the applicant from ${shulName}?`)) return;
+      try { done(await api(`/applicants/${memberId}/remove-from-shul`, { method: 'POST', body: { confirmUndoAll: true } })); }
+      catch (err2) { toast(err2.message, true); }
+      return;
+    }
+    toast(err.message, true);
+  }
 };
 window.deleteApplicant = async (id) => {
   if (!confirm('Permanently delete this applicant? This removes their record, cards, notes, and documents completely and cannot be undone. Their disccardpromos customer (if any) will be locked, not deleted.')) return;

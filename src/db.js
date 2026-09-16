@@ -1010,6 +1010,24 @@ safeAlter(`ALTER TABLE shul_payments ADD COLUMN card_last4 TEXT`);
 // later sees the real reasoning, not just a bare negative dollar amount.
 safeAlter(`ALTER TABLE shul_allocations ADD COLUMN reversal_note TEXT`);
 
+// One-time, idempotent repair of card_transactions rows synced before the
+// disccardpromos transaction shape was confirmed (see services/cardSync.js
+// and STORE-TRANSACTIONS-INSTRUCTIONS.md §6): a raw numeric id bound into
+// the TEXT provider_txn_id column landed as "320972.0", so a later sync
+// storing "320972" inserted a duplicate (INSERT OR IGNORE can never fix
+// either); and a purchase stored with a positive amount is excluded from
+// every `CASE WHEN amount < 0` spend total. Drops the ".0" copy wherever
+// the clean copy already exists, strips ".0" from the rest, and flips the
+// sign of any provider row whose sign disagrees with its type. Cheap and a
+// no-op once clean, so it runs on every boot rather than tracking a flag.
+try {
+  db.prepare(`DELETE FROM card_transactions WHERE provider_txn_id LIKE '%.0'
+    AND SUBSTR(provider_txn_id, 1, LENGTH(provider_txn_id) - 2) IN (SELECT provider_txn_id FROM card_transactions WHERE provider_txn_id NOT LIKE '%.0')`).run();
+  db.prepare(`UPDATE card_transactions SET provider_txn_id = SUBSTR(provider_txn_id, 1, LENGTH(provider_txn_id) - 2) WHERE provider_txn_id LIKE '%.0'`).run();
+  db.prepare(`UPDATE card_transactions SET amount = -amount WHERE provider_txn_id IS NOT NULL AND type = 'purchase' AND amount > 0`).run();
+  db.prepare(`UPDATE card_transactions SET amount = -amount WHERE provider_txn_id IS NOT NULL AND type = 'refund' AND amount < 0`).run();
+} catch (e) { console.error('[db] card_transactions repair migration failed:', e.message); }
+
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to

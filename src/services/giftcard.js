@@ -333,9 +333,15 @@ export async function setPackageAmountAbsolute(seasonId, { customerId, externalI
   // it shows exactly what THIS app computed and sent, which tells you
   // immediately whether the bug is in our own math or somewhere after.
   console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} -> setting package amount to $${newTotal}`);
-  const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}`, { method: 'PATCH', body: JSON.stringify({
-    amount: newTotal, external_id: externalId,
-  }) });
+  // CONFIRMED (STORE-TRANSACTIONS-INSTRUCTIONS.md, verified with
+  // disccardpromos support): PATCH /org/customers/{id}/ (trailing slash,
+  // like every other endpoint) with { amount, discount_id, external_id }
+  // SETS the package's committed amount outright — not additive, so this
+  // always sends the full target total. external_id must always ride along
+  // or the PATCH wipes the stored one.
+  const body = { amount: newTotal, external_id: externalId };
+  if (discountId) body.discount_id = Number(discountId);
+  const result = await call(seasonId, `/org/customers/${normalizeCustomerId(customerId)}/`, { method: 'PATCH', body: JSON.stringify(body) });
   // WAS a hard throw (2026-09-16) when the PATCH response's own `packages`
   // array didn't show the requested total on the target package, on the
   // theory that a mismatch there proved the write hadn't landed. DOWNGRADED
@@ -350,12 +356,15 @@ export async function setPackageAmountAbsolute(seasonId, { customerId, externalI
   // mismatch here is logged for anyone checking server logs but no longer
   // fails the caller or shows an error toast for a give that actually went
   // through.
-  if (discountId) {
-    const pkg = result?.packages?.find(p => String(p.id) === String(discountId));
-    const landedAmount = pkg ? Number(pkg.amount) : null;
-    if (landedAmount == null || Math.abs(landedAmount - newTotal) > 0.01) {
-      console.warn(`[giftcard] setPackageAmountAbsolute: PATCH response for package ${discountId} shows $${landedAmount ?? '(not found)'}, not the $${newTotal} requested — treating as success anyway since this response snapshot has been confirmed stale in practice; not surfaced as an error.`);
-    }
+  // ROOT CAUSE FOUND (STORE-TRANSACTIONS-INSTRUCTIONS.md): the old check
+  // here read `packages[].amount`, which disccardpromos ALWAYS returns as
+  // null — so every write "failed" verification even when the money landed.
+  // The committed figure lives on the TOP-LEVEL `amount` (a string); the
+  // real spendable balance is `packages[].balance`. Compared as a warning
+  // only — the write itself succeeding (no throw above) is what "ok" means.
+  const landedAmount = result?.amount != null ? Number(result.amount) : null;
+  if (landedAmount != null && Math.abs(landedAmount - newTotal) > 0.01) {
+    console.warn(`[giftcard] setPackageAmountAbsolute: PATCH response top-level amount is $${landedAmount}, not the $${newTotal} requested — logged for review, not surfaced as an error.`);
   }
   console.log(`[giftcard] setPackageAmountAbsolute customerId=${normalizeCustomerId(customerId)} response amount=${result?.amount ?? '(not returned)'}`);
   return result;
