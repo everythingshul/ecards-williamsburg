@@ -54,15 +54,45 @@ function pauseAccountsFor(entityType, entityId) {
 // the same record on purpose (e.g. carry-forward's own source shul, which
 // necessarily matches every field of the row it just generated) rather than
 // a genuine second entry of the same real-world shul.
+// Every reason shul `a` currently matches candidate `c` on, as an ordered
+// list — the matcher must see ALL reasons (not short-circuit on the first),
+// or a newer reason hidden behind an already-bypassed first one is never
+// noticed. Shared by checkShulDuplicate and resolveFlag's bypass bookkeeping.
+function shulMatchReasons(a, c) {
+  const reasons = [];
+  if (norm(c.name_en) === norm(a.name_en) && norm(c.city) === norm(a.city) && norm(a.name_en)) reasons.push('Same shul name + city');
+  if (a.ruv_phone && norm(c.ruv_phone) === norm(a.ruv_phone)) reasons.push('Same Rav phone number');
+  if (a.gabai_email && norm(c.gabai_email) === norm(a.gabai_email)) reasons.push('Same Gabai email');
+  return reasons;
+}
+
+// The reasons an admin already bypassed for this exact pair ("these are two
+// different people/shuls"), or null if the pair was never bypassed. A
+// bypassed pair only comes back when GENUINELY NEW matching data appears —
+// i.e. a reason not in this set — never on an unrelated edit or a Recheck
+// All sweep (REFUNDS-AND-BYPASS-INSTRUCTIONS.md, Update 2). Legacy bypass
+// rows (before bypassed_reasons existed) fall back to the one reason they
+// were flagged for.
+function bypassedReasonsFor(entityType, idA, idB) {
+  const f = db.prepare(`SELECT reason, bypassed_reasons FROM duplicate_flags
+    WHERE entity_type = ? AND status = 'bypassed'
+      AND ((entity_id = ? AND matched_entity_id = ?) OR (entity_id = ? AND matched_entity_id = ?))
+    ORDER BY resolved_at DESC LIMIT 1`).get(entityType, idA, idB, idB, idA);
+  if (!f) return null;
+  let known = null;
+  try { known = f.bypassed_reasons ? JSON.parse(f.bypassed_reasons) : null; } catch { known = null; }
+  return new Set(Array.isArray(known) && known.length ? known : [f.reason]);
+}
+
 export function checkShulDuplicate(orgId, shul, excludeIds = []) {
   const ids = [shul.id, ...excludeIds];
   const candidates = db.prepare(`SELECT * FROM shuls WHERE org_id = ? AND id NOT IN (${ids.map(() => '?').join(',')})`).all(orgId, ...ids);
   for (const c of candidates) {
-    let reason = null;
-    if (norm(c.name_en) === norm(shul.name_en) && norm(c.city) === norm(shul.city) && norm(shul.name_en)) reason = 'Same shul name + city';
-    else if (shul.ruv_phone && norm(c.ruv_phone) === norm(shul.ruv_phone)) reason = 'Same Rav phone number';
-    else if (shul.gabai_email && norm(c.gabai_email) === norm(shul.gabai_email)) reason = 'Same Gabai email';
-    if (reason) return { matchedId: c.id, reason };
+    let reasons = shulMatchReasons(shul, c);
+    if (!reasons.length) continue;
+    const bypassed = bypassedReasonsFor('shul', shul.id, c.id);
+    if (bypassed) { reasons = reasons.filter(r => !bypassed.has(r)); if (!reasons.length) continue; }
+    return { matchedId: c.id, reason: reasons[0] };
   }
   return null;
 }
@@ -124,8 +154,12 @@ export function checkApplicantDuplicate(orgId, applicant, previousApplicant) {
     // later edit to either one's own fields shouldn't re-flag a pair
     // that's already been resolved as one identity.
     if (applicant.merge_group_id && c.merge_group_id === applicant.merge_group_id) continue;
-    const reasonsNow = matchReasons(applicant, applicantAddress, c);
+    let reasonsNow = matchReasons(applicant, applicantAddress, c);
     if (!reasonsNow.length) continue;
+    // A pair an admin already bypassed only comes back for a reason that
+    // wasn't already known at bypass time — see bypassedReasonsFor above.
+    const bypassed = bypassedReasonsFor('applicant', applicant.id, c.id);
+    if (bypassed) { reasonsNow = reasonsNow.filter(r => !bypassed.has(r)); if (!reasonsNow.length) continue; }
     if (previousApplicant) {
       const reasonsBefore = new Set(matchReasons(previousApplicant, previousAddress, c));
       const newReasons = reasonsNow.filter(r => !reasonsBefore.has(r));
@@ -199,12 +233,27 @@ export function resolveFlag(flagId, resolvedByUserId, action) {
     const a = db.prepare('SELECT * FROM applicants WHERE id = ?').get(flag.entity_id);
     const b = db.prepare('SELECT * FROM applicants WHERE id = ?').get(flag.matched_entity_id);
     if (a && b && applicantsSharePhone(a, b)) throw new Error('These records share a phone number, so they can\'t be bypassed as different people — resolve this as a merge instead.');
-    db.prepare(`UPDATE duplicate_flags SET status = 'bypassed', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?`).run(resolvedByUserId, flagId);
+    // Record every reason the pair matches on RIGHT NOW, in both directions
+    // (some rules are asymmetric — e.g. address only matches if side A has
+    // one), plus the reason the flag was raised for — so a later recheck
+    // only re-flags this pair for a reason that is genuinely new.
+    const knownReasons = a && b ? [...new Set([
+      ...matchReasons(a, fullAddress(a), b),
+      ...matchReasons(b, fullAddress(b), a),
+      flag.reason,
+    ])] : [flag.reason];
+    db.prepare(`UPDATE duplicate_flags SET status = 'bypassed', resolved_by = ?, resolved_at = datetime('now'), bypassed_reasons = ? WHERE id = ?`).run(resolvedByUserId, JSON.stringify(knownReasons), flagId);
     db.prepare('UPDATE applicants SET is_paused = 0, duplicate_status = ? WHERE id IN (?, ?)').run('bypassed', flag.entity_id, flag.matched_entity_id);
     return db.prepare('SELECT * FROM duplicate_flags WHERE id = ?').get(flagId);
   }
-  db.prepare(`UPDATE duplicate_flags SET status = ?, resolved_by = ?, resolved_at = datetime('now') WHERE id = ?`)
-    .run(action === 'bypass' ? 'bypassed' : 'resolved', resolvedByUserId, flagId);
+  let shulKnownReasons = null;
+  if (action === 'bypass') {
+    const sa = db.prepare('SELECT * FROM shuls WHERE id = ?').get(flag.entity_id);
+    const sb = db.prepare('SELECT * FROM shuls WHERE id = ?').get(flag.matched_entity_id);
+    shulKnownReasons = sa && sb ? [...new Set([...shulMatchReasons(sa, sb), ...shulMatchReasons(sb, sa), flag.reason])] : [flag.reason];
+  }
+  db.prepare(`UPDATE duplicate_flags SET status = ?, resolved_by = ?, resolved_at = datetime('now'), bypassed_reasons = ? WHERE id = ?`)
+    .run(action === 'bypass' ? 'bypassed' : 'resolved', resolvedByUserId, shulKnownReasons ? JSON.stringify(shulKnownReasons) : null, flagId);
   db.prepare('UPDATE shuls SET is_paused = 0, duplicate_status = ? WHERE id IN (?, ?)')
     .run(action === 'bypass' ? 'bypassed' : 'resolved', flag.entity_id, flag.matched_entity_id);
   db.prepare(`UPDATE users SET is_paused = 0 WHERE shul_id IN (?, ?)`).run(flag.entity_id, flag.matched_entity_id);

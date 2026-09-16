@@ -148,7 +148,7 @@ router.get('/', (req, res) => {
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   // Live spend per store — computed fresh on every request from the synced
   // transaction ledger, not cached, so it's always current as of the last sync.
-  const spendStmt = db.prepare(`SELECT COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
+  const spendStmt = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
     COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds, COUNT(*) txn_count
     FROM card_transactions WHERE store_id = ?`);
   const withSpend = stores.map(s => ({ ...s, ...spendStmt.get(s.id) }));
@@ -179,7 +179,7 @@ router.get('/export', requirePermission('stores', 'can_export'), (req, res) => {
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   const withSpend = stores.map(s => {
-    const totals = db.prepare(`SELECT COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases, COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds FROM card_transactions WHERE store_id = ?`).get(s.id);
+    const totals = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases, COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds FROM card_transactions WHERE store_id = ?`).get(s.id);
     return { ...s, total_purchases: totals.total_purchases, total_refunds: totals.total_refunds };
   });
   sendXlsx(res, `stores-${Date.now()}.xlsx`, redact(withSpend, req.permission.hidden_fields));
@@ -189,7 +189,7 @@ router.get('/:id', (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
   if (req.user.role === 'store' && store.id !== req.user.store_id) return res.status(403).json({ error: 'Not your store' });
-  const transactionTotals = db.prepare(`SELECT COUNT(*) count, COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
+  const transactionTotals = db.prepare(`SELECT COUNT(*) count, COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
     COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds
     FROM card_transactions WHERE store_id = ?`).get(store.id);
   // A store's own portal login sees its total purchases (their own sales

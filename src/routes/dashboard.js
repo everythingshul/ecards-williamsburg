@@ -117,11 +117,15 @@ router.get('/stats', (req, res) => {
   }
   const storePerm = getPermission(req.user, 'stores');
   if (storePerm.can_view && !hidden.has('store_spend')) {
-    stats.topStores = db.prepare(`SELECT s.id, s.name, COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total_purchases
+    // Net of refunds (same expression as services/applicantBalance.js).
+    stats.topStores = db.prepare(`SELECT s.id, s.name, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total_purchases
       FROM stores s LEFT JOIN card_transactions t ON t.store_id = s.id LEFT JOIN cards c2 ON c2.id = t.card_id
       WHERE s.org_id = ?${storeSeasonClause} GROUP BY s.id ORDER BY total_purchases DESC LIMIT 5`).all(orgId, ...seasonParams).filter(s => s.total_purchases > 0);
-    stats.totalStoreSpend = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
-      FROM card_transactions t JOIN stores s ON s.id = t.store_id JOIN cards c2 ON c2.id = t.card_id WHERE s.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).total;
+    // Headline total is NOT gated on a store match (STORE-TRANSACTIONS-
+    // INSTRUCTIONS.md §5): a vendor the admin hasn't added as a store still
+    // counts here — only the per-store breakdown above is store-scoped.
+    stats.totalStoreSpend = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
+      FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id WHERE c2.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).total;
   }
   res.json({ stats });
 });

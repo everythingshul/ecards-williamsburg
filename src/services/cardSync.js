@@ -5,40 +5,13 @@ import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
 
-// See syncApplicantCards' diagnostic comment below — logged at most once
-// per process lifetime, not per applicant/sweep.
-let loggedTransactionShapeOnce = false;
-
 // Last 4 digits of any masked card string, whatever mask convention it uses
 // (`****1123`, `************1123`, `**** **** **** 1123`) — the only card
 // identifier every side agrees on. See syncApplicantCards.
 function last4(masked) { return String(masked ?? '').replace(/\D/g, '').slice(-4); }
 
-// Persisted counterpart to the console-only diagnostic below — the
-// deployed environment gives admins no server console access, so a
-// diagnostic that ONLY ever printed to console.log was invisible to anyone
-// who actually needed it. This settings row is what Admin > Cards' banner
-// (see frontend/admin/cards.html) reads to show the real customer response
-// shape directly in the browser — the fastest way to find disccardpromos'
-// real transactions field name (still unconfirmed — see the comment below)
-// without needing a developer to read logs on the org's behalf. Cleared the
-// moment transactions ARE successfully recognized, so a stale "shape
-// mismatch" warning never lingers after the real field name is found and
-// fixed.
-const TXN_SHAPE_DIAGNOSTIC_KEY = 'disccard_txn_shape_diagnostic';
-function recordTxnShapeDiagnostic(orgId, customer) {
-  const value = JSON.stringify({ at: new Date().toISOString(), keys: Object.keys(customer), sample: JSON.stringify(customer).slice(0, 1500) });
-  db.prepare(`INSERT INTO settings (org_id, key, value) VALUES (?,?,?)
-    ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value`).run(orgId || DEFAULT_ORG_ID, TXN_SHAPE_DIAGNOSTIC_KEY, value);
-}
-function clearTxnShapeDiagnostic(orgId) {
-  db.prepare(`DELETE FROM settings WHERE org_id = ? AND key = ?`).run(orgId || DEFAULT_ORG_ID, TXN_SHAPE_DIAGNOSTIC_KEY);
-}
-export function getTxnShapeDiagnostic(orgId) {
-  const row = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = ?`).get(orgId || DEFAULT_ORG_ID, TXN_SHAPE_DIAGNOSTIC_KEY);
-  if (!row) return null;
-  try { return JSON.parse(row.value); } catch { return null; }
-}
+// See the refund-detection comment in syncApplicantCards. No "return".
+const REFUND_WORD = /\b(refund|refunded|reversal|reversed|void|voided|chargeback)\b/i;
 
 // FIXED (2026-09) — root cause of "transactions never show up": this used
 // to call giftcard.js's listTransactions(), which hits /cards/:id/transactions
@@ -207,36 +180,10 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
 
   // Transactions — every card this applicant has EVER held (not just the
   // currently-active ones above), so a purchase on a since-deactivated card
-  // still lands in the ledger. disccardpromos' real docs (confirmed 2026-09)
-  // only document `transactions=true` as a query PARAM on this endpoint —
-  // the response schema they publish doesn't show what field it actually
-  // adds, so every name below past the first two is still an unconfirmed
-  // guess at common REST conventions, same as every other undocumented
-  // shape this file defends against.
-  const rawTxns = Array.isArray(customer.transactions) ? customer.transactions
-    : Array.isArray(customer.transaction_history) ? customer.transaction_history
-    : Array.isArray(customer.recent_transactions) ? customer.recent_transactions
-    : Array.isArray(customer.transaction_list) ? customer.transaction_list
-    : Array.isArray(customer.card_transactions) ? customer.card_transactions
-    : Array.isArray(customer.history) ? customer.history : [];
-  // Diagnostic: shows the real customer response's top-level keys (plus a
-  // truncated raw sample) whenever transactions=true comes back with
-  // nothing recognized as an array — persisted to a settings row (see
-  // recordTxnShapeDiagnostic above) and surfaced directly in Admin > Cards'
-  // banner, since this deployed environment gives admins no server console
-  // access at all. Still also logged once per process for anyone who does
-  // have console access. Cleared the moment transactions ARE recognized, so
-  // a real fix (once the true field name is found from this diagnostic)
-  // makes the banner disappear on its own rather than lingering stale.
-  if (!rawTxns.length && customer && typeof customer === 'object') {
-    recordTxnShapeDiagnostic(orgId, customer);
-    if (!loggedTransactionShapeOnce) {
-      loggedTransactionShapeOnce = true;
-      console.log(`[cardSync] diagnostic (logged once): customer response's top-level keys when no transactions array was recognized: ${Object.keys(customer).join(', ')}`);
-    }
-  } else if (rawTxns.length) {
-    clearTxnShapeDiagnostic(orgId);
-  }
+  // still lands in the ledger. The field is `transactions` — confirmed live
+  // (STORE-TRANSACTIONS-INSTRUCTIONS.md §3), only present with
+  // ?transactions=true; an empty array just means no spend yet.
+  const rawTxns = Array.isArray(customer.transactions) ? customer.transactions : [];
   let transactionsSynced = 0, unattributed = 0, malformed = 0;
   if (rawTxns.length) {
     const allLocal = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ?`).all(applicant.id);
@@ -267,14 +214,28 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
           console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no last-4 match) — raw: ${JSON.stringify(t).slice(0, 300)}`);
           continue;
         }
-        const paid = Number(t.disccardPaid ?? t.cartAmount);
+        const paid = Number(t.disccardPaid ?? t.cartAmount ?? t.amount);
         if (t.id == null || !Number.isFinite(paid)) {
           malformed++;
           console.warn(`[cardSync] malformed transaction for applicant ${applicant.id} skipped — raw: ${JSON.stringify(t).slice(0, 300)}`);
           continue;
         }
-        const type = t.type || (paid < 0 ? 'refund' : 'purchase');
-        const amount = type === 'purchase' ? -Math.abs(paid) : Math.abs(paid);
+        // Refund detection (REFUNDS-AND-BYPASS-INSTRUCTIONS.md): the real
+        // entries carry no `type`, and the exact refund marker isn't
+        // confirmed, so every plausible signal counts — a negative amount,
+        // an explicit flag, or a refund/reversal/void/chargeback word in any
+        // descriptive field (vendor included). "return" is deliberately NOT
+        // in the list: a store name can legitimately contain it, and a false
+        // refund SUBTRACTS from every total. An ordinary purchase (positive,
+        // none of these) is never mistaken for one. Refund stored positive,
+        // purchase stored negative — see the SUM convention in
+        // applicantBalance.js.
+        const isRefund = paid < 0
+          || t.is_refund === true || t.refund === true
+          || [t.type, t.kind, t.transaction_type, t.status, t.description, t.note, t.vendor]
+            .some(v => typeof v === 'string' && REFUND_WORD.test(v));
+        const type = isRefund ? 'refund' : 'purchase';
+        const amount = isRefund ? Math.abs(paid) : -Math.abs(paid);
         const storeName = t.vendor || t.store_name || t.merchant || '';
         const result = insertTxn.run(uuid(), cardId, String(t.id), type, amount, null, storeName, resolveStoreId(orgId, storeName), t.timestamp || t.occurred_at || null, JSON.stringify(t));
         if (result.changes) transactionsSynced++;

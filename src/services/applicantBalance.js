@@ -72,8 +72,12 @@ export function getApplicantBalances(orgId, applicantIds) {
   // nets a full or partial reversal to the right remainder.
   const allocatedRows = db.prepare(`SELECT applicant_id, COALESCE(SUM(total_amount),0) t FROM shul_allocations WHERE applicant_id IN (${placeholders}) GROUP BY applicant_id`).all(...allMemberIds);
   const allocatedById = new Map(allocatedRows.map(r => [r.applicant_id, r.t]));
-  // Same negative-amount-is-a-purchase convention as cards.js's /by-shul.
-  const spentRows = db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
+  // Net of refunds — a purchase (stored negative) adds, a refund (stored
+  // positive, type='refund') subtracts, a local 'load' row contributes 0.
+  // The same expression is used at every spend site (cards.js, dashboard.js,
+  // stores.js, donorDashboard.js) so the figures agree with each other and
+  // with disccardpromos' own net seasonal number.
+  const spentRows = db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
     FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.applicant_id IN (${placeholders}) GROUP BY c.applicant_id`).all(...allMemberIds);
   const spentById = new Map(spentRows.map(r => [r.applicant_id, r.spent]));
 

@@ -1028,6 +1028,16 @@ try {
   db.prepare(`UPDATE card_transactions SET amount = -amount WHERE provider_txn_id IS NOT NULL AND type = 'refund' AND amount < 0`).run();
 } catch (e) { console.error('[db] card_transactions repair migration failed:', e.message); }
 
+// The reasons an admin bypassed a duplicate pair for (JSON array) — see
+// services/duplicates.js's bypassedReasonsFor: a bypassed pair is only ever
+// re-flagged for a reason NOT in this list, so an unrelated edit or a
+// "Recheck All" sweep can't resurrect it.
+safeAlter(`ALTER TABLE duplicate_flags ADD COLUMN bypassed_reasons TEXT`);
+
+// Leftover from the removed "transactions not recognized" banner (the
+// transactions field is confirmed now — see services/cardSync.js).
+try { db.prepare(`DELETE FROM settings WHERE key = 'disccard_txn_shape_diagnostic'`).run(); } catch {}
+
 // One-time normalization of pre-existing phone numbers to the canonical
 // 123-456-7890 display format (see utils/phone.js). Cheap and idempotent —
 // re-running it on already-normalized numbers is a no-op — so it's safe to

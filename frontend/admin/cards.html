@@ -113,23 +113,8 @@ qs('#btn-export-txns').addEventListener('click', () => downloadAuthed('/cards/tr
 async function loadCards() {
   const params = new URLSearchParams(Object.fromEntries(Object.entries(state).filter(([,v]) => v !== '')));
   try {
-    const { cards, total, mockMode, txnShapeDiagnostic } = await api('/cards?' + params);
-    if (mockMode) qs('#mock-banner').innerHTML = `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><strong>Mock mode:</strong> disccardpromos.com API keys are not configured yet, so card numbers/transactions are simulated placeholders. Set <code>DISCCARDPROMOS_API_BASE</code> and <code>DISCCARDPROMOS_API_KEY</code> to go live.</div>`;
-    // Self-service diagnostic for the "transactions never show up" class of
-    // report — see services/cardSync.js's recordTxnShapeDiagnostic. Only
-    // appears when a real sync ran but couldn't recognize a transactions
-    // array in disccardpromos' response; shows exactly what WAS there so
-    // the real field name can be found and fixed, without server console
-    // access. Disappears on its own once transactions start being recognized.
-    if (txnShapeDiagnostic) {
-      qs('#mock-banner').innerHTML += `<div class="card" style="border-color:var(--warn);margin-bottom:16px">
-        <strong>Transactions not recognized:</strong> the last sync (${fmtDateTime(txnShapeDiagnostic.at)}) got a real response from disccardpromos but couldn't find a transactions list in it — spend/balances may still be working, but new card purchases won't sync until this is fixed in code.
-        <details style="margin-top:6px"><summary style="cursor:pointer">Show the real response shape</summary>
-          <p class="small-muted" style="margin-top:6px"><strong>Top-level keys:</strong> ${esc(txnShapeDiagnostic.keys.join(', '))}</p>
-          <pre style="max-height:200px;overflow:auto;background:var(--brand-panel-2);padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word">${esc(txnShapeDiagnostic.sample)}</pre>
-        </details>
-      </div>`;
-    }
+    const { cards, total, mockMode } = await api('/cards?' + params);
+    qs('#mock-banner').innerHTML = mockMode ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><strong>Mock mode:</strong> disccardpromos.com API keys are not configured yet, so card numbers/transactions are simulated placeholders. Set <code>DISCCARDPROMOS_API_BASE</code> and <code>DISCCARDPROMOS_API_KEY</code> to go live.</div>` : '';
     qs('#tbody-cards').innerHTML = cards.length ? cards.map(c => `<tr>
         <td>${esc(c.first_name)} ${esc(c.last_name)}</td><td>${esc(c.shul_name||'')}</td><td>${esc(c.card_number_masked||'')}</td>
         <td>${badge(c.status,c.status)}</td><td>${fmtMoney(c.amount)}</td><td>${c.activated_at?fmtDateTime(c.activated_at):''}</td>
