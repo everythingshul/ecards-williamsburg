@@ -65,23 +65,36 @@ router.get('/export', requirePermission('cards', 'can_export'), (req, res) => {
 // same account-level balance onto every one of their rows) was counted two
 // or three times. "Spent" is net of refunds, joined through cards/
 // card_transactions (that half was already right).
+//
+// In THIS app most card money arrives through shul Gives (shul_allocations
+// — base + match), not the approval-time card_amount, which is often $0 —
+// so "Allocated" is the same per-applicant `loaded` figure
+// services/applicantBalance.js computes (card_amount for approved
+// applicants + every allocation row, reversals netting out, minus any
+// merged_spend_adjustment), summed over the applicants belonging to each
+// shul. Named parameters, since the optional season filter repeats.
 router.get('/by-shul', (req, res) => {
   const { season_id } = req.query;
-  const seasonClause = season_id ? ' AND a2.season_id = ?' : '';
-  const seasonParams = season_id ? [season_id] : [];
+  const seasonClause = season_id ? ' AND a2.season_id = @season_id' : '';
+  const params = { org_id: req.user.org_id };
+  if (season_id) params.season_id = season_id;
   const rows = db.prepare(`
     SELECT s.id AS shul_id, s.name_en AS shul_name,
       COALESCE((SELECT SUM(a2.card_amount) FROM applicants a2
-        WHERE a2.shul_id = s.id AND a2.approval_status = 'approved'${seasonClause}), 0) AS allocated,
+        WHERE a2.shul_id = s.id AND a2.approval_status = 'approved'${seasonClause}), 0)
+      + COALESCE((SELECT SUM(sa.total_amount) FROM shul_allocations sa JOIN applicants a2 ON a2.id = sa.applicant_id
+        WHERE a2.shul_id = s.id${seasonClause}), 0)
+      - COALESCE((SELECT SUM(a2.merged_spend_adjustment) FROM applicants a2
+        WHERE a2.shul_id = s.id${seasonClause}), 0) AS allocated,
       COALESCE((SELECT SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END)
         FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id JOIN applicants a2 ON a2.id = c2.applicant_id
-        WHERE a2.shul_id = s.id AND c2.org_id = ?${seasonClause}), 0) AS spent
+        WHERE a2.shul_id = s.id AND c2.org_id = @org_id${seasonClause}), 0) AS spent
     FROM shuls s
-    WHERE s.org_id = ?
+    WHERE s.org_id = @org_id
     GROUP BY s.id
     HAVING allocated > 0
-    ORDER BY allocated DESC`).all(...seasonParams, req.user.org_id, ...seasonParams, req.user.org_id);
-  res.json({ shuls: rows.map(r => ({ ...r, remaining: r.allocated - r.spent })) });
+    ORDER BY allocated DESC`).all(params);
+  res.json({ shuls: rows.map(r => ({ ...r, allocated: Math.round(r.allocated * 100) / 100, spent: Math.round(r.spent * 100) / 100, remaining: Math.round((r.allocated - r.spent) * 100) / 100 })) });
 });
 
 // Open card-balance-vs-disccardpromos mismatches (see services/cardSync.js's
