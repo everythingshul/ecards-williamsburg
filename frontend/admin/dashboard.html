@@ -7,52 +7,70 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="stylesheet" href="/css/portal-theme.css">
+<link rel="stylesheet" href="/css/exec-dashboard.css">
 </head>
 <body>
 <script src="/js/app.js"></script>
 <script>
 Auth.requireAdmin();
+// Hand-rolled line icons, same set/style as Donor's Dash — no icon
+// library, consistent with this app's no-dependency approach.
+const EXEC_ICONS = {
+  building: '<svg viewBox="0 0 24 24"><path d="M6 22V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v18"/><path d="M2 22h20"/><path d="M9 8h1M14 8h1M9 12h1M14 12h1M9 16h1M14 16h1"/></svg>',
+  people: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  card: '<svg viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>',
+  coin: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 9.5c0-1.4 1.3-2.5 3-2.5s3 .8 3 2c0 3-6 1.5-6 4.5 0 1.2 1.3 2 3 2s3-1.1 3-2.5"/></svg>',
+};
 renderShell('/admin/dashboard', `
-  <div class="flex-between">
-    <h2>Dashboard</h2>
-    <div class="pill-row">
-      <select id="dash-season"></select>
-      <select id="dash-days">
-        <option value="7">Last 7 days</option>
-        <option value="14">Last 14 days</option>
-        <option value="30" selected>Last 30 days</option>
-        <option value="60">Last 60 days</option>
-        <option value="90">Last 90 days</option>
-      </select>
+  <div class="exec-header">
+    <div class="exec-header-top">
+      <div>
+        <div class="exec-eyebrow">Internal Operations</div>
+        <h1 class="exec-title">Dashboard</h1>
+        <p class="exec-subtitle">Live season status, fund utilization, and what's on your plate today.</p>
+      </div>
+      <div class="exec-header-controls">
+        <select id="dash-season" class="exec-season-select"></select>
+        <select id="dash-days" class="exec-season-select">
+          <option value="7">Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="60">Last 60 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+      </div>
     </div>
+    <div class="exec-asof" id="exec-asof"></div>
   </div>
-  <div class="stat-grid" id="stats"><div class="small-muted">Loading…</div></div>
+  <div class="exec-kpi-grid" id="stats"><div class="small-muted">Loading…</div></div>
   <div id="capacity-banner"></div>
-  <div class="card" id="sms-notif-panel" style="display:none;margin-bottom:16px;border-color:var(--brand-gold-dark)">
+  <div class="exec-chart-card" id="sms-notif-panel" style="display:none;margin-bottom:16px;border-left:4px solid var(--brand-gold-dark)">
     <div class="flex-between"><h3 style="margin:0">New Messages</h3><a href="/admin/sms?tab=inbox" class="btn btn-sm btn-outline">Open Inbox</a></div>
-    <p class="small-muted" id="sms-notif-text" style="margin-top:4px"></p>
+    <p class="exec-chart-sub" style="margin-top:4px;margin-bottom:0" id="sms-notif-text"></p>
   </div>
-  <div class="card" id="dup-panel" style="display:none;margin-bottom:16px">
-    <div class="flex-between"><h3 style="margin:0">Open Duplicate Flags</h3><a href="/admin/shuls?dup=1" class="btn btn-sm btn-outline">Review</a></div>
-    <p class="small-muted" id="dup-text"></p>
+  <div class="exec-chart-card" id="dup-panel" style="display:none;margin-bottom:16px">
+    <div class="flex-between"><h3 style="margin:0"><span class="dot" style="background:var(--viz-critical)"></span>Open Duplicate Flags</h3><a href="/admin/shuls?dup=1" class="btn btn-sm btn-outline">Review</a></div>
+    <p class="exec-chart-sub" style="margin-top:4px;margin-bottom:0" id="dup-text"></p>
   </div>
-  <div class="card" id="store-spend-panel" style="display:none;margin-bottom:16px">
-    <div class="flex-between"><h3 style="margin:0">Live Store Spend</h3><a href="/admin/stores" class="btn btn-sm btn-outline">View All Stores</a></div>
-    <p class="small-muted" style="margin-top:4px">Total spent across all participating stores: <strong id="total-store-spend"></strong></p>
-    <div id="top-stores" style="margin-top:10px"></div>
+  <div class="exec-chart-card" id="store-spend-panel" style="display:none;margin-bottom:16px">
+    <div class="flex-between"><h3 style="margin:0"><span class="dot" style="background:var(--viz-2)"></span>Live Store Spend</h3><a href="/admin/stores" class="btn btn-sm btn-outline">View All Stores</a></div>
+    <p class="exec-chart-sub" style="margin-top:4px">Total spent across all participating stores: <strong id="total-store-spend"></strong></p>
+    <div id="top-stores"></div>
   </div>
-  <div class="card" id="daily-panel" style="margin-bottom:16px">
-    <h3 style="margin:0 0 10px">Daily Breakdown</h3>
+  <div class="exec-section-title">Activity</div>
+  <div class="exec-chart-card" id="daily-panel" style="margin-bottom:16px">
+    <h3 style="margin:0 0 10px"><span class="dot" style="background:var(--viz-1)"></span>Daily Breakdown</h3>
     <div style="overflow-x:auto">
       <table><thead><tr><th>Date</th><th>New Shuls</th><th>New Applicants</th><th>Approved</th><th>$ Loaded</th></tr></thead>
       <tbody id="daily-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
-  <div class="card" id="my-tasks-panel">
-    <div class="flex-between"><h3 style="margin:0" id="my-tasks-heading">My Open Tasks</h3><a href="/admin/tasks" class="btn btn-sm btn-outline">View All Tasks</a></div>
+  <div class="exec-chart-card" id="my-tasks-panel">
+    <div class="flex-between"><h3 style="margin:0" id="my-tasks-heading"><span class="dot" style="background:var(--viz-good)"></span>My Open Tasks</h3><a href="/admin/tasks" class="btn btn-sm btn-outline">View All Tasks</a></div>
     <div id="my-tasks" style="margin-top:10px"></div>
   </div>
 `);
+qs('#exec-asof').textContent = 'As of ' + new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 
 // Per-user dashboard section blocking (Users & Permissions > Dashboard >
 // Hidden Fields) — every OTHER section here is hidden server-side (see
@@ -80,9 +98,20 @@ let seasonsCache = [];
 function renderCapacityBanner(seasonId) {
   const season = seasonsCache.find(s => s.id === seasonId);
   if (!season || season.max_accepted_applicants == null) { qs('#capacity-banner').innerHTML = ''; return; }
-  qs('#capacity-banner').innerHTML = `<div class="card" style="margin-bottom:16px;${season.is_full ? 'border-color:var(--danger)' : ''}">
+  qs('#capacity-banner').innerHTML = `<div class="exec-chart-card" style="margin-bottom:16px;${season.is_full ? 'border-left:4px solid var(--danger)' : ''}">
     <strong>${esc(season.name)} capacity:</strong> ${season.accepted_count} of ${season.max_accepted_applicants} accepted (${season.remaining} remaining)
     ${season.is_full ? ' <strong style="color:var(--danger)">This season is full — new applications are locked.</strong>' : ''}
+  </div>`;
+}
+
+// A long figure (a big dollar amount) shrinks/wraps inside its card rather
+// than overflowing — see exec-dashboard.css's .exec-kpi-num clamp() and the
+// flex (not grid) .exec-kpi-grid.
+function kpiCard(label, num, accent, icon) {
+  return `<div class="exec-kpi-card" style="--kpi-accent:${accent}">
+    <div class="exec-kpi-icon">${icon}</div>
+    <div class="exec-kpi-num">${typeof num === 'string' ? esc(num) : num.toLocaleString()}</div>
+    <div class="exec-kpi-label">${esc(label)}</div>
   </div>`;
 }
 
@@ -94,29 +123,32 @@ async function loadStats() {
     const { stats } = await api('/dashboard/stats' + params);
     const tiles = [];
     if (stats.shuls) tiles.push(
-      ['Total Shuls', stats.shuls.total], ['Pending Shuls', stats.shuls.pending],
-      ['Approved Shuls', stats.shuls.approved], ['Paused Shuls', stats.shuls.paused]);
+      kpiCard('Total Shuls', stats.shuls.total, 'var(--viz-1)', EXEC_ICONS.building),
+      kpiCard('Pending Shuls', stats.shuls.pending, 'var(--viz-warning)', EXEC_ICONS.building),
+      kpiCard('Approved Shuls', stats.shuls.approved, 'var(--viz-good)', EXEC_ICONS.building),
+      kpiCard('Paused Shuls', stats.shuls.paused, stats.shuls.paused > 0 ? 'var(--viz-critical)' : 'var(--viz-muted)', EXEC_ICONS.building));
     if (stats.applicants) tiles.push(
-      ['Total Applicants', stats.applicants.total], ['Pending Applicants', stats.applicants.pending],
-      ['Approved Applicants', stats.applicants.approved]);
+      kpiCard('Total Applicants', stats.applicants.total, 'var(--viz-1)', EXEC_ICONS.people),
+      kpiCard('Pending Applicants', stats.applicants.pending, 'var(--viz-warning)', EXEC_ICONS.people),
+      kpiCard('Approved Applicants', stats.applicants.approved, 'var(--viz-good)', EXEC_ICONS.people));
     if (stats.cards) tiles.push(
-      ['Cards Issued', stats.cards.total], ['Cards Activated', stats.cards.activated]);
+      kpiCard('Cards Issued', stats.cards.total, 'var(--viz-2)', EXEC_ICONS.card),
+      kpiCard('Cards Activated', stats.cards.activated, 'var(--viz-3)', EXEC_ICONS.card));
     // Total Loaded/Spent/Remaining — the org-wide ledger figures (see
     // services/applicantBalance.js's orgFundsSummary), not stats.cards'
     // own totalLoaded (a narrower, cards-only sum that used to collide
-    // with this one under the same "Total Loaded" label — two tiles with
-    // the same name and different numbers, which is exactly the "2 total
-    // loaded" bug report this replaced).
+    // with this one under the same "Total Loaded" label).
     if (stats.funds) tiles.push(
-      ['Total Loaded', fmtMoney(stats.funds.approvedFunds)], ['Total Spent', fmtMoney(stats.funds.totalSpent)],
-      ['Remaining', fmtMoney(Math.round((stats.funds.approvedFunds - stats.funds.totalSpent) * 100) / 100)]);
-    qs('#stats').innerHTML = tiles.map(([label, num]) => `<div class="stat-tile"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`).join('');
+      kpiCard('Total Loaded', fmtMoney(stats.funds.approvedFunds), 'var(--brand-gold-dark)', EXEC_ICONS.coin),
+      kpiCard('Total Spent', fmtMoney(stats.funds.totalSpent), 'var(--viz-2)', EXEC_ICONS.coin),
+      kpiCard('Remaining', fmtMoney(Math.round((stats.funds.approvedFunds - stats.funds.totalSpent) * 100) / 100), 'var(--viz-good)', EXEC_ICONS.coin));
+    qs('#stats').innerHTML = tiles.join('');
     qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
     if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;
     if (stats.topStores) {
       qs('#store-spend-panel').style.display = 'block';
       qs('#total-store-spend').textContent = fmtMoney(stats.totalStoreSpend);
-      qs('#top-stores').innerHTML = stats.topStores.length ? stats.topStores.map(s => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+      qs('#top-stores').innerHTML = stats.topStores.length ? stats.topStores.map(s => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--exec-line)">
           <span>${esc(s.name)}</span><strong>${fmtMoney(s.total_purchases)}</strong>
         </div>`).join('') : '<p class="small-muted">No store transactions synced yet.</p>';
     } else {
@@ -170,11 +202,11 @@ async function loadDaily() {
     const { tasks } = await api('/tasks?assigned_to=me&status=open&pageSize=8');
     const today = new Date().toISOString().slice(0, 10);
     const overdueCount = tasks.filter(t => t.due_date && t.due_date < today).length;
-    qs('#my-tasks-heading').innerHTML = `My Open Tasks${tasks.length ? ` ${badge(String(tasks.length), overdueCount ? 'rejected' : 'active')}` : ''}`;
+    qs('#my-tasks-heading').innerHTML = `<span class="dot" style="background:var(--viz-good)"></span>My Open Tasks${tasks.length ? ` ${badge(String(tasks.length), overdueCount ? 'rejected' : 'active')}` : ''}`;
     qs('#my-tasks').innerHTML = tasks.length ? tasks.map(t => {
       const overdue = t.due_date && t.due_date < today;
       const dueLabel = t.due_date ? `<span style="${overdue ? 'color:var(--danger);font-weight:600' : 'color:var(--text-muted)'}">${fmtDate(t.due_date)}${overdue ? ' (overdue)' : ''}</span>` : '';
-      return `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:10px">
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--exec-line);display:flex;justify-content:space-between;gap:10px">
         <span>${esc(t.title)}</span>${dueLabel}
       </div>`;
     }).join('') : '<p class="small-muted">No open tasks assigned to you.</p>';

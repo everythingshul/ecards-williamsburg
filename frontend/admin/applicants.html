@@ -342,6 +342,11 @@ async function openApplicant(id) {
           <div><strong>Applicant ID</strong><br><code>${esc(a.external_id||'')}</code></div>
           <div><strong>Status</strong><br>${badge(a.approval_status, a.approval_status)} ${a.is_paused ? badge('paused','paused') : ''}</div>
         </div>
+        ${flags.length ? `<div class="divider"></div><div style="color:var(--danger)">
+          <strong>&#9888; Duplicate flag open.</strong>
+          ${flags.map(f => `<div style="margin-top:6px">Matches another applicant — reason: ${esc(f.reason)}.
+            <button class="btn btn-sm btn-outline" onclick="openMergeView('${f.id}','${id}')">View &amp; Resolve</button></div>`).join('')}
+        </div>` : ''}
         ${a.approval_status === 'soft_rejected' && a.previous_shul_name ? `<div class="divider"></div><p class="small-muted">Previously at: <strong>${esc(a.previous_shul_name)}</strong></p>` : ''}
         ${mergeGroup && mergeGroup.length ? (() => {
           // Every member (this record plus mergeGroup) shares one real
@@ -404,11 +409,6 @@ async function openApplicant(id) {
         </div>` : ''}
         <label>Permanent Comments (internal — carries forward to future seasons)</label>
         <textarea id="e-permanent_comments" rows="3">${esc(a.permanent_comments||'')}</textarea>
-        ${flags.length ? `<div class="divider"></div><div style="color:var(--danger)">
-          <strong>&#9888; Duplicate flag open.</strong>
-          ${flags.map(f => `<div style="margin-top:6px">Matches another applicant — reason: ${esc(f.reason)}.
-            <button class="btn btn-sm btn-outline" onclick="openMergeView('${f.id}','${id}')">View &amp; Resolve</button></div>`).join('')}
-        </div>` : ''}
       </div>
       <div id="atab-notes" style="display:none">
         <div style="display:flex;gap:8px"><input id="new-anote" placeholder="Add an internal note…"><button class="btn btn-sm btn-primary" onclick="addApplicantNote('${id}')">Add</button></div>

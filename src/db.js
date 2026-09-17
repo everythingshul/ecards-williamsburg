@@ -387,6 +387,27 @@ CREATE TABLE IF NOT EXISTS stores (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- disccardpromos has no stores/vendors endpoint at all -- the only place a
+-- "store in disccard" exists is as free text on a transaction (services/
+-- cardSync.js's 'vendor' field, stored as card_transactions.store_name).
+-- storeMatch.js's fuzzy name matching was the only thing connecting that
+-- text to a real store record here, and it silently failed whenever the two
+-- names didn't happen to line up -- "spent by store" totals looked wrong
+-- with no way to see why. This is an explicit, admin-controlled link
+-- instead: one disccardpromos vendor name always resolves to at most one
+-- store here (UNIQUE(org_id, vendor_name) below -- a name can't be claimed
+-- twice), but one store can have several vendor-name aliases linked to it
+-- (disccardpromos showing the same real store under more than one
+-- spelling), so store_id on its own is not unique.
+CREATE TABLE IF NOT EXISTS store_provider_links (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  store_id TEXT NOT NULL REFERENCES stores(id),
+  vendor_name TEXT NOT NULL COLLATE NOCASE,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(org_id, vendor_name)
+);
+
 CREATE TABLE IF NOT EXISTS store_billing (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL REFERENCES stores(id),

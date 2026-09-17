@@ -90,6 +90,11 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="savePushFields()">Save</button>
     </div>
     <div class="card" style="margin-top:16px">
+      <div class="flex-between"><h3 style="margin:0">Store Links (disccardpromos)</h3><a href="/admin/stores" class="btn btn-sm btn-outline">Manage on a store's profile</a></div>
+      <p class="small-muted">Every disccardpromos vendor name currently linked to a store here, so it's actually counted in that store's spend totals. disccardpromos has no store list of its own — a name shows up here once it's been linked from that store's own profile. Read-only here; link or unlink from the store itself.</p>
+      <div id="store-links-list" style="margin-top:10px">Loading…</div>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Application Restrictions</h3>
       <label>Allowed Zip Codes <span class="small-muted">(comma-separated, leave blank to accept any zip code)</span></label>
       <textarea id="org-allowed_zips" rows="3" placeholder="e.g. 11201, 11211, 11213"></textarea>
@@ -620,7 +625,20 @@ window.uploadFullImport = async (input) => {
   input.value = '';
 };
 
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods();
+// Read-only org-wide view of routes/stores.js's provider-links map — links
+// are created/removed from a store's own profile, never here.
+async function loadStoreLinks() {
+  try {
+    const { links } = await api('/stores/provider-links');
+    if (!links.length) { qs('#store-links-list').innerHTML = '<p class="small-muted">No disccardpromos vendor names linked to any store yet.</p>'; return; }
+    const byStore = new Map();
+    links.forEach(l => { if (!byStore.has(l.store_id)) byStore.set(l.store_id, { name: l.store_name, status: l.setup_status, vendors: [] }); byStore.get(l.store_id).vendors.push(l.vendor_name); });
+    qs('#store-links-list').innerHTML = `<table><thead><tr><th>Store</th><th>Status</th><th>Linked disccardpromos name(s)</th></tr></thead><tbody>
+      ${[...byStore.values()].map(s => `<tr><td><strong>${esc(s.name)}</strong></td><td>${badge(s.status, s.status)}</td><td>${s.vendors.map(v => esc(v)).join(', ')}</td></tr>`).join('')}
+    </tbody></table>`;
+  } catch (err) { qs('#store-links-list').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+}
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks();
 </script>
 </body>
 </html>

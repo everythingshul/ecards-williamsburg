@@ -7,16 +7,12 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="stylesheet" href="/css/portal-theme.css">
+<link rel="stylesheet" href="/css/exec-dashboard.css">
 <style>
-  /* Reference palette, unmodified — see the dataviz skill's palette.md.
-     Status colors (approval_status/shul status are genuine state, not
-     identity) are the fixed good/warning/critical roles; the categorical
-     slots are used only where the field is a lifecycle stage, not a status
-     (card status, funds spent-vs-remaining). */
-  :root {
-    --viz-good: #0ca30c; --viz-warning: #fab219; --viz-critical: #d03b3b; --viz-muted: #898781;
-    --viz-1: #2a78d6; --viz-2: #eb6834; --viz-3: #1baf7a; --viz-4: #eda100;
-  }
+  /* The shared "executive report" look (header, KPI cards, chart cards,
+     dataviz palette) lives in /css/exec-dashboard.css, shared with the
+     internal Dashboard so the two stay in sync. Only this page's own chart
+     styles (donuts, bars, hero panel, expandable lists) are inline. */
   .donut-wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
   .donut-svg-box { position: relative; width: 160px; height: 160px; flex-shrink: 0; }
   .donut-svg-box svg { transform: rotate(-90deg); }
@@ -67,9 +63,35 @@
 <script>
 Auth.requireAdmin();
 if (!Auth.can('donor_dashboard')) { location.href = '/admin/dashboard'; }
+// Hand-rolled line icons — same set as the internal Dashboard; no icon
+// library, consistent with this app's no-dependency approach.
+const EXEC_ICONS = {
+  people: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  card: '<svg viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>',
+  flag: '<svg viewBox="0 0 24 24"><path d="M4 22V4a1 1 0 0 1 1-1h11l-1.5 4L16 11H5"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>',
+};
+function kpiCard(label, num, accent, icon) {
+  return `<div class="exec-kpi-card" style="--kpi-accent:${accent}">
+    <div class="exec-kpi-icon">${icon}</div>
+    <div class="exec-kpi-num">${typeof num === 'string' ? esc(num) : Number(num || 0).toLocaleString()}</div>
+    <div class="exec-kpi-label">${esc(label)}</div>
+  </div>`;
+}
 renderShell('/admin/donor-dashboard', `
-  <div class="flex-between"><h2>Donor's Dash</h2><select id="f-season" style="max-width:240px"><option value="">All Seasons</option></select></div>
-  <p class="small-muted">A quick-read overview for donors and board members — hover any slice or bar for the exact number behind it.</p>
+  <div class="exec-header">
+    <div class="exec-header-top">
+      <div>
+        <div class="exec-eyebrow">For Donors &amp; Board</div>
+        <h1 class="exec-title">Donor's Dash</h1>
+        <p class="exec-subtitle">A quick-read overview for donors and board members — hover any slice or bar for the exact number behind it.</p>
+      </div>
+      <div class="exec-header-controls">
+        <select id="f-season" class="exec-season-select"><option value="">All Seasons</option></select>
+      </div>
+    </div>
+    <div class="exec-asof" id="exec-asof"></div>
+  </div>
   <div class="hero-funds" id="hero-funds">
     <div class="stat"><div class="num" id="hero-loaded">—</div><div class="label">Total Loaded</div></div>
     <div class="vrule"></div>
@@ -77,16 +99,15 @@ renderShell('/admin/donor-dashboard', `
     <div class="vrule"></div>
     <div class="stat"><div class="num" id="hero-remaining">—</div><div class="label">Remaining</div></div>
   </div>
-  <div class="stat-grid" id="kpi-row" style="margin-top:16px"><div class="small-muted">Loading…</div></div>
-  <div class="grid-2" style="margin-top:16px;align-items:start">
-    <div class="card"><h4 style="margin:0 0 10px">Applicants by Status</h4><div id="donut-applicants"></div></div>
-    <div class="card"><h4 style="margin:0 0 10px">Shuls by Status</h4><div id="donut-shuls"></div></div>
+  <div class="exec-kpi-grid" id="kpi-row" style="margin-top:16px"><div class="small-muted">Loading…</div></div>
+  <div class="exec-section-title">Breakdowns</div>
+  <div class="exec-chart-grid">
+    <div class="exec-chart-card"><h4><span class="dot" style="background:var(--viz-good)"></span>Applicants by Status</h4><p class="exec-chart-sub">Every applicant record this season, by review outcome.</p><div id="donut-applicants"></div></div>
+    <div class="exec-chart-card"><h4><span class="dot" style="background:var(--viz-good)"></span>Shuls by Status</h4><p class="exec-chart-sub">Participating shuls, by registration status.</p><div id="donut-shuls"></div></div>
+    <div class="exec-chart-card"><h4><span class="dot" style="background:var(--viz-good)"></span>Stores by Status</h4><p class="exec-chart-sub">Participating stores, by onboarding stage.</p><div id="donut-stores"></div></div>
+    <div class="exec-chart-card"><h4><span class="dot" style="background:var(--viz-1)"></span>Cards by Status</h4><p class="exec-chart-sub">Gift cards, by lifecycle stage.</p><div id="donut-cards"></div></div>
+    <div class="exec-chart-card"><h4><span class="dot" style="background:var(--viz-2)"></span>Funds — Spent vs. Remaining</h4><p class="exec-chart-sub">Of everything loaded onto cards, how much has been used in stores.</p><div id="donut-funds"></div></div>
   </div>
-  <div class="grid-2" style="margin-top:16px;align-items:start">
-    <div class="card"><h4 style="margin:0 0 10px">Stores by Status</h4><div id="donut-stores"></div></div>
-    <div class="card"><h4 style="margin:0 0 10px">Cards by Status</h4><div id="donut-cards"></div></div>
-  </div>
-  <div class="card" style="margin-top:16px"><h4 style="margin:0 0 10px">Funds — Spent vs. Remaining</h4><div id="donut-funds"></div></div>
 
   <details class="card expand-panel" style="margin-top:16px" id="panel-shuls">
     <summary>Shuls <span class="small-muted" id="shuls-summary-count" style="font-weight:400"></span><span class="chev">&#9656;</span></summary>
@@ -105,14 +126,16 @@ renderShell('/admin/donor-dashboard', `
     </div>
   </details>
 
-  <div class="card" style="margin-top:16px">
-    <div class="flex-between"><h4 style="margin:0">New Applicants, Last 30 Days</h4>
+  <div class="exec-chart-card" style="margin-top:16px">
+    <div class="flex-between"><h4 style="margin:0"><span class="dot" style="background:var(--viz-1)"></span>New Applicants, Last 30 Days</h4>
       <select id="f-days" style="max-width:160px"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
     </div>
     <p class="small-muted" style="margin-top:4px">New submissions vs. how many of that day's cohort are approved so far.</p>
     <div id="bar-daily" style="margin-top:10px">Loading…</div>
   </div>
 `);
+
+qs('#exec-asof').textContent = 'As of ' + new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 
 // ---------- Donut chart: hand-rolled SVG (stroke-dasharray technique), no
 // charting library — consistent with this app's no-build-step, no-framework
@@ -236,11 +259,11 @@ async function loadDonorDashboard() {
   // money figures get their own treatment instead of sitting flush with
   // secondary counts like "Cards Activated".
   qs('#kpi-row').innerHTML = [
-    ['Total Applicants', applicants.total],
-    ['Approved Applicants', applicants.approved],
-    ['Cards Activated', cards.activated],
-    ['Open Duplicate Flags', duplicatesOpen],
-  ].map(([label, num]) => `<div class="stat-tile"><div class="num">${typeof num === 'string' ? esc(num) : num}</div><div class="label">${esc(label)}</div></div>`).join('');
+    kpiCard('Total Applicants', applicants.total, 'var(--viz-1)', EXEC_ICONS.people),
+    kpiCard('Approved Applicants', applicants.approved, 'var(--viz-good)', EXEC_ICONS.check),
+    kpiCard('Cards Activated', cards.activated, 'var(--viz-3)', EXEC_ICONS.card),
+    kpiCard('Open Duplicate Flags', duplicatesOpen, duplicatesOpen > 0 ? 'var(--viz-critical)' : 'var(--viz-muted)', EXEC_ICONS.flag),
+  ].join('');
 
   qs('#hero-loaded').textContent = fmtMoney(funds.loaded);
   qs('#hero-spent').textContent = fmtMoney(funds.spent);

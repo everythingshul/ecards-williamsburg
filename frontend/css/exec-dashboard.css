@@ -1,0 +1,75 @@
+/* Shared "executive report" look for the internal Dashboard and Donor's
+   Dash — a deliberately different register from the app's own warm
+   branded theme.css (these two pages are read/screenshotted by staff,
+   board members and donors, not used for day-to-day data entry), while
+   still pulling the brand gold in as the one accent color so neither page
+   feels like a different product. Kept in one file, not duplicated per
+   page, specifically so the two stay visually in sync as either changes. */
+:root {
+  --exec-ink: #10151f;
+  --exec-navy: #16243b;
+  --exec-navy-2: #1e3050;
+  --exec-slate: #4a5568;
+  --exec-line: #e4e8ef;
+  --exec-card-bg: #ffffff;
+  --exec-shadow: 0 1px 2px rgba(16,21,31,.04), 0 8px 24px rgba(16,21,31,.06);
+  /* Reference dataviz palette (see the dataviz skill's palette.md) — status
+     roles for genuine state, categorical slots for lifecycle stages. Shared
+     here so both pages' KPI accents and charts use the same colors. */
+  --viz-good: #0ca30c; --viz-warning: #fab219; --viz-critical: #d03b3b; --viz-muted: #898781;
+  --viz-1: #2a78d6; --viz-2: #eb6834; --viz-3: #1baf7a; --viz-4: #eda100;
+}
+body { background: #f4f6fa; }
+
+.exec-header {
+  background: linear-gradient(135deg, var(--exec-navy) 0%, var(--exec-navy-2) 100%);
+  border-radius: 14px; padding: 28px 32px; margin-bottom: 22px; color: #f2f4f8;
+  box-shadow: var(--exec-shadow); position: relative; overflow: hidden;
+}
+.exec-header::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(600px 240px at 100% 0%, rgba(201,167,106,.16), transparent 60%);
+}
+.exec-header-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; position: relative; }
+.exec-eyebrow { font-size: 11.5px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase; color: var(--brand-gold-light); margin-bottom: 6px; }
+.exec-title { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 28px; font-weight: 700; margin: 0; color: #fff; letter-spacing: -.2px; }
+.exec-subtitle { margin: 10px 0 0; color: #cdd6e4; font-size: 13.5px; max-width: 640px; position: relative; }
+.exec-header-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; position: relative; }
+.exec-season-select { max-width: 220px; background: rgba(255,255,255,.08); border: 1.5px solid rgba(255,255,255,.22); color: #fff; width: auto; }
+.exec-season-select option { color: var(--text-dark); }
+.exec-asof { font-size: 12px; color: #aab6c8; margin-top: 8px; position: relative; }
+
+/* Flex, not a rigid grid — a tile whose number runs long (a big dollar
+   figure) needs to be free to actually take more room instead of clipping
+   or forcing an ellipsis; flex-basis is a starting point, not a cap. */
+.exec-kpi-grid { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 24px; }
+.exec-kpi-card {
+  background: var(--exec-card-bg); border: 1px solid var(--exec-line); border-radius: 12px;
+  padding: 18px 18px 16px; box-shadow: var(--exec-shadow); position: relative; overflow: hidden;
+  transition: transform .12s ease, box-shadow .12s ease;
+  flex: 1 1 190px; min-width: 190px; display: flex; flex-direction: column;
+}
+.exec-kpi-card:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(16,21,31,.06), 0 14px 32px rgba(16,21,31,.09); }
+.exec-kpi-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--kpi-accent, var(--brand-gold)); }
+.exec-kpi-icon {
+  width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center;
+  background: var(--brand-panel-2); margin-bottom: 12px; flex-shrink: 0;
+}
+@supports (background: color-mix(in srgb, red 10%, white)) {
+  .exec-kpi-icon { background: color-mix(in srgb, var(--kpi-accent, var(--brand-gold)) 14%, white); }
+}
+.exec-kpi-icon svg { width: 18px; height: 18px; stroke: var(--kpi-accent, var(--brand-gold-dark)); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* clamp() lets a long figure shrink a bit rather than overflow the card;
+   overflow-wrap covers the rest for anything clamp can't shrink enough. */
+.exec-kpi-num { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: clamp(17px, 2.4vw, 25px); font-weight: 700; color: var(--exec-ink); line-height: 1.15; overflow-wrap: anywhere; }
+.exec-kpi-label { font-size: 12px; color: var(--exec-slate); margin-top: 3px; font-weight: 600; }
+
+.exec-section-title { font-size: 13px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--exec-slate); margin: 26px 2px 12px; }
+.exec-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.exec-chart-card {
+  background: var(--exec-card-bg); border: 1px solid var(--exec-line); border-radius: 12px;
+  padding: 20px 22px; box-shadow: var(--exec-shadow);
+}
+.exec-chart-card h4, .exec-chart-card h3 { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 14.5px; font-weight: 700; color: var(--exec-ink); margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+.exec-chart-card h4 .dot, .exec-chart-card h3 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--kpi-accent, var(--brand-gold-dark)); flex-shrink: 0; }
+.exec-chart-sub { font-size: 12px; color: var(--exec-slate); margin: 0 0 14px; }

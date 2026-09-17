@@ -145,8 +145,8 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openStore(id) {
   try {
-    const [{ store: s, transactionTotals, latestAgreement }, { bills: submittedBills }] = await Promise.all([
-      api(`/stores/${id}`), api(`/stores/${id}/bill-submissions`),
+    const [{ store: s, transactionTotals, latestAgreement, providerLinks = [] }, { bills: submittedBills }, { vendors: providerVendors = [] }] = await Promise.all([
+      api(`/stores/${id}`), api(`/stores/${id}/bill-submissions`), api('/stores/provider-vendors').catch(() => ({ vendors: [] })),
     ]);
     // At-a-glance signed/not-signed status, same info the Documents tab
     // shows per-row but surfaced right here so it doesn't require switching
@@ -192,6 +192,17 @@ async function openStore(id) {
         <div class="checkbox-row" style="margin-top:10px"><input type="checkbox" id="e-has_account" ${s.has_provider_account?'checked':''}><label style="margin:0">Already has a disccardpromos account</label></div>
         <div class="divider"></div>
         <p class="small-muted">Transactions: ${transactionTotals.count} · Purchases: ${fmtMoney(transactionTotals.total_purchases)} · Refunds: ${fmtMoney(transactionTotals.total_refunds)}</p>
+        <div class="divider"></div>
+        <label>Linked disccardpromos store name(s)</label>
+        <p class="small-muted" style="margin-top:-6px">disccardpromos has no store list of its own — these are the exact vendor names it's actually sent us on a transaction. Link every name it uses for this store so its spend counts here; one name can only ever be linked to one store, but this store can hold as many aliases as disccardpromos reports it under.</p>
+        <div id="e-provider-links">${providerLinks.length ? providerLinks.map(l => `<span class="badge" style="display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0">${esc(l.vendor_name)}<button type="button" title="Unlink" onclick="unlinkStoreVendor('${id}','${l.id}')" style="border:none;background:none;cursor:pointer;color:inherit;font-weight:700;line-height:1;padding:0">&times;</button></span>`).join('') : '<span class="small-muted">No disccardpromos vendor name linked yet.</span>'}</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <select id="e-link-vendor" style="flex:1">
+            <option value="">Choose a disccardpromos vendor name…</option>
+            ${providerVendors.filter(v => !providerLinks.some(l => l.vendor_name.toLowerCase() === v.vendor_name.toLowerCase())).map(v => `<option value="${esc(v.vendor_name)}" ${v.linkedStoreId ? 'disabled' : ''}>${esc(v.vendor_name)} (${v.txn_count} txn, ${fmtMoney(v.total_spend)})${v.linkedStoreId ? ` — already linked to ${esc(v.linkedStoreName)}` : ''}</option>`).join('')}
+          </select>
+          <button type="button" class="btn btn-sm btn-outline" onclick="linkStoreVendor('${id}')">Link</button>
+        </div>
       </div>
       <div id="stab-billing" style="display:none">
         <div class="flex-between"><h4 style="margin:0">Bills This Store Submitted</h4><button class="btn btn-sm btn-outline" onclick="openLogBillModal('${id}')">Log a Bill They Sent Us</button></div>
@@ -225,6 +236,22 @@ async function openStore(id) {
   } catch (err) { toast(err.message, true); }
 }
 
+window.linkStoreVendor = async (id) => {
+  const vendorName = qs('#e-link-vendor').value;
+  if (!vendorName) return toast('Choose a vendor name first', true);
+  try {
+    const r = await api(`/stores/${id}/provider-links`, { method: 'POST', body: { vendor_name: vendorName } });
+    toast(r.backfilled ? `Linked — ${r.backfilled} existing transaction(s) now count toward this store` : 'Linked');
+    openStore(id); load();
+  } catch (err) { toast(err.message, true); }
+};
+window.unlinkStoreVendor = async (id, linkId) => {
+  if (!confirm('Unlink this disccardpromos vendor name? Transactions under it will show as unmatched again until re-linked.')) return;
+  try {
+    await api(`/stores/${id}/provider-links/${linkId}`, { method: 'DELETE' });
+    toast('Unlinked'); openStore(id); load();
+  } catch (err) { toast(err.message, true); }
+};
 window.saveStore = async (id) => {
   const fields = ['name','address','city','state','zip','phone','pos_system','discount_details','discount','manager_name','manager_phone','manager_email','owner_name','owner_phone','owner_email','comments'];
   const body = Object.fromEntries(fields.map(f => [f, qs('#e-'+f).value]));

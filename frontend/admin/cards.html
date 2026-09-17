@@ -33,7 +33,7 @@ renderShell('/admin/cards', `
     <div class="paginator" id="pager-txns"></div>
   </div>
   <div id="panel-byshul" style="display:none">
-    <p class="small-muted">Money loaded onto each shul's applicants' cards, and how much of it has been spent in stores so far.</p>
+    <p class="small-muted">Money loaded onto each shul's applicants' cards, and how much of it has been spent in stores so far. "Allocated" is every approved applicant's committed card amount for that shul (same figure the Dashboard's "Total Loaded" sums org-wide) — counted once per applicant regardless of how many card rows they hold, so a replaced card or two cards sharing one disccardpromos account never double-counts them.</p>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Shul</th><th>Allocated</th><th>Spent</th><th>Remaining</th><th></th></tr></thead>
       <tbody id="tbody-byshul"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>

@@ -185,6 +185,38 @@ router.get('/export', requirePermission('stores', 'can_export'), (req, res) => {
   sendXlsx(res, `stores-${Date.now()}.xlsx`, redact(withSpend, req.permission.hidden_fields));
 });
 
+// Every distinct vendor name disccardpromos has actually sent us on a
+// transaction (services/cardSync.js's `vendor`), each with its current link
+// (if any), a transaction count, and a net-spend total — what a store's
+// profile picker offers, and what the Settings "Store Links" list is built
+// from. linked=false rows are the ones actually worth an admin's attention;
+// linked=true rows are shown too so a store profile can display "already
+// linked here" instead of silently omitting an already-claimed name. Must
+// be registered before /:id.
+router.get('/provider-vendors', requirePermission('stores', 'can_view'), (req, res) => {
+  const orgId = req.user.org_id;
+  const rows = db.prepare(`SELECT t.store_name AS vendor_name, COUNT(*) txn_count,
+      COALESCE(SUM(CASE WHEN t.type='refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total_spend
+    FROM card_transactions t JOIN cards c ON c.id = t.card_id
+    WHERE c.org_id = ? AND t.store_name IS NOT NULL AND t.store_name != ''
+    GROUP BY t.store_name ORDER BY t.store_name COLLATE NOCASE`).all(orgId);
+  const links = db.prepare(`SELECT l.vendor_name, l.store_id, s.name AS store_name FROM store_provider_links l JOIN stores s ON s.id = l.store_id WHERE l.org_id = ?`).all(orgId);
+  const linkByVendor = new Map(links.map(l => [l.vendor_name.toLowerCase(), l]));
+  res.json({ vendors: rows.map(r => {
+    const link = linkByVendor.get(r.vendor_name.toLowerCase());
+    return { ...r, linkedStoreId: link?.store_id || null, linkedStoreName: link?.store_name || null };
+  }) });
+});
+
+// Org-wide store <-> disccardpromos vendor-name map, for the Settings page.
+// Must be registered before /:id.
+router.get('/provider-links', requirePermission('stores', 'can_view'), (req, res) => {
+  const rows = db.prepare(`SELECT l.id, l.vendor_name, l.store_id, s.name AS store_name, s.setup_status
+    FROM store_provider_links l JOIN stores s ON s.id = l.store_id
+    WHERE l.org_id = ? ORDER BY s.name COLLATE NOCASE, l.vendor_name COLLATE NOCASE`).all(req.user.org_id);
+  res.json({ links: rows });
+});
+
 router.get('/:id', (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
@@ -203,7 +235,54 @@ router.get('/:id', (req, res) => {
   // full Documents tab list.
   const latestAgreement = db.prepare(`SELECT status, sent_at, signed_at, signer_name FROM documents
     WHERE org_id = ? AND entity_type = 'store' AND entity_id = ? ORDER BY created_at DESC LIMIT 1`).get(req.user.org_id, store.id) || null;
-  res.json({ store: redact(store, req.permission.hidden_fields), transactionTotals, latestAgreement });
+  const providerLinks = req.user.role === 'store' ? [] : db.prepare(`SELECT id, vendor_name FROM store_provider_links WHERE store_id = ? ORDER BY vendor_name COLLATE NOCASE`).all(store.id);
+  res.json({ store: redact(store, req.permission.hidden_fields), transactionTotals, latestAgreement, providerLinks });
+});
+
+// Links a disccardpromos vendor name to this store — every past and future
+// transaction reported under that exact name now counts toward this store's
+// totals (see storeMatch.js's resolveStoreId, which checks this table
+// first). Rejects a vendor name already linked to a DIFFERENT store (one
+// name can't mean two stores here); linking it again to the SAME store is a
+// harmless no-op. The other direction is fine on purpose: this same store
+// can link as many different vendor names as disccardpromos happens to
+// report it under.
+router.post('/:id/provider-links', requirePermission('stores', 'can_edit'), (req, res) => {
+  if (req.user.role === 'store') return res.status(403).json({ error: 'Not permitted' });
+  const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  const vendorName = (req.body?.vendor_name || '').trim();
+  if (!vendorName) return res.status(400).json({ error: 'vendor_name is required' });
+  const existing = db.prepare(`SELECT l.*, s.name AS store_name FROM store_provider_links l JOIN stores s ON s.id = l.store_id WHERE l.org_id = ? AND l.vendor_name = ?`).get(req.user.org_id, vendorName);
+  if (existing && existing.store_id !== store.id) return res.status(409).json({ error: `"${vendorName}" is already linked to ${existing.store_name}` });
+  if (!existing) {
+    db.prepare(`INSERT INTO store_provider_links (id, org_id, store_id, vendor_name) VALUES (?,?,?,?)`).run(uuid(), req.user.org_id, store.id, vendorName);
+    logAudit(req.user.org_id, req.user.id, 'link-provider-vendor', 'store', store.id, null, { vendor_name: vendorName }, req.ip);
+  }
+  // Backfill: every already-synced transaction under this exact vendor name
+  // now counts toward this store, retroactively — not just new ones from
+  // the next sync. Re-points it even if a past fuzzy-name match had already
+  // (possibly wrongly) attributed it elsewhere; an explicit link always wins.
+  const backfilled = db.prepare(`UPDATE card_transactions SET store_id = ?
+    WHERE store_name = ? AND card_id IN (SELECT id FROM cards WHERE org_id = ?) AND (store_id IS NULL OR store_id != ?)`)
+    .run(store.id, vendorName, req.user.org_id, store.id).changes;
+  res.json({ ok: true, backfilled });
+});
+
+router.delete('/:id/provider-links/:linkId', requirePermission('stores', 'can_edit'), (req, res) => {
+  if (req.user.role === 'store') return res.status(403).json({ error: 'Not permitted' });
+  const store = db.prepare('SELECT id FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  const link = db.prepare('SELECT * FROM store_provider_links WHERE id = ? AND org_id = ? AND store_id = ?').get(req.params.linkId, req.user.org_id, store.id);
+  if (!link) return res.status(404).json({ error: 'Link not found' });
+  db.prepare('DELETE FROM store_provider_links WHERE id = ?').run(link.id);
+  // Un-attribute the transactions this link was responsible for, rather
+  // than leaving them silently pointed at a store nothing here says they
+  // belong to anymore — they go back to showing as unmatched, same as
+  // before the link ever existed, until re-linked or fuzzy-matched.
+  const unlinked = db.prepare(`UPDATE card_transactions SET store_id = NULL WHERE store_name = ? AND store_id = ?`).run(link.vendor_name, store.id).changes;
+  logAudit(req.user.org_id, req.user.id, 'unlink-provider-vendor', 'store', store.id, { vendor_name: link.vendor_name }, null, req.ip);
+  res.json({ ok: true, unlinked });
 });
 
 // Who edited this record and when — not shown to the store viewing their own record.
