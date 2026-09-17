@@ -20,7 +20,7 @@ import { lockApplicantCards } from '../services/cardSync.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
-  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger } from '../services/providerAccount.js';
+  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger, consolidateProviderAccounts } from '../services/providerAccount.js';
 import { reverseAllocation } from '../services/matching.js';
 
 const router = Router();
@@ -1665,14 +1665,26 @@ router.get('/duplicates/:flagId/group', requireAdmin, (req, res) => {
 // (mixed and matched across members) written onto that primary only — every
 // other member's own row is left untouched, so each shul keeps seeing
 // exactly what it itself submitted.
-router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_edit'), (req, res) => {
+router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_edit'), async (req, res) => {
   const flag = db.prepare(`SELECT * FROM duplicate_flags WHERE id = ? AND org_id = ? AND entity_type='applicant'`).get(req.params.flagId, req.user.org_id);
   if (!flag) return res.status(404).json({ error: 'Not found' });
   const { primaryId, values, memberIds } = req.body || {};
   try {
     const result = mergeApplicants(req.user.org_id, req.user.id, { primaryId, values, memberIds });
+    // Two (or more) members each already had their own real disccardpromos
+    // account — both were approved and funded before the duplicate was
+    // caught. Close every non-primary account and fold its unspent money
+    // onto the primary's so the person has ONE live card (see
+    // services/providerAccount.js's consolidateProviderAccounts). The local
+    // merge above has already committed either way; this is the provider-
+    // side follow-through, reported back rather than allowed to undo it.
+    let consolidation = null;
+    if (result.accountConflict) {
+      consolidation = await consolidateProviderAccounts(req.user.org_id, primaryId);
+      logAudit(req.user.org_id, req.user.id, 'consolidate-accounts', 'applicant', primaryId, null, consolidation, req.ip);
+    }
     logAudit(req.user.org_id, req.user.id, 'merge', 'applicant', primaryId, null, result, req.ip);
-    res.json(result);
+    res.json({ ...result, consolidation });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

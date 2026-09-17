@@ -865,10 +865,36 @@ window.submitMerge = async (flagId) => {
     const r = await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds } });
     // More than one member already had its own real disccardpromos account
     // (each was approved separately before turning out to be the same
-    // person) — there's no confirmed API to merge two live gift-card
-    // accounts, so this needs a human to reconcile manually rather than
-    // silently picking one and orphaning the other's balance.
-    toast(r.accountConflict ? 'Merged — but more than one of these records already had its own gift card account. Reconcile those manually; neither was changed.' : 'Merged', !!r.accountConflict);
+    // person): the server closed every non-primary account and moved its
+    // unspent money onto the primary's card (see services/providerAccount.js's
+    // consolidateProviderAccounts). Real money moved, so the result is a
+    // modal the admin has to dismiss — never a toast that fades before it's
+    // read. Its Close continues to wherever the merge flow would have gone.
+    const c = r.consolidation;
+    if (c && (c.closed || c.errors?.length || c.details?.length)) {
+      closeModal(); load();
+      const row = (label, val) => `<tr><td class="small-muted" style="padding:2px 10px 2px 0">${label}</td><td style="text-align:right;padding:2px 0"><strong>${val}</strong></td></tr>`;
+      const accounts = (c.details || []).map(d => `<div class="card" style="margin-bottom:10px">
+          <div><strong>${esc(d.memberName || 'Unnamed')}</strong>${d.shulName ? ` <span class="small-muted">— ${esc(d.shulName)}</span>` : ''} <span class="small-muted">(disccardpromos account ${esc(String(d.accountId))}${d.externalId ? `, ID ${esc(String(d.externalId))}` : ''})</span></div>
+          ${d.foundOnProvider ? `<table style="margin-top:6px">
+            ${row('Was committed to this account', fmtMoney(d.committed))}
+            ${row('Already spent on it (stays spent, not re-credited)', fmtMoney(d.alreadySpent))}
+            ${row('Unspent — moved to the primary\'s card', fmtMoney(d.unspentMoved))}
+          </table><div class="small-muted" style="margin-top:6px">Account closed (deactivated) on disccardpromos.</div>`
+          : '<div class="small-muted" style="margin-top:6px">Not found on disccardpromos — nothing to close or move; the record now points at the primary\'s account.</div>'}
+        </div>`).join('');
+      const body = `
+        <p>Merged into <strong>${esc(c.primaryName || 'the primary')}</strong>${c.primaryShulName ? ` <span class="small-muted">(${esc(c.primaryShulName)})</span>` : ''}. ${c.closed ? `Closed ${c.closed} duplicate gift card account${c.closed === 1 ? '' : 's'}.` : 'No duplicate account was closed.'}</p>
+        ${accounts}
+        <table style="margin-top:4px">
+          ${row('Total unspent moved onto the primary\'s card', fmtMoney(c.movedUnspent || 0))}
+          ${c.newPrimaryTotal != null ? row('Primary\'s card now committed at', fmtMoney(c.newPrimaryTotal)) : ''}
+        </table>
+        ${c.errors?.length ? `<div class="card" style="border-color:var(--danger,#b91c1c);margin-top:10px"><strong>Problems</strong><ul style="margin:6px 0 0;padding-left:18px">${c.errors.map(e => `<li>${esc(e)}</li>`).join('')}</ul><p class="small-muted" style="margin:6px 0 0">An account listed here was left as it was (still live, still pointed at). The merge itself went through.</p></div>` : ''}`;
+      openModal('Gift Card Accounts Consolidated', body, `<button class="btn btn-primary btn-sm" onclick="closeModal(); if (mergeViewReturnToApplicant) openApplicant(mergeViewReturnToApplicant); else showDuplicates();">Close</button>`);
+      return;
+    }
+    toast('Merged');
     afterDuplicateResolved();
   } catch (err) { toast(err.message, true); }
 };

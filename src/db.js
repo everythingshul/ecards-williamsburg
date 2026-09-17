@@ -1034,6 +1034,15 @@ try {
 // "Recheck All" sweep can't resurrect it.
 safeAlter(`ALTER TABLE duplicate_flags ADD COLUMN bypassed_reasons TEXT`);
 
+// Money already SPENT on this member's own disccardpromos account before a
+// merge closed it in favor of the group primary's account (see services/
+// providerAccount.js's consolidateProviderAccounts). services/
+// applicantBalance.js subtracts it from both `loaded` and `spent` for the
+// group: it is neither money still committed to the surviving card nor
+// spend against it — it's history on a closed account, and leaving it in
+// `loaded` would re-credit it onto the primary on the next amount push.
+safeAlter(`ALTER TABLE applicants ADD COLUMN merged_spend_adjustment REAL NOT NULL DEFAULT 0`);
+
 // Leftover from the removed "transactions not recognized" banner (the
 // transactions field is confirmed now — see services/cardSync.js).
 try { db.prepare(`DELETE FROM settings WHERE key = 'disccard_txn_shape_diagnostic'`).run(); } catch {}

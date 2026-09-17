@@ -41,7 +41,7 @@ import { db } from '../db.js';
 export function getApplicantBalances(orgId, applicantIds) {
   const result = new Map();
   if (!applicantIds.length) return result;
-  const rows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount FROM applicants WHERE org_id = ? AND id IN (${applicantIds.map(() => '?').join(',')})`).all(orgId, ...applicantIds);
+  const rows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount, merged_spend_adjustment FROM applicants WHERE org_id = ? AND id IN (${applicantIds.map(() => '?').join(',')})`).all(orgId, ...applicantIds);
   if (!rows.length) return result;
 
   // Group key: an applicant's merge_group_id if it has one, else its own id
@@ -57,7 +57,7 @@ export function getApplicantBalances(orgId, applicantIds) {
   }
   const trueGroupKeys = [...new Set(rows.filter(r => r.merge_group_id).map(r => r.merge_group_id))];
   if (trueGroupKeys.length) {
-    const memberRows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount FROM applicants WHERE org_id = ? AND merge_group_id IN (${trueGroupKeys.map(() => '?').join(',')})`).all(orgId, ...trueGroupKeys);
+    const memberRows = db.prepare(`SELECT id, merge_group_id, approval_status, card_amount, merged_spend_adjustment FROM applicants WHERE org_id = ? AND merge_group_id IN (${trueGroupKeys.map(() => '?').join(',')})`).all(orgId, ...trueGroupKeys);
     for (const r of memberRows) {
       idsByGroup.get(r.merge_group_id)?.add(r.id);
       applicantById.set(r.id, r);
@@ -82,13 +82,23 @@ export function getApplicantBalances(orgId, applicantIds) {
   const spentById = new Map(spentRows.map(r => [r.applicant_id, r.spent]));
 
   for (const idSet of idsByGroup.values()) {
-    let loaded = 0, spent = 0;
+    let loaded = 0, spent = 0, adjustment = 0;
     for (const id of idSet) {
       const a = applicantById.get(id);
       if (a?.approval_status === 'approved') loaded += a.card_amount || 0;
       loaded += allocatedById.get(id) || 0;
       spent += spentById.get(id) || 0;
+      adjustment += a?.merged_spend_adjustment || 0;
     }
+    // Money spent on a member's own account BEFORE a merge closed that
+    // account (see db.js's merged_spend_adjustment): comes out of `loaded`
+    // (it was never transferred to the surviving card, so pushing it would
+    // re-credit spent money) AND out of `spent` (those purchases are history
+    // on the closed account, not spend against the surviving card) — so
+    // `remaining` is unchanged and still means "unspent money on the live
+    // card".
+    loaded -= adjustment;
+    spent = Math.max(0, spent - adjustment);
     const rounded = { loaded: Math.round(loaded * 100) / 100, spent: Math.round(spent * 100) / 100, remaining: Math.round((loaded - spent) * 100) / 100 };
     for (const id of idSet) result.set(id, rounded);
   }

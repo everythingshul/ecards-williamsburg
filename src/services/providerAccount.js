@@ -364,6 +364,87 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
   return { target: ledger.loaded };
 }
 
+// After a merge (services/duplicates.js's mergeApplicants) where MORE THAN
+// ONE member already held its own real disccardpromos account — i.e. two
+// profiles were each approved and funded before anyone noticed they were
+// the same person — this closes every non-primary account and folds its
+// unspent money onto the primary's, so the person ends up with ONE live
+// card. Money-safe by construction:
+//  - the losing account is read live first (top-level `amount` = what was
+//    committed to it, packages[].balance = what's still unspent); the
+//    difference is what that person already spent on it. That spend is
+//    recorded on the losing member as merged_spend_adjustment, which
+//    services/applicantBalance.js subtracts from the group's `loaded` — so
+//    the primary's next amount push carries (everything ever granted to
+//    the person) minus (what was already spent on the closed account),
+//    never re-crediting spent money — and from `spent`, so the app's own
+//    remaining figure stays "unspent money on the live card".
+//  - the losing account is deactivated (never deleted), with its own
+//    external_id resent so the PATCH doesn't wipe it.
+//  - every member's provider_account_id is repointed at the primary's, and
+//    the primary is re-pushed immediately. A live-read or deactivate
+//    failure on one losing account leaves THAT account untouched (still
+//    live, still pointed at) and is reported, rather than half-merging.
+// If the primary itself has no account, the earliest-created member's
+// becomes the group's account and the rest are closed onto it.
+export async function consolidateProviderAccounts(orgId, primaryId) {
+  const members = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND (id = ? OR merge_group_id = ?) ORDER BY (id = ?) DESC, created_at ASC`).all(orgId, primaryId, primaryId, primaryId);
+  const primary = members.find(m => m.id === primaryId);
+  if (!primary) return { closed: 0, errors: ['Primary not found'] };
+  const withAccount = members.filter(m => m.provider_account_id);
+  const keepAccount = primary.provider_account_id || withAccount[0]?.provider_account_id || null;
+  if (!keepAccount) return { closed: 0, errors: [] };
+  const losers = [...new Set(withAccount.map(m => cleanId(m.provider_account_id)))].filter(id => id !== cleanId(keepAccount));
+  const errors = [], details = [];
+  const shulName = (id) => (id ? db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(id)?.name_en : null) || null;
+  let closed = 0, movedUnspent = 0;
+  for (const loserAccountId of losers) {
+    const loserMembers = withAccount.filter(m => cleanId(m.provider_account_id) === loserAccountId);
+    const rep = loserMembers[0];
+    try {
+      let spentOnLoser = 0, unspent = 0, committed = 0, found = false;
+      if (!giftcard.isMockMode(rep.season_id)) {
+        const live = await giftcard.getCustomerById(rep.season_id, loserAccountId, { balances: true, suppressNotFound: true });
+        if (live) {
+          found = true;
+          committed = live.amount != null ? Number(live.amount) : 0;
+          unspent = Math.round((live.packages || []).reduce((s, p) => s + (Number(p.balance) || 0), 0) * 100) / 100;
+          spentOnLoser = Math.max(0, Math.round((committed - unspent) * 100) / 100);
+          await giftcard.updateCustomer(rep.season_id, loserAccountId, { isActive: false, externalId: live.external_id || rep.external_id });
+        }
+      }
+      details.push({
+        accountId: loserAccountId, memberName: `${rep.first_name || ''} ${rep.last_name || ''}`.trim(), shulName: shulName(rep.shul_id),
+        externalId: rep.external_id, foundOnProvider: found, committed: Math.round(committed * 100) / 100, alreadySpent: spentOnLoser, unspentMoved: unspent,
+      });
+      // Attribute the closed account's spend to its own members (first one
+      // carries it — the group SUM is what matters, see applicantBalance.js).
+      db.prepare(`UPDATE applicants SET merged_spend_adjustment = merged_spend_adjustment + ? WHERE id = ?`).run(spentOnLoser, rep.id);
+      db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id IN (${loserMembers.map(() => '?').join(',')})`).run(keepAccount, ...loserMembers.map(m => m.id));
+      db.prepare(`UPDATE cards SET status = 'deactivated', deactivated_at = datetime('now') WHERE applicant_id IN (${loserMembers.map(() => '?').join(',')}) AND status != 'deactivated'`).run(...loserMembers.map(m => m.id));
+      closed++; movedUnspent += unspent;
+    } catch (e) {
+      errors.push(`Account ${loserAccountId}: ${e.message}`);
+    }
+  }
+  // Every member (primary included, in case it had none) now points at the
+  // surviving account; push the group's new ledger total onto it.
+  db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE (id = ? OR merge_group_id = ?) AND (provider_account_id IS NULL OR provider_account_id = ?)`).run(keepAccount, primaryId, primaryId, keepAccount);
+  let newPrimaryTotal = null;
+  if (closed) {
+    const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
+    const anchor = db.prepare('SELECT * FROM applicants WHERE id = ?').get(primaryId);
+    if (discountId && anchor?.provider_account_id) {
+      try { newPrimaryTotal = (await creditGapToMatchLedger(orgId, anchor, discountId)).target ?? null; }
+      catch (e) { errors.push(`Re-push to the surviving account failed (will retry automatically): ${e.message}`); scheduleProviderEnforceSoon(orgId, `consolidation re-push failed for ${primaryId}`); }
+    }
+  }
+  return {
+    closed, movedUnspent: Math.round(movedUnspent * 100) / 100, keptAccountId: cleanId(keepAccount), errors, details,
+    primaryName: `${primary.first_name || ''} ${primary.last_name || ''}`.trim(), primaryShulName: shulName(primary.shul_id), newPrimaryTotal,
+  };
+}
+
 // One idempotent pass that enforces the whole rule end to end: every
 // approved, non-exempt applicant holds exactly one ACTIVE disccardpromos
 // customer (a merge group shares one, per ensureProviderAccount above);
