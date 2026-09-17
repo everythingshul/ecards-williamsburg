@@ -14,7 +14,7 @@ const router = Router();
 router.use(auth, requireRole('super_admin'));
 
 router.get('/recent', (req, res) => {
-  const hours = Math.min(168, Math.max(1, +req.query.hours || 48));
+  const hours = Math.min(720, Math.max(1, +req.query.hours || 48));
   res.json({ actions: getRecentActions(req.user.org_id, hours) });
 });
 

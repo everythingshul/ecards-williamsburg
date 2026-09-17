@@ -360,9 +360,9 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 // sweep would regress right back into one call per applicant, the exact
 // thing this eliminates; it'll show up next time the bulk pull catches up
 // (well within the 60-second cadence). An index build that fails outright
-// (network error, or mock mode) IS a safe per-season fallback to the old
-// one-call-per-applicant path, same "degrade to live lookups" convention
-// used everywhere else this file's index pattern is used.
+// (network error) SKIPS that season for this sweep — it never degrades to
+// one live call per applicant (see customerFor below for the incident that
+// rule comes from).
 export async function syncAllCards(orgId) {
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0`).all(orgId);
   const seasonIds = [...new Set(applicants.map(a => a.season_id))];
@@ -370,14 +370,19 @@ export async function syncAllCards(orgId) {
   for (const seasonId of seasonIds) {
     indexBySeason.set(seasonId, giftcard.isMockMode(seasonId) ? null : await giftcard.buildCustomerIndex(seasonId, { balances: true, transactions: true }));
   }
-  // undefined (index missing/failed for this season) preserves
-  // syncApplicantCards'/reconcileApplicantBalance's own live-fetch fallback;
-  // a real index in hand always resolves to either the matched customer or
-  // an explicit null ("confirmed absent this sweep") — see the function
-  // comment above for why a miss never triggers an extra live call.
+  // EMERGENCY FIX (2026-09-17): this sweep must NEVER make one live call per
+  // applicant. It used to hand `undefined` to syncApplicantCards/
+  // reconcileApplicantBalance for a season whose bulk index pull failed,
+  // which triggered their per-applicant live GET fallback — 2N calls to
+  // disccardpromos every 60 seconds for as long as the bulk pull kept
+  // failing. A failed index now means that season is SKIPPED this sweep
+  // (explicit null = "nothing to sync from", never "go look it up
+  // yourself"), reported via indexPullsFailed, and retried on the next
+  // sweep. The per-applicant live path remains only for the manual "Sync
+  // Now" click on a single card (syncOneCard), where there's no batch.
   const customerFor = (a) => {
     const index = indexBySeason.get(a.season_id);
-    return index ? (index.byExt.get(String(a.external_id)) ?? null) : undefined;
+    return index ? (index.byExt.get(String(a.external_id)) ?? null) : null;
   };
 
   // Real counts, surfaced in the "Sync All" toast (frontend/admin/cards.html)

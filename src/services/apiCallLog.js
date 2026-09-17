@@ -45,7 +45,7 @@ export function getApiCallLogs(orgId, { provider, success, search, hours, limit 
     params.push(like, like, like, like);
   }
   if (hours) { where += ` AND created_at >= datetime('now', ?)`; params.push(`-${Math.min(8760, Math.max(1, +hours))} hours`); }
-  return db.prepare(`SELECT * FROM provider_call_log ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, Math.min(2000, Math.max(1, +limit || 500)));
+  return db.prepare(`SELECT * FROM provider_call_log ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, Math.min(10000, Math.max(1, +limit || 500)));
 }
 
 // Called once at boot (index.js), same rhythm as requestLog's pruning — a

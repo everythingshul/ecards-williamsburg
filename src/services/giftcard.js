@@ -157,17 +157,27 @@ async function call(seasonId, path, opts = {}) {
   const method = opts.method || 'GET';
   const orgId = orgIdForSeason(seasonId);
   const started = Date.now();
+  // Every request gets a timeout (Node's fetch has none by default) — a
+  // hung disccardpromos response used to stall the whole sync sweep
+  // indefinitely. Callers pulling a heavy page (listAllCustomers with
+  // transactions=true) pass a longer timeoutMs.
+  const { timeoutMs = 45000, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(`${cfg.apiBase}${path}`, {
-      ...opts,
+      ...fetchOpts,
+      signal: controller.signal,
       headers: {
         'Authorization': `Token ${cfg.apiKey}`,
         'Content-Type': 'application/json',
-        ...(opts.headers || {}),
+        ...(fetchOpts.headers || {}),
       },
     });
   } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') e = new Error(`timed out after ${Math.round(timeoutMs / 1000)}s`);
     // The fetch itself threw — network failure, DNS, TLS, timeout — before
     // any HTTP response came back at all, distinct from the res.ok===false
     // branch below (a real response with a bad status). Still logged, so a
@@ -180,7 +190,8 @@ async function call(seasonId, path, opts = {}) {
   // Django-style backend with DEBUG off is typically a plain-text/HTML error
   // page, which res.json() can't parse. Read the raw text first so that case
   // still surfaces SOMETHING instead of silently collapsing to {}.
-  const rawText = await res.text();
+  let rawText;
+  try { rawText = await res.text(); } finally { clearTimeout(timer); }
   let body;
   try { body = rawText ? JSON.parse(rawText) : {}; } catch { body = {}; }
   if (!res.ok) {
@@ -619,13 +630,34 @@ export async function listAllCustomers(seasonId, { balances = false, transaction
   let path = `/org/customers/?page_size=500${qs ? `&${qs}` : ''}`;
   let reportedTotal = null;
   let pageCount = 0;
+  // Hardened (2026-09-17): the ONE bulk pull is what keeps every sweep from
+  // degrading into one call per customer, so it must not fail for a dumb
+  // reason. `next` is taken as pathname+search via URL parsing (a host
+  // spelled differently from apiBase — http vs https, trailing slash —
+  // used to survive the old string replace and produce a garbage URL);
+  // a self-linking `next` can't loop forever (page cap); and a heavy
+  // transactions=true page gets a generous per-request timeout instead of
+  // hanging the sweep indefinitely.
+  const MAX_PAGES = 200;
   while (path) {
     pageCount++;
-    const body = await call(seasonId, path);
-    results = results.concat(body.results || body.data || []);
+    if (pageCount > MAX_PAGES) throw new Error(`listAllCustomers: more than ${MAX_PAGES} pages — pagination 'next' appears to loop`);
+    const body = await call(seasonId, path, { timeoutMs: 120000 });
+    const page = Array.isArray(body) ? body : (body.results || body.data || []);
+    results = results.concat(page);
     if (reportedTotal == null && typeof body.count === 'number') reportedTotal = body.count;
-    const next = body.next || null;
-    path = next ? next.replace(cfg.apiBase, '') : null;
+    const next = Array.isArray(body) ? null : (body.next || null);
+    if (!next) { path = null; continue; }
+    if (next.startsWith(cfg.apiBase)) path = next.slice(cfg.apiBase.length);
+    else {
+      try {
+        const u = new URL(next, cfg.apiBase);
+        const basePath = new URL(cfg.apiBase).pathname.replace(/\/$/, '');
+        path = u.pathname + u.search;
+        if (basePath && path.startsWith(basePath)) path = path.slice(basePath.length);
+      } catch { path = next; }
+    }
+    if (!path.startsWith('/')) path = '/' + path;
   }
   console.log(`[giftcard] listAllCustomers: fetched ${results.length} customer(s) across ${pageCount} page(s)${reportedTotal != null ? `, disccardpromos reported ${reportedTotal} total` : ''}`);
   if (reportedTotal != null && results.length < reportedTotal) {

@@ -19,13 +19,14 @@ function buildWhere(req) {
   if (status) { where += ' AND status_code = ?'; params.push(+status); }
   if (user_id) { where += ' AND user_id = ?'; params.push(user_id); }
   if (path) { where += ' AND path LIKE ?'; params.push(`%${path}%`); }
-  if (hours) { where += ` AND created_at >= datetime('now', ?)`; params.push(`-${Math.min(168, Math.max(1, +hours))} hours`); }
+  if (hours) { where += ` AND created_at >= datetime('now', ?)`; params.push(`-${Math.min(720, Math.max(1, +hours))} hours`); }
   return { where, params };
 }
 
 router.get('/', (req, res) => {
   const { where, params } = buildWhere(req);
-  const rows = db.prepare(`SELECT * FROM api_request_logs ${where} ORDER BY created_at DESC LIMIT 500`).all(...params);
+  const limit = Math.min(10000, Math.max(1, +req.query.limit || 500));
+  const rows = db.prepare(`SELECT * FROM api_request_logs ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, limit);
   res.json({ logs: rows });
 });
 

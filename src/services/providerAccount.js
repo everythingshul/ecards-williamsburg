@@ -252,6 +252,10 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
   job.total = applicants.length;
   const isMock = giftcard.isMockMode(seasonId);
   const index = isMock ? null : await giftcard.buildCustomerIndex(seasonId);
+  // Same rule as runProviderEnforce: a failed bulk pull ends the audit
+  // rather than reasoning from an empty list (which would report every
+  // applicant as "not found" and could relink/orphan on bad data).
+  if (!isMock && !index) throw new Error('disccardpromos bulk customer list pull failed — audit aborted (never falls back to one call per applicant). See Logs > Provider Calls for the failed request.');
   const allCustomers = index?.list || [];
   // cleanId here (not the index's own normalizeCustomerId-keyed maps
   // directly) since this function's ids come from applicants.provider_account_id,
@@ -473,6 +477,19 @@ export async function runProviderEnforce(orgId, seasonId, job = { progress: 0, t
   // "no index" for that one lookup) — nothing depends on this index staying
   // perfectly fresh through the whole run.
   const index = isMock ? null : await giftcard.buildCustomerIndex(seasonId);
+  // EMERGENCY FIX (2026-09-17): if the ONE bulk customer pull fails, this
+  // job must stop here — not continue into ensureProviderAccount with no
+  // index, where every approved applicant would trigger its own live
+  // existence GET (and, worse, a miss would be treated as "create a new
+  // customer"). Reported as a failed run; the scheduler retries later.
+  if (!isMock && !index) {
+    return {
+      ourApprovedCount: approved.length, theirActiveCount: null, mockMode: false,
+      accountsCreated: 0, accountsDeactivated: 0, fundsErrors: [], mismatches: [],
+      bulkCustomerPull: false, customersInBulkPull: null, accountExistenceCallsAvoided: 0,
+      error: 'disccardpromos bulk customer list pull failed — nothing was checked or written this run (never falls back to one call per applicant). See Logs > Provider Calls for the failed request.',
+    };
+  }
 
   const mismatches = [];
   const createdApplicantIds = new Set();
