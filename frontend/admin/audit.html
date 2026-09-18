@@ -47,23 +47,30 @@ renderShell('/admin/audit', `
         <option value="168">Last 7 days</option>
         <option value="720">Last 30 days</option>
       </select>
-      <select id="al-limit" title="How many of the most recent matching requests to show">
-        <option value="500">500 rows</option>
-        <option value="2000" selected>2,000 rows</option>
-        <option value="5000">5,000 rows</option>
-        <option value="10000">10,000 rows</option>
+      <select id="al-limit" title="Rows per page">
+        <option value="100">100 per page</option>
+        <option value="250" selected>250 per page</option>
+        <option value="500">500 per page</option>
+        <option value="1000">1,000 per page</option>
       </select>
-      <button class="btn btn-outline btn-sm" onclick="loadApiRequests()">Filter</button>
+      <button class="btn btn-outline btn-sm" onclick="loadApiRequests(0)">Filter</button>
       <button class="btn btn-outline btn-sm" onclick="downloadAuthed('/logs/export?' + apiRequestParams(), 'api-logs.xlsx')">Export</button>
     </div>
-    <p class="small-muted" id="al-count-note">Showing the most recent matching requests, newest first — raise the row count, narrow the filters, or use Export for a full range.</p>
+    <div class="toolbar" style="justify-content:space-between;align-items:center">
+      <p class="small-muted" id="al-count-note" style="margin:0">Loading…</p>
+      <div>
+        <button class="btn btn-outline btn-sm" id="al-prev" onclick="loadApiRequests(alPage - 1)">‹ Prev</button>
+        <span class="small-muted" id="al-page-label" style="margin:0 8px"></span>
+        <button class="btn btn-outline btn-sm" id="al-next" onclick="loadApiRequests(alPage + 1)">Next ›</button>
+      </div>
+    </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>User</th><th>IP</th></tr></thead>
       <tbody id="tbody-apirequests"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
   <div id="panel-providercalls" style="display:none">
-    <p class="small-muted">Every outbound HTTP request this app made to a third-party provider (disccardpromos, email, SMS) — the reverse of API Requests above. This is where a batching fix like "one bulk pull instead of one call per applicant" is visible: filter to disccardpromos during a mass-approve or the automatic sync and count the calls. Never includes API keys or full card numbers. Rows older than 30 days are pruned automatically.</p>
+    <p class="small-muted">Every outbound HTTP request this app made to a third-party provider (disccardpromos, email, SMS) — the reverse of API Requests above. This is where a batching fix like "one bulk pull instead of one call per applicant" is visible: filter to disccardpromos during a mass-approve or the automatic sync and count the calls. Never includes API keys or full card numbers. Every call is kept for 7 days, then pruned automatically — page through them below.</p>
     <div class="toolbar">
       <select id="pc-provider"><option value="">All Providers</option><option value="disccardpromos">disccardpromos</option><option value="email">Email</option><option value="sms">SMS</option></select>
       <select id="pc-success"><option value="">All Results</option><option value="1">Success</option><option value="0">Failed</option></select>
@@ -71,18 +78,24 @@ renderShell('/admin/audit', `
       <select id="pc-hours">
         <option value="1">Last hour</option>
         <option value="24" selected>Last 24 hours</option>
-        <option value="168">Last 7 days</option>
-        <option value="720">Last 30 days</option>
+        <option value="168">Last 7 days (everything kept)</option>
       </select>
-      <select id="pc-limit" title="How many of the most recent matching calls to show">
-        <option value="500">500 rows</option>
-        <option value="2000" selected>2,000 rows</option>
-        <option value="5000">5,000 rows</option>
-        <option value="10000">10,000 rows</option>
+      <select id="pc-limit" title="Rows per page">
+        <option value="100">100 per page</option>
+        <option value="250" selected>250 per page</option>
+        <option value="500">500 per page</option>
+        <option value="1000">1,000 per page</option>
       </select>
-      <button class="btn btn-outline btn-sm" onclick="loadProviderCalls()">Filter</button>
+      <button class="btn btn-outline btn-sm" onclick="loadProviderCalls(0)">Filter</button>
     </div>
-    <p class="small-muted" id="pc-count-note">Showing the most recent matching calls, newest first — raise the row count or narrow the filters as needed.</p>
+    <div class="toolbar" style="justify-content:space-between;align-items:center">
+      <p class="small-muted" id="pc-count-note" style="margin:0">Loading…</p>
+      <div>
+        <button class="btn btn-outline btn-sm" id="pc-prev" onclick="loadProviderCalls(pcPage - 1)">‹ Prev</button>
+        <span class="small-muted" id="pc-page-label" style="margin:0 8px"></span>
+        <button class="btn btn-outline btn-sm" id="pc-next" onclick="loadProviderCalls(pcPage + 1)">Next ›</button>
+      </div>
+    </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Time</th><th>Provider</th><th>Method</th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead>
       <tbody id="tbody-providercalls"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table>
@@ -268,8 +281,24 @@ window.reverseShulAllocation = async (allocationId) => {
 qs('#f-hours').addEventListener('change', load);
 load();
 
+// Shared pager rendering — `total` comes from the server (full match count
+// for the current filters), so "page N of M" is exact even when the table
+// holds far more rows than one page.
+function renderPager(prefix, page, pageSize, total, shown) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const first = total ? page * pageSize + 1 : 0;
+  const last = page * pageSize + shown;
+  qs(`#${prefix}-page-label`).textContent = `Page ${page + 1} of ${pages.toLocaleString()}`;
+  qs(`#${prefix}-prev`).disabled = page <= 0;
+  qs(`#${prefix}-next`).disabled = page + 1 >= pages;
+  return total
+    ? `Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()} matching ${prefix === 'al' ? 'request' : 'call'}${total === 1 ? '' : 's'}, newest first.`
+    : `No ${prefix === 'al' ? 'requests' : 'calls'} match these filters.`;
+}
+
 // ============================= API Requests tab =============================
-function apiRequestParams() {
+let alPage = 0;
+function apiRequestParams(page) {
   const p = {};
   const method = qs('#al-method').value, status = qs('#al-status').value, path = qs('#al-path').value.trim(), hours = qs('#al-hours').value, limit = qs('#al-limit').value;
   if (method) p.method = method;
@@ -277,16 +306,15 @@ function apiRequestParams() {
   if (path) p.path = path;
   if (hours) p.hours = hours;
   if (limit) p.limit = limit;
+  if (page != null) p.offset = page * (+limit || 250);
   return new URLSearchParams(p).toString();
 }
-window.loadApiRequests = async () => {
+window.loadApiRequests = async (page = 0) => {
+  alPage = Math.max(0, page);
   qs('#tbody-apirequests').innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
   try {
-    const { logs } = await api('/logs?' + apiRequestParams());
-    const cap = +qs('#al-limit').value;
-    qs('#al-count-note').textContent = logs.length >= cap
-      ? `Showing the ${cap.toLocaleString()} most recent matching requests — there are more; raise the row count, narrow the filters, or use Export for the full range.`
-      : `Showing all ${logs.length.toLocaleString()} matching request${logs.length === 1 ? '' : 's'} in this window, newest first.`;
+    const { logs, total, limit: pageSize } = await api('/logs?' + apiRequestParams(alPage));
+    qs('#al-count-note').textContent = renderPager('al', alPage, pageSize, total, logs.length);
     qs('#tbody-apirequests').innerHTML = logs.length ? logs.map(l => `<tr>
       <td>${fmtDateTime(l.created_at)}</td>
       <td>${esc(l.method)}</td>
@@ -301,7 +329,8 @@ window.loadApiRequests = async () => {
 
 // ============================= Provider Calls tab =============================
 let providerCallRows = [];
-function providerCallParams() {
+let pcPage = 0;
+function providerCallParams(page) {
   const p = {};
   const provider = qs('#pc-provider').value, success = qs('#pc-success').value, search = qs('#pc-search').value.trim(), hours = qs('#pc-hours').value, limit = qs('#pc-limit').value;
   if (provider) p.provider = provider;
@@ -309,17 +338,16 @@ function providerCallParams() {
   if (search) p.search = search;
   if (hours) p.hours = hours;
   if (limit) p.limit = limit;
+  if (page != null) p.offset = page * (+limit || 250);
   return new URLSearchParams(p).toString();
 }
-window.loadProviderCalls = async () => {
+window.loadProviderCalls = async (page = 0) => {
+  pcPage = Math.max(0, page);
   qs('#tbody-providercalls').innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
   try {
-    const { logs } = await api('/audit/provider-calls?' + providerCallParams());
+    const { logs, total, limit: pageSize } = await api('/audit/provider-calls?' + providerCallParams(pcPage));
     providerCallRows = logs;
-    const cap = +qs('#pc-limit').value;
-    qs('#pc-count-note').textContent = logs.length >= cap
-      ? `Showing the ${cap.toLocaleString()} most recent matching calls — there are more; raise the row count or narrow the filters to see the rest.`
-      : `Showing all ${logs.length.toLocaleString()} matching call${logs.length === 1 ? '' : 's'} in this window, newest first.`;
+    qs('#pc-count-note').textContent = renderPager('pc', pcPage, pageSize, total, logs.length);
     qs('#tbody-providercalls').innerHTML = logs.length ? logs.map((l, i) => `<tr style="cursor:pointer" onclick="showProviderCallDetail(${i})">
       <td>${fmtDateTime(l.created_at)}</td>
       <td>${esc(l.provider)}</td>

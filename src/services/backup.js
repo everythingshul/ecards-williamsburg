@@ -12,7 +12,7 @@
 // they can save wherever they want, on demand.
 // ---------------------------------------------------------------------------
 import { join } from 'path';
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, statSync, statfsSync, unlinkSync } from 'fs';
 import { db, DATA_DIR } from '../db.js';
 
 export const BACKUP_DIR = join(DATA_DIR, 'backups');
@@ -20,9 +20,12 @@ if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
 
 // Retention is a count, not a time window, deliberately — this disk is only
 // 1GB total (shared with uploaded contracts/logos/attachments), so an
-// unbounded time-based policy risks filling it if the DB ever grows. 12
-// snapshots at the default 4-hour interval covers 48 hours of history.
-const RETENTION_COUNT = +process.env.BACKUP_RETENTION_COUNT || 12;
+// unbounded time-based policy risks filling it if the DB ever grows.
+// INCIDENT (2026-09-17): 12 full copies of a database that had swelled with
+// log rows was the single biggest thing on the disk. Default is now 3
+// snapshots (12 hours at the 4-hour interval), and runBackup below refuses
+// to write when the disk can't comfortably hold another full copy.
+const RETENTION_COUNT = +process.env.BACKUP_RETENTION_COUNT || 3;
 const FILENAME_RE = /^ecards-(\d{8}-\d{6})\.sqlite$/;
 
 function backupFilename(d = new Date()) {
@@ -35,6 +38,25 @@ function backupFilename(d = new Date()) {
 // torn/inconsistent snapshot mid-write; .backup() is the safe way to do this
 // while the app keeps serving requests.
 export async function runBackup() {
+  // Rotate BEFORE writing (not after) so the oldest copy's space is free
+  // for the new one, then refuse outright if the disk still can't hold
+  // another full copy with room to spare — a backup must never be the
+  // write that fills the disk and takes the live app down with it.
+  pruneOldBackups();
+  const dbPath = join(DATA_DIR, 'ecards.sqlite');
+  try {
+    const dbBytes = statSync(dbPath).size;
+    const fs = statfsSync(DATA_DIR);
+    const freeBytes = Number(fs.bavail) * Number(fs.bsize);
+    if (freeBytes < dbBytes * 1.5) {
+      const mb = (n) => (n / 1048576).toFixed(0);
+      throw new Error(`skipped — only ${mb(freeBytes)} MB free on the data disk, database is ${mb(dbBytes)} MB; not enough room for another full copy`);
+    }
+  } catch (e) {
+    if (String(e.message).startsWith('skipped')) throw e;
+    // statfs unsupported or stat failed — don't block backups on a
+    // diagnostic we couldn't take.
+  }
   const path = join(BACKUP_DIR, backupFilename());
   await db.backup(path);
   pruneOldBackups();

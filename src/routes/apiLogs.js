@@ -25,9 +25,14 @@ function buildWhere(req) {
 
 router.get('/', (req, res) => {
   const { where, params } = buildWhere(req);
+  // Paginated — `limit` is the page size, `offset` the rows to skip, and
+  // `total` is the full match count so the UI can page through everything
+  // in the retention window rather than only the newest slice.
   const limit = Math.min(10000, Math.max(1, +req.query.limit || 500));
-  const rows = db.prepare(`SELECT * FROM api_request_logs ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, limit);
-  res.json({ logs: rows });
+  const offset = Math.max(0, +req.query.offset || 0);
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM api_request_logs ${where}`).get(...params).n;
+  const rows = db.prepare(`SELECT * FROM api_request_logs ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
+  res.json({ logs: rows, total, limit, offset });
 });
 
 // Full detail, no 500-row cap — same "Export CSV/XLSX, no pagination"

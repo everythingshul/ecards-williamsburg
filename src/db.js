@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, statSync, statfsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { normalizePhone } from './utils/phone.js';
@@ -762,6 +762,87 @@ CREATE INDEX IF NOT EXISTS idx_shul_allocations_shul ON shul_allocations(shul_id
 CREATE INDEX IF NOT EXISTS idx_shul_allocations_applicant ON shul_allocations(applicant_id);
 CREATE INDEX IF NOT EXISTS idx_shul_allocations_season ON shul_allocations(season_id);
 `);
+
+// EMERGENCY SPACE RECOVERY — runs BEFORE any migration below, every boot.
+// INCIDENT (2026-09-17): a burst of one-call-per-customer provider traffic
+// (see services/cardSync.js's customerFor) filled the disk with
+// provider_call_log rows; the next deploy then crash-looped at boot on the
+// first data-fix UPDATE below with SQLITE_FULL, and since the pruning jobs
+// only start after boot, nothing could ever free space again. Deleting
+// rows frees pages INSIDE the database file (no OS-level space needed)
+// that every later write reuses. Small batches so each fits in the WAL
+// space that already exists, and a RESTART checkpoint (not TRUNCATE —
+// that would shrink the WAL to zero and force it to grow again on a full
+// disk) between batches so the WAL is rewound rather than extended.
+// Best-effort and idempotent: on a healthy disk this is a cheap no-op past
+// the retention window; if even a small batch can't be written the only
+// remaining fix is more disk, and that's logged plainly.
+function emergencyLogPrune() {
+  const targets = [
+    // table, keep-days, keep-newest-rows cap
+    ['provider_call_log', 7, 100000],
+    ['api_request_logs', 14, 100000],
+  ];
+  let freed = 0;
+  for (const [table, days, cap] of targets) {
+    try {
+      db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get();
+    } catch { continue; } // table not created yet on a brand-new DB
+    for (let i = 0; i < 500; i++) {
+      let n = 0;
+      try {
+        n = db.prepare(`DELETE FROM ${table} WHERE rowid IN (
+            SELECT rowid FROM ${table} WHERE created_at < datetime('now', ?) LIMIT 2000)`).run(`-${days} days`).changes;
+        if (!n) {
+          n = db.prepare(`DELETE FROM ${table} WHERE rowid IN (
+              SELECT rowid FROM ${table} ORDER BY created_at DESC LIMIT 2000 OFFSET ?)`).run(cap).changes;
+        }
+        if (n) { freed += n; try { db.pragma('wal_checkpoint(RESTART)'); } catch {} }
+      } catch (e) {
+        console.error(`[db] emergency prune of ${table} failed (${e.code || e.message}) — if this is SQLITE_FULL, the persistent disk needs to be enlarged; nothing here can free space without a writable journal.`);
+        break;
+      }
+      if (!n) break;
+    }
+  }
+  if (freed) console.log(`[db] emergency prune freed ${freed} log row(s) before migrations`);
+}
+emergencyLogPrune();
+
+// Deleting rows never shrinks the SQLite file itself — freed pages stay
+// inside it (on the freelist) until a VACUUM rewrites the file. That is
+// fine for the database (it reuses them) but not for the disk: a file that
+// swelled to hundreds of MB during the incident stays that size forever,
+// and every backup copies the swollen file, not the live rows. So once the
+// prune has run, shrink the file back down — but only when it's worth it
+// (more than ~50MB reclaimable) AND the disk can hold VACUUM's temporary
+// full copy with room to spare (it needs up to 2x the file's size while it
+// runs; attempting it on a nearly-full disk is exactly the SQLITE_FULL we
+// just recovered from). Skipped silently otherwise. This runs at most once
+// per boot, before the app starts serving.
+function shrinkDatabaseFile() {
+  try {
+    const pageSize = db.pragma('page_size', { simple: true });
+    const freePages = db.pragma('freelist_count', { simple: true });
+    const reclaimable = Number(pageSize) * Number(freePages);
+    if (reclaimable < 50 * 1048576) return;
+    const dbBytes = statSync(join(DATA_DIR, 'ecards.sqlite')).size;
+    const fs = statfsSync(DATA_DIR);
+    const freeBytes = Number(fs.bavail) * Number(fs.bsize);
+    const mb = (n) => (n / 1048576).toFixed(0);
+    if (freeBytes < dbBytes * 1.5) {
+      console.warn(`[db] ${mb(reclaimable)} MB reclaimable inside the ${mb(dbBytes)} MB database, but only ${mb(freeBytes)} MB free on the disk — VACUUM needs room for a temporary full copy, so it's skipped. Free disk space (old backups in ${join(DATA_DIR, 'backups')} are the usual culprit) or enlarge the disk, then restart.`);
+      return;
+    }
+    console.log(`[db] reclaiming ${mb(reclaimable)} MB from the database file (VACUUM) …`);
+    db.exec('VACUUM');
+    try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+    console.log(`[db] database file is now ${mb(statSync(join(DATA_DIR, 'ecards.sqlite')).size)} MB`);
+  } catch (e) {
+    console.error('[db] VACUUM skipped:', e.code || e.message);
+  }
+}
+shrinkDatabaseFile();
 
 // Guarded additive migrations (safe to re-run; never destructive).
 function safeAlter(sql) { try { db.exec(sql); } catch (e) { /* column already exists */ } }

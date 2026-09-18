@@ -75,7 +75,10 @@ function defaultReplyTo(orgId) {
 
 // orgId param kept for call-site compatibility but no longer used to look up
 // per-org credentials — see note above. Every email uses the single platform account.
-export async function sendMail(orgId, to, subject, bodyHtml, replyTo) {
+// `attachments` (optional): [{ name, content }] with content base64-encoded —
+// Brevo's transactional attachment shape. Used by services/offsiteBackup.js
+// for the nightly emailed database copy; nothing else attaches files.
+export async function sendMail(orgId, to, subject, bodyHtml, replyTo, attachments) {
   const cfg = CONFIG;
   const brand = brandFor();
   const html = wrap(bodyHtml, brand);
@@ -95,6 +98,7 @@ export async function sendMail(orgId, to, subject, bodyHtml, replyTo) {
       subject,
       htmlContent: html,
       ...(effectiveReplyTo ? { replyTo: { email: effectiveReplyTo } } : {}),
+      ...(attachments?.length ? { attachment: attachments.map(a => ({ name: a.name, content: a.content })) } : {}),
     }),
   });
   const requestSummary = `To: ${to} | Subject: ${subject}`;
@@ -126,7 +130,7 @@ export async function sendMail(orgId, to, subject, bodyHtml, replyTo) {
 export async function sendMailChecked(orgId, to, subject, bodyHtml, meta = {}) {
   let status = 'sent', emailError = null;
   try {
-    const result = await sendMail(orgId, to, subject, bodyHtml, meta.replyTo);
+    const result = await sendMail(orgId, to, subject, bodyHtml, meta.replyTo, meta.attachments);
     if (result?.dryRun) { status = 'dry_run'; emailError = 'Email provider not configured (BREVO_API_KEY missing). No email was actually sent.'; }
   } catch (e) {
     status = 'failed'; emailError = e.message;

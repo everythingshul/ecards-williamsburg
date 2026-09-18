@@ -22,8 +22,8 @@ router.get('/recent', (req, res) => {
 // services/apiCallLog.js. Distinct from GET /api/logs (routes/apiLogs.js),
 // which tracks the opposite direction (requests THIS app received).
 router.get('/provider-calls', (req, res) => {
-  const { provider, success, search, hours, limit } = req.query;
-  res.json({ logs: getApiCallLogs(req.user.org_id, { provider, success, search, hours, limit }) });
+  const { provider, success, search, hours, limit, offset } = req.query;
+  res.json(getApiCallLogs(req.user.org_id, { provider, success, search, hours, limit, offset }));
 });
 
 router.post('/:id/undo', (req, res) => {

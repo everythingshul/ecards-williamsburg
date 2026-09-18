@@ -47,11 +47,22 @@ export function requestLog(db) {
 // anything older than the retention window daily. 30 days is a starting
 // default, not a considered policy — an admin who wants a different window
 // should say so.
-export function startRequestLogPruning(db, retentionDays = 30) {
+// Hourly, 14 days, capped at the newest 100,000 rows, batched with a WAL
+// RESTART checkpoint between batches — same hardening as
+// services/apiCallLog.js after the 2026-09-17 disk-full incident.
+export function startRequestLogPruning(db, retentionDays = 14, maxRows = 100000) {
   const prune = () => {
-    try { db.prepare(`DELETE FROM api_request_logs WHERE created_at < datetime('now', ?)`).run(`-${retentionDays} days`); }
-    catch (e) { console.error('[requestLog] prune failed:', e.message); }
+    try {
+      for (let i = 0; i < 200; i++) {
+        let n = db.prepare(`DELETE FROM api_request_logs WHERE rowid IN (
+            SELECT rowid FROM api_request_logs WHERE created_at < datetime('now', ?) LIMIT 2000)`).run(`-${retentionDays} days`).changes;
+        if (!n) n = db.prepare(`DELETE FROM api_request_logs WHERE rowid IN (
+            SELECT rowid FROM api_request_logs ORDER BY created_at DESC LIMIT 2000 OFFSET ?)`).run(maxRows).changes;
+        if (!n) break;
+        try { db.pragma('wal_checkpoint(RESTART)'); } catch {}
+      }
+    } catch (e) { console.error('[requestLog] prune failed:', e.message); }
   };
   setTimeout(prune, 60 * 1000);
-  setInterval(prune, 24 * 60 * 60 * 1000);
+  setInterval(prune, 60 * 60 * 1000);
 }

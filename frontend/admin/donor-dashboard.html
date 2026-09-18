@@ -56,6 +56,22 @@
   .expand-panel > summary:hover { background: var(--brand-panel-2); }
   .expand-panel-body { border-top: 1px solid var(--border); overflow-x: auto; }
   .expand-panel-body table td, .expand-panel-body table th { font-variant-numeric: tabular-nums; }
+
+  /* Stores panel: segmented sort control in the panel body + a share bar
+     per row (one categorical series, so one color — the bar shows
+     proportion, not identity). */
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: var(--brand-panel); }
+  .seg button { border: 0; background: transparent; padding: 6px 14px; font: inherit; font-size: 12.5px; color: var(--text-muted); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.on { background: var(--brand-gold); color: var(--text-on-gold, #fff); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--brand-gold); outline-offset: -2px; }
+  .store-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 24px 6px; }
+  .share-cell { min-width: 160px; }
+  .share-bar { height: 8px; border-radius: 999px; background: var(--brand-panel-2); overflow: hidden; }
+  .share-bar > i { display: block; height: 100%; background: var(--viz-2); border-radius: 999px; }
+  .share-pct { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+  .store-rank { color: var(--text-muted); font-size: 12px; width: 28px; }
+  .store-total-row td { font-weight: 600; border-top: 2px solid var(--border); }
 </style>
 </head>
 <body>
@@ -114,6 +130,22 @@ renderShell('/admin/donor-dashboard', `
     <div class="expand-panel-body">
       <table><thead><tr><th>Shul</th><th>Shul (Hebrew)</th><th>Gabai</th><th>Applicants</th><th>Approved Money</th></tr></thead>
       <tbody id="tbody-donor-shuls"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody></table>
+    </div>
+  </details>
+
+  <details class="card expand-panel" style="margin-top:16px" id="panel-stores">
+    <summary>Stores <span class="small-muted" id="stores-summary-count" style="font-weight:400"></span><span class="chev">&#9656;</span></summary>
+    <div class="expand-panel-body">
+      <div class="store-toolbar">
+        <span class="small-muted">What's been spent at each participating store, net of refunds.</span>
+        <div class="seg" role="group" aria-label="Sort stores">
+          <button type="button" data-sort="high" class="on" onclick="sortStores('high')">Highest first</button>
+          <button type="button" data-sort="low" onclick="sortStores('low')">Lowest first</button>
+          <button type="button" data-sort="name" onclick="sortStores('name')">A–Z</button>
+        </div>
+      </div>
+      <table><thead><tr><th style="width:28px"></th><th>Store</th><th>Status</th><th>Purchases</th><th>Total Spent</th><th class="share-cell">Share of Spend</th></tr></thead>
+      <tbody id="tbody-donor-stores"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </details>
 
@@ -327,6 +359,47 @@ async function loadDonorShuls() {
       <td>${fmtMoney(s.approvedMoney)}</td>
     </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No shuls yet.</td></tr>';
 }
+let storeRows = [], storeUnmatched = null, storeGrand = 0, storeSort = 'high';
+const STORE_STATUS = { active: ['Active', 'active'], pending: ['Onboarding', 'pending'], in_progress: ['Onboarding', 'pending'], inactive: ['Inactive', 'rejected'] };
+async function loadDonorStores() {
+  const season_id = qs('#f-season').value;
+  const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
+  const { stores, unmatched, grandTotal } = await api('/donor-dashboard/stores' + qp);
+  storeRows = stores; storeUnmatched = unmatched; storeGrand = grandTotal;
+  qs('#stores-summary-count').textContent = `(${stores.length} · ${fmtMoney(grandTotal)} spent)`;
+  renderStores();
+}
+window.sortStores = (mode) => {
+  storeSort = mode;
+  document.querySelectorAll('.seg [data-sort]').forEach(b => b.classList.toggle('on', b.dataset.sort === mode));
+  renderStores();
+};
+function renderStores() {
+  const rows = [...storeRows];
+  if (storeSort === 'high') rows.sort((a, b) => b.totalSpent - a.totalSpent || a.name.localeCompare(b.name));
+  else if (storeSort === 'low') rows.sort((a, b) => a.totalSpent - b.totalSpent || a.name.localeCompare(b.name));
+  else rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  const max = Math.max(0, ...storeRows.map(r => r.totalSpent));
+  const pct = (v) => storeGrand > 0 ? (v / storeGrand) * 100 : 0;
+  const bar = (v) => `<div class="share-bar"><i style="width:${max > 0 ? Math.round((v / max) * 100) : 0}%"></i></div><div class="share-pct">${pct(v).toFixed(1)}%</div>`;
+  const body = rows.map((r, i) => {
+    const [label, tone] = STORE_STATUS[r.status] || [r.status || '—', 'pending'];
+    return `<tr>
+      <td class="store-rank">${storeSort === 'name' ? '' : i + 1}</td>
+      <td><strong>${esc(r.name)}</strong></td>
+      <td>${badge(label, tone)}</td>
+      <td>${r.purchaseCount.toLocaleString()}</td>
+      <td>${fmtMoney(r.totalSpent)}</td>
+      <td class="share-cell">${bar(r.totalSpent)}</td>
+    </tr>`;
+  });
+  if (storeUnmatched && storeUnmatched.totalSpent > 0) body.push(`<tr>
+      <td></td><td><span class="small-muted">Other vendors (not yet linked to a store)</span></td><td></td>
+      <td>${storeUnmatched.transactionCount.toLocaleString()}</td><td>${fmtMoney(storeUnmatched.totalSpent)}</td>
+      <td class="share-cell">${bar(storeUnmatched.totalSpent)}</td></tr>`);
+  body.push(`<tr class="store-total-row"><td></td><td>Total</td><td></td><td></td><td>${fmtMoney(storeGrand)}</td><td></td></tr>`);
+  qs('#tbody-donor-stores').innerHTML = storeRows.length ? body.join('') : '<tr><td colspan="6" class="empty-state">No stores yet.</td></tr>';
+}
 async function loadDonorTransactions() {
   const season_id = qs('#f-season').value;
   const qp = season_id ? `?season_id=${encodeURIComponent(season_id)}` : '';
@@ -339,13 +412,15 @@ async function loadDonorTransactions() {
       <td>${t.storeName ? esc(t.storeName) : '<span class="small-muted">—</span>'}</td>
     </tr>`).join('') : '<tr><td colspan="4" class="empty-state">No transactions yet.</td></tr>';
 }
-let shulsPanelLoaded = false, txnsPanelLoaded = false;
+let shulsPanelLoaded = false, txnsPanelLoaded = false, storesPanelLoaded = false;
 qs('#panel-shuls').addEventListener('toggle', (e) => { if (e.target.open && !shulsPanelLoaded) { shulsPanelLoaded = true; loadDonorShuls(); } });
+qs('#panel-stores').addEventListener('toggle', (e) => { if (e.target.open && !storesPanelLoaded) { storesPanelLoaded = true; loadDonorStores(); } });
 qs('#panel-transactions').addEventListener('toggle', (e) => { if (e.target.open && !txnsPanelLoaded) { txnsPanelLoaded = true; loadDonorTransactions(); } });
 
 qs('#f-season').addEventListener('change', () => {
   loadDonorDashboard(); loadDailyTrend();
   if (shulsPanelLoaded) loadDonorShuls();
+  if (storesPanelLoaded) loadDonorStores();
   if (txnsPanelLoaded) loadDonorTransactions();
 });
 qs('#f-days').addEventListener('change', loadDailyTrend);

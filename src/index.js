@@ -19,6 +19,7 @@ import { syncAllCards } from './services/cardSync.js';
 import { startProviderEnforceScheduler } from './services/providerAccount.js';
 import { syncInboundSms, getOwnSmsNumber } from './services/sms.js';
 import { runBackup } from './services/backup.js';
+import { startNightlyProtection } from './services/offsiteBackup.js';
 import { db, DEFAULT_ORG_ID } from './db.js';
 import { requestLog, startRequestLogPruning } from './middleware/requestLog.js';
 import { startProviderCallLogPruning } from './services/apiCallLog.js';
@@ -266,3 +267,9 @@ setTimeout(() => { syncInboundSms(DEFAULT_ORG_ID, getOwnSmsNumber(DEFAULT_ORG_ID
 const BACKUP_INTERVAL_MS = 4 * 60 * 60 * 1000;
 setInterval(() => { runBackup().catch(e => console.error('[backup] failed', e.message)); }, BACKUP_INTERVAL_MS);
 setTimeout(() => { runBackup().catch(e => console.error('[backup] failed', e.message)); }, 30 * 1000);
+// Off-site copies (services/offsiteBackup.js): every night at midnight New
+// York time, a gzip'd copy of the database is EMAILED to the backup
+// address (Settings > Backups), and — when BACKUP_S3_* is configured — the
+// database plus a full archive of every uploaded file is pushed to a cloud
+// bucket. Catches up at boot if today's run was missed, retries hourly.
+startNightlyProtection();

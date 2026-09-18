@@ -5,6 +5,7 @@ import { requirePermission } from '../middleware/permissions.js';
 import { isMockMode, getCustomerByExternalId } from '../services/giftcard.js';
 import { SYSTEM_EMAIL_TEMPLATES } from '../services/mail.js';
 import { runBackup, listBackups, backupPath } from '../services/backup.js';
+import { protectionOverview, setBackupEmail, runNightlyProtection } from '../services/offsiteBackup.js';
 import { BUILTIN_SCHEMAS } from '../utils/builtinSchemas.js';
 import { SHUL_IMPORT_COLUMNS, APPLICANT_IMPORT_COLUMNS, STORE_IMPORT_COLUMNS } from '../services/importer.js';
 import { TEMPLATE_FLOOR_FIELDS } from '../utils/formValidation.js';
@@ -153,6 +154,28 @@ router.post('/backups/run', requireRole('super_admin'), async (req, res) => {
     const path = await runBackup();
     res.json({ ok: true, backups: listBackups(), created: path.split('/').pop() });
   } catch (e) { res.status(500).json({ error: `Backup failed: ${e.message}` }); }
+});
+
+// Off-site protection (services/offsiteBackup.js): the nightly emailed
+// copy + optional cloud-bucket upload. Same super_admin gate as the rest
+// of the backup surface.
+router.get('/backups/protection', requireRole('super_admin'), (req, res) => {
+  res.json(protectionOverview());
+});
+router.put('/backups/protection', requireRole('super_admin'), (req, res) => {
+  const email = String(req.body?.emailTo || '').trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'That is not a valid email address' });
+  setBackupEmail(email);
+  res.json({ ok: true, ...protectionOverview() });
+});
+// Runs the whole nightly routine right now (snapshot → email → bucket).
+// Can take a while on a large database, so the request stays open until
+// it's done and returns the full status.
+router.post('/backups/protection/run', requireRole('super_admin'), async (req, res) => {
+  try {
+    const status = await runNightlyProtection({ trigger: `manual by ${req.user.email}` });
+    res.json({ ok: status.ok, status, ...protectionOverview() });
+  } catch (e) { res.status(500).json({ error: `Off-site run failed: ${e.message}` }); }
 });
 
 router.get('/backups/:filename/download', requireRole('super_admin'), (req, res) => {

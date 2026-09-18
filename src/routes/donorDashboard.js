@@ -129,6 +129,39 @@ router.get('/shuls', (req, res) => {
   })) });
 });
 
+// Per-store rollup for the "Stores" expandable panel — EVERY store on
+// file (not just the top 5 the main Dashboard shows), with what's been
+// spent there net of refunds (same SUM expression as
+// services/applicantBalance.js / routes/dashboard.js), how many
+// purchases, and its share of all store spend. Season-scoped through the
+// card each transaction was made on (a store itself has no season).
+// Transactions whose vendor name never matched a store record are rolled
+// into one "unmatched" figure so the panel's total still equals the
+// headline Total Spent. Sorting is the client's job (the whole list is
+// small — tens of stores, never thousands).
+router.get('/stores', (req, res) => {
+  const orgId = req.user.org_id;
+  const seasonId = req.query.season_id || '';
+  const seasonClause = seasonId ? ' AND c.season_id = ?' : '';
+  const seasonParams = seasonId ? [seasonId] : [];
+  const NET = `COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END), 0)`;
+  const rows = db.prepare(`
+    SELECT s.id, s.name, s.setup_status,
+      (SELECT ${NET} FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE t.store_id = s.id${seasonClause}) total_spent,
+      (SELECT COUNT(*) FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE t.store_id = s.id AND t.type != 'refund' AND t.amount < 0${seasonClause}) purchase_count
+    FROM stores s WHERE s.org_id = ?
+    ORDER BY total_spent DESC, s.name COLLATE NOCASE
+  `).all(...seasonParams, ...seasonParams, orgId);
+  const unmatched = db.prepare(`SELECT ${NET} total, COUNT(*) n FROM card_transactions t JOIN cards c ON c.id = t.card_id
+    WHERE c.org_id = ? AND t.store_id IS NULL${seasonClause}`).get(orgId, ...seasonParams);
+  const grand = rows.reduce((a, r) => a + r.total_spent, 0) + (unmatched.total || 0);
+  res.json({
+    stores: rows.map(r => ({ id: r.id, name: r.name, status: r.setup_status, totalSpent: Math.round(r.total_spent * 100) / 100, purchaseCount: r.purchase_count })),
+    unmatched: { totalSpent: Math.round((unmatched.total || 0) * 100) / 100, transactionCount: unmatched.n || 0 },
+    grandTotal: Math.round(grand * 100) / 100,
+  });
+});
+
 // Every card transaction, org-wide (season-scoped via the card's own
 // season) — for the "Transactions" expandable panel. Deliberately strips
 // this down to date/time, amount, and store: no applicant name, no card

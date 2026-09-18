@@ -179,8 +179,15 @@ renderShell('/admin/settings', `
         <button class="btn btn-sm btn-outline" onclick="downloadBackupNow()">Download Backup Now</button>
         <button class="btn btn-sm btn-primary" onclick="runBackupNow()">Run Backup</button>
       </div></div>
-      <p class="small-muted">A full snapshot of the database is taken automatically every few hours (kept on this server's disk). "Run Backup" takes one immediately; "Download Backup Now" takes one and downloads it straight to your computer — the only copy that's off this server, so do this periodically and keep it somewhere safe.</p>
+      <p class="small-muted">A full snapshot of the database is taken automatically every 4 hours and kept on this server's disk (the newest 3). "Run Backup" takes one immediately; "Download Backup Now" takes one and downloads it straight to your computer.</p>
       <div id="backups-list" style="margin-top:14px">Loading…</div>
+    </div>
+    <div class="card" style="margin-top:16px" id="protection-card">
+      <div class="flex-between"><h3 style="margin:0">Off-Site Copies — Never Lose Your Data</h3><div class="pill-row">
+        <button class="btn btn-sm btn-primary" onclick="runProtectionNow()" id="protection-run-btn">Send a Copy Now</button>
+      </div></div>
+      <p class="small-muted">Copies kept on this server's own disk don't help if the server or its disk is lost. Every night at midnight (New York time) a compressed copy of the database is <strong>emailed</strong> to the address below, so it also lives on another server. If a night is missed (server down), it's sent as soon as the server is back.</p>
+      <div id="protection-body" style="margin-top:14px">Loading…</div>
     </div>
     <div class="card" style="margin-top:16px">
       <h3 style="margin-top:0">Full Data Export / Migration</h3>
@@ -199,7 +206,7 @@ qsa('.tabs button').forEach(b => b.addEventListener('click', () => {
   qsa('.tabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
   ['org','emails','backups'].forEach(t => { const el = qs('#panel-'+t); if (el) el.style.display = t === b.dataset.t ? 'block' : 'none'; });
   if (b.dataset.t === 'emails') loadEmailTemplates();
-  if (b.dataset.t === 'backups') loadBackups();
+  if (b.dataset.t === 'backups') { loadBackups(); loadProtection(); }
 }));
 
 async function loadOrg() {
@@ -607,6 +614,51 @@ async function loadBackups() {
         <td><button class="btn btn-sm btn-outline" onclick="downloadAuthed('/settings/backups/${encodeURIComponent(b.filename)}/download','${esc(b.filename)}')">Download</button></td></tr>`).join('')}
     </tbody></table>` : '<p class="small-muted">No backups yet — the first automatic one runs shortly after this server started.</p>';
 }
+async function loadProtection() {
+  if (!isSuperAdmin) return;
+  const el = qs('#protection-body');
+  try {
+    const p = await api('/settings/backups/protection');
+    const r = p.lastRun;
+    const sourceNote = p.email.source === 'setting' ? '' : p.email.source === 'org' ? ' (using the organization support email — enter one here to override)' : p.email.source === 'super_admin' ? ' (using the first super admin\'s email — enter one here to override)' : '';
+    const okBadge = (ok) => ok ? badge('OK', 'active') : badge('Problem', 'rejected');
+    let emailLine;
+    if (!r) emailLine = '<span class="small-muted">No run yet — the first happens tonight at midnight (or within a couple of minutes of the next restart).</span>';
+    else if (r.email?.ok) emailLine = `${okBadge(true)} Emailed ${fmtDateTime(r.at)} to <strong>${esc(r.email.to)}</strong> — ${fmtBytes(r.email.bytes)} attached (${fmtBytes(r.snapshot?.rawBytes || 0)} uncompressed).`;
+    else if (r.email?.tooLarge) emailLine = `${okBadge(false)} ${fmtDateTime(r.at)}: the copy was <strong>${fmtBytes(r.email.bytes)}</strong> compressed — over the ${fmtBytes(p.email.maxBytes)} an email can carry, so it was <strong>not</strong> attached${r.email.noticeSent ? ' (a notice was emailed instead)' : ''}. Use "Download Backup Now" above today, or set up the cloud-bucket copy below.`;
+    else if (r.email?.skipped) emailLine = `${okBadge(false)} No backup email address is set — enter one below.`;
+    else emailLine = `${okBadge(false)} ${fmtDateTime(r.at)}: ${esc(r.email?.error || r.error || 'unknown error')}`;
+    let bucketLine;
+    if (!p.offsite.configured) bucketLine = `<span class="small-muted">Not configured. Optional second copy with <strong>no size limit</strong> that also includes every uploaded PDF, signature and logo: set <code>BACKUP_S3_BUCKET</code>, <code>BACKUP_S3_ENDPOINT</code>, <code>BACKUP_S3_ACCESS_KEY</code>, <code>BACKUP_S3_SECRET_KEY</code> (and <code>BACKUP_S3_REGION</code>) on Render, pointing at any S3-compatible bucket — Backblaze B2 (free tier), Cloudflare R2, or AWS S3. It switches on by itself at the next restart.</span>`;
+    else if (!r?.offsite) bucketLine = `Bucket <strong>${esc(p.offsite.bucket)}</strong> configured — no upload yet.`;
+    else bucketLine = `Bucket <strong>${esc(p.offsite.bucket)}</strong> — database: ${r.offsite.db?.ok ? `${okBadge(true)} ${fmtBytes(r.offsite.db.bytes)}` : `${okBadge(false)} ${esc(r.offsite.db?.error || '')}`}; full archive with uploads: ${r.offsite.full?.ok ? `${okBadge(true)} ${fmtBytes(r.offsite.full.bytes)}` : `${okBadge(false)} ${esc(r.offsite.full?.error || '')}`}${r.offsite.prune?.ok ? ` · keeping the newest ${p.offsite.keep}` : ''}.`;
+    const disk = p.disk;
+    el.innerHTML = `
+      <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:260px"><label>Backup email (nightly copy goes here)</label>
+          <input id="protection-email" type="email" value="${esc(p.email.explicit || '')}" placeholder="${esc(p.email.to || 'someone@example.com')}"></div>
+        <button class="btn btn-sm btn-outline" onclick="saveProtectionEmail()">Save</button>
+      </div>
+      <p class="small-muted" style="margin-top:4px">Currently sending to <strong>${esc(p.email.to || '— nobody —')}</strong>${sourceNote}. Next run: ${fmtDateTime(p.nextRunAt)}.</p>
+      <table style="margin-top:12px"><tbody>
+        <tr><th style="width:180px">Nightly email</th><td>${emailLine}</td></tr>
+        <tr><th>Cloud bucket</th><td>${bucketLine}</td></tr>
+        <tr><th>This server's disk</th><td>Database ${disk.dbBytes != null ? fmtBytes(disk.dbBytes) : '—'} · ${disk.freeBytes != null ? fmtBytes(disk.freeBytes) + ' free' : 'free space unknown'} · ${disk.localSnapshots} local snapshot${disk.localSnapshots === 1 ? '' : 's'}${disk.freeBytes != null && disk.dbBytes != null && disk.freeBytes < disk.dbBytes * 1.5 ? ` <span style="color:var(--danger)">— low: local snapshots pause until there's room for another full copy</span>` : ''}</td></tr>
+      </tbody></table>`;
+  } catch (err) { el.innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`; }
+}
+window.saveProtectionEmail = async () => {
+  try { await api('/settings/backups/protection', { method: 'PUT', body: { emailTo: qs('#protection-email').value } }); toast('Backup email saved'); loadProtection(); } catch (err) { toast(err.message, true); }
+};
+window.runProtectionNow = async () => {
+  const btn = qs('#protection-run-btn'); btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const r = await api('/settings/backups/protection/run', { method: 'POST' });
+    toast(r.ok ? 'Copy sent — see the results below' : 'Finished with a problem — see below', !r.ok);
+    loadProtection(); loadBackups();
+  } catch (err) { toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = 'Send a Copy Now'; }
+};
 window.runBackupNow = async () => {
   try { await api('/settings/backups/run', { method: 'POST' }); toast('Backup created'); loadBackups(); } catch (err) { toast(err.message, true); }
 };

@@ -12,7 +12,11 @@ import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 // Truncates before writing — request/response summaries are for a human
 // skimming a list, not a full payload dump, and this keeps one noisy call
 // from bloating the table.
-function clip(s, max = 2000) {
+// 600 chars (was 2000): after the 2026-09-17 incident, where a burst of
+// provider calls filled the persistent disk with this table, the stored
+// bodies are kept short — enough to see the endpoint/status/error and
+// the start of a payload, not a dump.
+function clip(s, max = 600) {
   if (s == null) return null;
   const str = typeof s === 'string' ? s : JSON.stringify(s);
   return str.length > max ? str.slice(0, max) + '…' : str;
@@ -33,7 +37,7 @@ export function logApiCall(provider, { orgId, method, endpoint, requestSummary, 
   }
 }
 
-export function getApiCallLogs(orgId, { provider, success, search, hours, limit = 500 } = {}) {
+function apiCallLogWhere(orgId, { provider, success, search, hours } = {}) {
   let where = 'WHERE org_id = ?';
   const params = [orgId];
   if (provider) { where += ' AND provider = ?'; params.push(provider); }
@@ -45,17 +49,43 @@ export function getApiCallLogs(orgId, { provider, success, search, hours, limit 
     params.push(like, like, like, like);
   }
   if (hours) { where += ` AND created_at >= datetime('now', ?)`; params.push(`-${Math.min(8760, Math.max(1, +hours))} hours`); }
-  return db.prepare(`SELECT * FROM provider_call_log ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, Math.min(10000, Math.max(1, +limit || 500)));
+  return { where, params };
 }
 
-// Called once at boot (index.js), same rhythm as requestLog's pruning — a
-// row per outbound call grows fast once the 60-second card-sync sweep and
-// every mail/SMS send are all logging here.
-export function startProviderCallLogPruning(retentionDays = 30) {
+// Paginated: `limit` is the page size (capped at 10,000), `offset` the
+// number of rows to skip, and the result carries `total` (the full match
+// count for these filters) so the UI can show "page N of M" and step
+// through every row in the retention window, not just the newest slice.
+export function getApiCallLogs(orgId, { provider, success, search, hours, limit = 500, offset = 0 } = {}) {
+  const { where, params } = apiCallLogWhere(orgId, { provider, success, search, hours });
+  const pageSize = Math.min(10000, Math.max(1, +limit || 500));
+  const skip = Math.max(0, +offset || 0);
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM provider_call_log ${where}`).get(...params).n;
+  const logs = db.prepare(`SELECT * FROM provider_call_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, pageSize, skip);
+  return { logs, total, limit: pageSize, offset: skip };
+}
+
+// Called once at boot (index.js). A row per outbound call grows fast once
+// the 60-second card-sync sweep and every mail/SMS send are all logging
+// here — and after the 2026-09-17 incident (a burst of per-customer calls
+// filled the disk faster than a daily prune could react) this runs HOURLY,
+// keeps 7 days, caps the table at the newest 100,000 rows regardless of
+// age, and deletes in small batches with a WAL RESTART checkpoint between
+// them so it keeps working even when the disk is nearly full. The same
+// pass also runs at boot before migrations (db.js's emergencyLogPrune).
+export function startProviderCallLogPruning(retentionDays = 7, maxRows = 100000) {
   const prune = () => {
-    try { db.prepare(`DELETE FROM provider_call_log WHERE created_at < datetime('now', ?)`).run(`-${retentionDays} days`); }
-    catch (e) { console.error('[apiCallLog] prune failed:', e.message); }
+    try {
+      for (let i = 0; i < 200; i++) {
+        let n = db.prepare(`DELETE FROM provider_call_log WHERE rowid IN (
+            SELECT rowid FROM provider_call_log WHERE created_at < datetime('now', ?) LIMIT 2000)`).run(`-${retentionDays} days`).changes;
+        if (!n) n = db.prepare(`DELETE FROM provider_call_log WHERE rowid IN (
+            SELECT rowid FROM provider_call_log ORDER BY created_at DESC LIMIT 2000 OFFSET ?)`).run(maxRows).changes;
+        if (!n) break;
+        try { db.pragma('wal_checkpoint(RESTART)'); } catch {}
+      }
+    } catch (e) { console.error('[apiCallLog] prune failed:', e.message); }
   };
   setTimeout(prune, 60 * 1000);
-  setInterval(prune, 24 * 60 * 60 * 1000);
+  setInterval(prune, 60 * 60 * 1000);
 }

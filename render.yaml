@@ -60,3 +60,28 @@ services:
       # private transaction key below.
       - key: SOLA_TRANSACTION_KEY
         sync: false
+      # Off-site backups (services/offsiteBackup.js). The nightly EMAILED
+      # database copy needs nothing beyond BREVO_API_KEY above. For a
+      # second, size-unlimited copy that also includes every uploaded PDF /
+      # signature / logo, point these at any S3-compatible bucket
+      # (Backblaze B2, Cloudflare R2, AWS S3, Wasabi…). All four of
+      # BUCKET / ENDPOINT / ACCESS_KEY / SECRET_KEY must be set for the
+      # channel to switch on; leave them empty and it stays off.
+      #   ENDPOINT examples: https://s3.us-west-004.backblazeb2.com
+      #                      https://<accountid>.r2.cloudflarestorage.com
+      #                      https://s3.us-east-1.amazonaws.com
+      #   REGION: the bucket's region (B2: e.g. us-west-004; R2: auto;
+      #           AWS: e.g. us-east-1). Defaults to us-east-1.
+      #   RETENTION_COUNT: newest copies to keep per kind (default 30).
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_ENDPOINT
+        sync: false
+      - key: BACKUP_S3_REGION
+        sync: false
+      - key: BACKUP_S3_ACCESS_KEY
+        sync: false
+      - key: BACKUP_S3_SECRET_KEY
+        sync: false
+      - key: BACKUP_S3_RETENTION_COUNT
+        sync: false
