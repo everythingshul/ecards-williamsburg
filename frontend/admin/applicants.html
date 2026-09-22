@@ -69,12 +69,11 @@ function contactLine(a) {
 const APPLICANT_COLUMNS = [
   { key: 'external_id', label: 'ID', sort: 'external_id', render: a => `<code>${esc(a.external_id||'')}</code>` },
   { key: 'name', label: 'Name', sort: 'last_name', render: a => `<strong>${esc(a.first_name)} ${esc(a.last_name)}</strong>${a.is_paused ? ' ' + badge('paused','paused') : ''}` },
-  // mergeShuls (see collapseMergedApplicantRows in routes/applicants.js) is
-  // only present once this row represents more than one shul's submission
-  // of the same merged person — every contributing shul (primary included),
-  // already ordered by who added them first, since every member of a group
-  // shares one merge_group_id.
-  { key: 'shul', label: 'Shul', render: a => a.mergeShuls
+  // mergeShuls (see attachMergeShuls in routes/applicants.js) lists every
+  // shul that submitted this merged person, own shul first — one shared
+  // record now (db.js's mergeApplicantRowsInto), so this only shows the
+  // "(merged — N shuls: ...)" note once there's genuinely more than one.
+  { key: 'shul', label: 'Shul', render: a => a.mergeShuls && a.mergeShuls.length > 1
     ? `${esc(a.shul_name || '')} <span class="small-muted">(merged — ${a.mergeShuls.length} shuls: ${esc(a.mergeShuls.map(m => m.shul_name || '(no shul)').join(' → '))})</span>`
     : esc(a.shul_name || (a.approval_status === 'soft_rejected' && a.previous_shul_name ? `Previously: ${a.previous_shul_name}` : '')) },
   { key: 'marital_status', label: 'Marital', render: a => esc(a.marital_status||'') },
@@ -334,7 +333,7 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openApplicant(id) {
   try {
-    const { applicant: a, notes, cards, flags, mergeGroup, requiresShulContribution, balance, allocations, cardTransactions } = await api(`/applicants/${id}`);
+    const { applicant: a, notes, cards, flags, mergeGroup, mergeShuls, requiresShulContribution, balance, allocations, cardTransactions } = await api(`/applicants/${id}`);
     const body = `
       <div class="tabs" id="atabs"><button class="active" data-t="info">Info</button><button data-t="notes">Notes (${notes.length})</button><button data-t="cards">Card (${cards.length})</button><button data-t="transactions">Transactions</button><button data-t="documents">Documents</button><button data-t="messages">Messages</button><button data-t="history">History</button></div>
       <div id="atab-info">
@@ -348,26 +347,22 @@ async function openApplicant(id) {
             <button class="btn btn-sm btn-outline" onclick="openMergeView('${f.id}','${id}')">View &amp; Resolve</button></div>`).join('')}
         </div>` : ''}
         ${a.approval_status === 'soft_rejected' && a.previous_shul_name ? `<div class="divider"></div><p class="small-muted">Previously at: <strong>${esc(a.previous_shul_name)}</strong></p>` : ''}
-        ${mergeGroup && mergeGroup.length ? (() => {
-          // Every member (this record plus mergeGroup) shares one real
-          // disccardpromos account and shows a combined balance/card — see
-          // services/applicantBalance.js — but each shul's own real
-          // contribution still counts and loads separately (see routes/
-          // applicants.js's fundingAnchor). Ordered by created_at across
-          // ALL members (this one included) so "1st/2nd/3rd" reflects who
-          // actually enrolled them first, not just primary-vs-the-rest.
-          const all = [...mergeGroup, { ...a, id: a.id }].sort((x, y) => new Date(x.created_at) - new Date(y.created_at));
-          const ordinal = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
+        ${mergeShuls && mergeShuls.length > 1 ? (() => {
+          // A merged applicant is one record now (see db.js's
+          // mergeApplicantRowsInto) — every pill here is the SAME record,
+          // just listing every shul that submitted them; approval status,
+          // balance, and card are shared and shown once, not per pill.
+          // Ordered oldest-added first (own shul_id counts as "added" at
+          // whatever this record's own created_at is).
           return `<div class="divider"></div><div style="color:var(--text-muted);background:#f9efe0;padding:8px 12px;border-radius:6px">
-            <strong>Same person, enrolled through ${all.length} record${all.length === 1 ? '' : 's'} — one shared gift card account, each shul's own contribution counted separately:</strong>
+            <strong>Same person, submitted by ${mergeShuls.length} shuls — one shared record and gift card account, each shul's own contribution counted separately:</strong>
             <div class="pill-row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
-              ${all.map((m, i) => `<span class="pill" style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 10px;border-radius:999px;background:#fff;border:1px solid var(--border,#ddd)${m.id === a.id ? ';box-shadow:0 0 0 2px var(--brand-gold,#c9a227) inset' : ''}" title="${esc(m.first_name)} ${esc(m.last_name)} — ${ordinal(i + 1)} to add them${m.id === a.id ? ' (viewing this record)' : ''}">
-                <span>${esc(m.shul_name || (m.previous_shul_name ? `Removed (was ${m.previous_shul_name})` : 'No shul'))}</span>
-                ${badge(m.approval_status, m.approval_status)}
-                ${m.shul_id ? `<button type="button" aria-label="Remove from ${esc(m.shul_name || 'this shul')}" title="Remove this applicant from ${esc(m.shul_name || 'this shul')}" onclick="removeFromShul('${m.id}','${esc(m.shul_name || 'this shul')}','${id}')" style="border:0;background:transparent;cursor:pointer;font-size:15px;line-height:1;padding:0 2px;color:var(--danger,#b91c1c)">&times;</button>` : ''}
+              ${mergeShuls.map(m => `<span class="pill" style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 10px;border-radius:999px;background:#fff;border:1px solid var(--border,#ddd)">
+                <span>${esc(m.shul_name || '(no shul)')}</span>
+                ${m.shul_id ? `<button type="button" aria-label="Remove ${esc(m.shul_name || 'this shul')}" title="Remove this shul from this applicant" onclick="removeFromShul('${id}','${m.shul_id}','${esc(m.shul_name || 'this shul')}')" style="border:0;background:transparent;cursor:pointer;font-size:15px;line-height:1;padding:0 2px;color:var(--danger,#b91c1c)">&times;</button>` : ''}
               </span>`).join('')}
             </div>
-            <p class="small-muted" style="margin:6px 0 0">Click a pill's &times; to remove this applicant from that shul entirely (you'll be asked to confirm).</p>
+            <p class="small-muted" style="margin:6px 0 0">Click a pill's &times; to remove that shul from this applicant (you'll be asked to confirm).</p>
           </div>`;
         })() : ''}
         <div class="divider"></div>
@@ -419,7 +414,7 @@ async function openApplicant(id) {
           <div class="stat-tile"><div class="num">${fmtMoney(balance.loaded)}</div><div class="label">Loaded</div></div>
           <div class="stat-tile"><div class="num">${fmtMoney(balance.spent)}</div><div class="label">Spent</div></div>
           <div class="stat-tile"><div class="num">${fmtMoney(balance.remaining)}</div><div class="label">Remaining</div></div>
-        </div>${mergeGroup && mergeGroup.length ? `<p class="small-muted" style="margin:-8px 0 14px">Combined balance across every merged record — one shared gift card account.</p>` : ''}` : ''}
+        </div>${mergeShuls && mergeShuls.length > 1 ? `<p class="small-muted" style="margin:-8px 0 14px">Combined balance across every submitting shul — one shared gift card account.</p>` : ''}` : ''}
         ${a.provider_account_id ? `<p class="small-muted">disccardpromos Account: <code>${esc(a.provider_account_id)}</code> <button class="btn btn-sm btn-outline" style="padding:1px 8px" onclick="viewRawProviderData('${id}')">View Raw disccardpromos Data</button></p>` : ''}
         ${cards.length ? cards.map(c => `<div class="card" style="margin-bottom:10px"><div class="flex-between"><strong>${esc(c.card_number_masked||'Unassigned')}</strong>${badge(c.status,c.status)}</div><div class="small-muted">Amount: ${fmtMoney(c.amount)} · Activated: ${c.activated_at?fmtDateTime(c.activated_at):'not yet'}</div><a class="small-muted" href="/admin/cards?card=${c.id}">View transactions</a></div>`).join('') : `<p class="small-muted">No card assigned yet.</p>${a.approval_status==='approved' ? `<button class="btn btn-sm btn-primary" onclick="assignCard('${id}')">Assign Gift Card</button>` : '<p class="small-muted">Applicant must be approved first.</p>'}`}
       </div>
@@ -548,23 +543,22 @@ window.softRejectApplicant = async (memberId, fromId) => {
 // another member is still approved). Two-step confirm: a plain warning,
 // then — only if that shul still has un-undone gives — a second one that
 // lists the actual dollar amounts about to be pulled back.
-window.removeFromShul = async (memberId, shulName, viewingId) => {
-  if (!confirm(`Remove this applicant from ${shulName} entirely?\n\nThat shul's record of them will be detached (marked Soft Reject) and will no longer count toward the shared gift card. Any money ${shulName} gave them that hasn't been undone yet will be undone first — whatever is still unspent goes back to the shul's balance.\n\nThe other shul(s) on this applicant are not affected.`)) return;
+window.removeFromShul = async (applicantId, shulId, shulName) => {
+  if (!confirm(`Remove ${shulName} from this applicant?\n\nThat shul will no longer be listed on this record. Any money ${shulName} gave them that hasn't been undone yet will be undone first — whatever is still unspent goes back to that shul's balance.\n\nThe other shul(s) on this applicant, the applicant's own record, and their card are not affected — unless this was their only shul, in which case the applicant is detached entirely (marked Soft Reject) and their card is locked.`)) return;
   const done = (r) => {
     const warn = [];
     if (r.cardLockErrors?.length) warn.push(`card lock failed: ${r.cardLockErrors.join('; ')}`);
-    if (r.providerError) warn.push(`disccardpromos amount update failed (will retry automatically): ${r.providerError}`);
-    toast(`Removed from ${shulName}${r.undone ? ` — ${r.undone} give(s) undone` : ''}${warn.length ? ` — but ${warn.join('; ')}` : ''}`, !!warn.length);
+    toast(`Removed ${shulName}${r.undone ? ` — ${r.undone} give(s) undone` : ''}${warn.length ? ` — but ${warn.join('; ')}` : ''}`, !!warn.length);
     closeModal(); load();
-    if (viewingId && viewingId !== memberId) openApplicant(viewingId);
+    openApplicant(applicantId);
   };
   try {
-    done(await api(`/applicants/${memberId}/remove-from-shul`, { method: 'POST' }));
+    done(await api(`/applicants/${applicantId}/remove-from-shul`, { method: 'POST', body: { shul_id: shulId } }));
   } catch (err) {
     if (err.data?.requiresUndoAll) {
       const list = err.data.activeAllocations.map(a => `${fmtMoney(a.total_amount)} from ${a.shul_name || shulName}`).join(', ');
-      if (!confirm(`${err.message}\n\nOutstanding: ${list}\n\nUndo these now and remove the applicant from ${shulName}?`)) return;
-      try { done(await api(`/applicants/${memberId}/remove-from-shul`, { method: 'POST', body: { confirmUndoAll: true } })); }
+      if (!confirm(`${err.message}\n\nOutstanding: ${list}\n\nUndo these now and remove ${shulName}?`)) return;
+      try { done(await api(`/applicants/${applicantId}/remove-from-shul`, { method: 'POST', body: { shul_id: shulId, confirmUndoAll: true } })); }
       catch (err2) { toast(err2.message, true); }
       return;
     }

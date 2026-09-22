@@ -137,3 +137,35 @@ export function orgFundsSummary(orgId, seasonId) {
   }
   return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: Math.round(totalSpent * 100) / 100 };
 }
+
+// Dashboard KPI: "X of Y loaded accounts are active" — Y is every real
+// account (deduped by merge group, same reasoning as orgFundsSummary
+// above) that has actually had money loaded onto it (loaded > 0); X is
+// however many of those have at least one card in status='activated'
+// right now. A merged group counts once and is "active" if ANY member's
+// card is activated, since a merge group shares one real disccardpromos
+// account regardless of how many local applicant/card rows represent it.
+export function loadedAccountsActive(orgId, seasonId) {
+  const seasonClause = seasonId ? ' AND season_id = ?' : '';
+  const seasonParams = seasonId ? [seasonId] : [];
+  const approved = db.prepare(`SELECT id, merge_group_id FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).all(orgId, ...seasonParams);
+  if (!approved.length) return { active: 0, total: 0 };
+  const balances = getApplicantBalances(orgId, approved.map(a => a.id));
+  const groups = new Map(); // groupKey -> { loaded, memberIds: [] }
+  for (const a of approved) {
+    const groupKey = a.merge_group_id || a.id;
+    if (!groups.has(groupKey)) groups.set(groupKey, { loaded: 0, memberIds: [] });
+    const g = groups.get(groupKey);
+    g.loaded += balances.get(a.id)?.loaded || 0;
+    g.memberIds.push(a.id);
+  }
+  const loadedGroupIds = [...groups.entries()].filter(([, g]) => g.loaded > 0.005);
+  if (!loadedGroupIds.length) return { active: 0, total: 0 };
+  const allMemberIds = loadedGroupIds.flatMap(([, g]) => g.memberIds);
+  const placeholders = allMemberIds.map(() => '?').join(',');
+  const activatedApplicantIds = new Set(
+    db.prepare(`SELECT DISTINCT applicant_id FROM cards WHERE applicant_id IN (${placeholders}) AND status = 'activated'`).all(...allMemberIds).map(r => r.applicant_id)
+  );
+  const active = loadedGroupIds.filter(([, g]) => g.memberIds.some(id => activatedApplicantIds.has(id))).length;
+  return { active, total: loadedGroupIds.length };
+}

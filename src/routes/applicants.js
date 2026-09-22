@@ -3,7 +3,7 @@ import multer from 'multer';
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth, requireAdmin } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
-import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, MERGE_FIELDS } from '../services/duplicates.js';
+import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, isApplicantMemberOfShul } from '../services/duplicates.js';
 import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
 import { sendSmsChecked } from '../services/sms.js';
 import * as giftcard from '../services/giftcard.js';
@@ -187,10 +187,18 @@ export function isZipAllowed(orgId, zip) {
 function scopeWhere(req) {
   let where = 'WHERE a.org_id = ?';
   const params = [req.user.org_id];
-  if (req.user.role === 'shul') { where += ' AND a.shul_id = ?'; params.push(req.user.shul_id); }
-  else if (req.permission.scope === 'assigned') {
-    where += ` AND a.shul_id IN (SELECT entity_id FROM user_assignments WHERE user_id = ? AND entity_type = 'shul')`;
-    params.push(req.user.id);
+  // A merged applicant is one row shared by every shul that submitted them
+  // (see db.js's mergeApplicantRowsInto / applicant_shuls) — "my shul's
+  // applicants" means shul_id = mine OR I'm an extra member, so a
+  // non-primary shul still sees their own merged record, never just the
+  // primary's.
+  if (req.user.role === 'shul') {
+    where += ` AND (a.shul_id = ? OR EXISTS (SELECT 1 FROM applicant_shuls asx WHERE asx.applicant_id = a.id AND asx.shul_id = ?))`;
+    params.push(req.user.shul_id, req.user.shul_id);
+  } else if (req.permission.scope === 'assigned') {
+    where += ` AND (a.shul_id IN (SELECT entity_id FROM user_assignments WHERE user_id = ? AND entity_type = 'shul')
+      OR EXISTS (SELECT 1 FROM applicant_shuls asx WHERE asx.applicant_id = a.id AND asx.shul_id IN (SELECT entity_id FROM user_assignments WHERE user_id = ? AND entity_type = 'shul')))`;
+    params.push(req.user.id, req.user.id);
   }
   return { where, params };
 }
@@ -211,7 +219,13 @@ router.get('/', (req, res) => {
     else if (provider_sync === 'deactivate_error') where += ` AND a.provider_deactivate_error IS NOT NULL`;
   }
   if (paused === '1' || paused === '0') { where += ' AND a.is_paused = ?'; params.push(+paused); }
-  if (shul_id) { where += ' AND a.shul_id = ?'; params.push(shul_id); }
+  // Same membership-aware match as scopeWhere above — filtering to one
+  // shul should surface a merged applicant for every member shul, not
+  // just whichever one happens to be a.shul_id.
+  if (shul_id) {
+    where += ` AND (a.shul_id = ? OR EXISTS (SELECT 1 FROM applicant_shuls asx WHERE asx.applicant_id = a.id AND asx.shul_id = ?))`;
+    params.push(shul_id, shul_id);
+  }
   if (season_id) { where += ' AND a.season_id = ?'; params.push(season_id); }
   if (marital_status) { where += ' AND a.marital_status = ?'; params.push(marital_status); }
   if (home_for_yomtov !== undefined && home_for_yomtov !== '') { where += ' AND a.home_for_yomtov = ?'; params.push(home_for_yomtov === 'true' || home_for_yomtov === '1' ? 1 : 0); }
@@ -241,35 +255,14 @@ router.get('/', (req, res) => {
   // so the shul had no way to see the real current figure at all).
   const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
   const withBalance = rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
-  // Merged applicants collapse to ONE row per real person (admin view only
-  // — a shul-portal viewer only ever sees its own shul's own row anyway, so
-  // there's nothing to collapse there). Each collapsed row displays the
-  // merge-group PRIMARY's own curated identity/contact fields (MERGE_FIELDS
-  // — see services/duplicates.js — exactly the fields an admin explicitly
-  // composited at merge time) with a `mergeShuls` list of every contributing
-  // shul in join order; a secondary's own originally-submitted fields are
-  // still reachable from GET /:id's mergeGroup. This is a same-PAGE dedup,
-  // not a group-aware COUNT/OFFSET — `total` still counts raw rows, so a
-  // page can legitimately render fewer than pageSize items when two members
-  // of the same group both landed on it. Getting the count exactly right
-  // would need a much larger rewrite of every filter above to be merge-
-  // group-aware at the SQL level; this trades a little pagination precision
-  // for a correct, simple collapse.
-  //
-  // FIXED (2026-09) — this used to spread the ENTIRE primary row over a
-  // secondary's, including `id`, `approval_status`, `is_paused`, and
-  // `provider_account_id` — none of which are "submitted data" to curate;
-  // they're each shul's own operational state. A real report: an admin
-  // filtered to (or otherwise acted on) a specific shul's applicant who was
-  // a merge-group secondary, clicked Approve, and — because the row's `id`
-  // silently pointed at the PRIMARY the whole time — actually approved a
-  // completely different shul's submission. The secondary they meant to
-  // approve stayed 'pending' with no disccardpromos account, while the list
-  // kept showing it as whatever the primary's own status happened to be.
-  // Now only MERGE_FIELDS are substituted; every operational field (id
-  // included) stays this row's own truth, so Approve/Reject always act on
-  // the record actually being displayed.
-  const finalRows = req.user.role === 'shul' ? withBalance : collapseMergedApplicantRows(req.user.org_id, withBalance);
+  // A merged applicant is one row now (see db.js's mergeApplicantRowsInto —
+  // 2026-09), so there's nothing left to collapse across sibling rows; this
+  // just attaches the admin-only `mergeShuls` pill list (own shul_id plus
+  // every applicant_shuls membership) to every row that's a merge survivor
+  // (merge_group_id truthy — set to the row's own id at merge time). Never
+  // sent to a shul-portal viewer — see GET /:id and GET /:id/shul-group,
+  // both admin-only, for the same reasoning.
+  const finalRows = req.user.role === 'shul' ? withBalance : attachMergeShuls(req.user.org_id, withBalance);
   // Internal disccardpromos reconciliation status — super_admin only (see
   // GET /provider-sync-summary below for the full reasoning); never sent to
   // a shul-portal viewer, and never even computed for org_admin/staff.
@@ -277,49 +270,25 @@ router.get('/', (req, res) => {
   res.json({ applicants: maskForShul(redact(withSyncStatus, req.permission.hidden_fields), req.user.role, req.user.org_id), total, page: +page, pageSize: +pageSize });
 });
 
-function collapseMergedApplicantRows(orgId, rows) {
-  const secondaryRows = rows.filter(r => r.merge_group_id && r.merge_group_id !== r.id);
-  const primaryIds = [...new Set(secondaryRows.map(r => r.merge_group_id))];
-  const primaryById = new Map();
-  if (primaryIds.length) {
-    const primaryRows = db.prepare(`SELECT a.*, s.name_en as shul_name, ps.name_en as previous_shul_name FROM applicants a
-      LEFT JOIN shuls s ON s.id = a.shul_id LEFT JOIN shuls ps ON ps.id = a.previous_shul_id
-      WHERE a.org_id = ? AND a.id IN (${primaryIds.map(() => '?').join(',')})`).all(orgId, ...primaryIds);
-    for (const p of primaryRows) primaryById.set(p.id, p);
+// Attaches an ordered `mergeShuls` pill list — the row's own shul plus
+// every extra applicant_shuls membership, oldest-added first — to every
+// row that's a merge survivor. One bulk query rather than N+1.
+function attachMergeShuls(orgId, rows) {
+  const mergedIds = rows.filter(r => r.merge_group_id).map(r => r.id);
+  if (!mergedIds.length) return rows;
+  const placeholders = mergedIds.map(() => '?').join(',');
+  const extra = db.prepare(`SELECT ash.applicant_id, ash.shul_id, ash.added_at, s.name_en as shul_name FROM applicant_shuls ash
+    LEFT JOIN shuls s ON s.id = ash.shul_id WHERE ash.applicant_id IN (${placeholders}) ORDER BY ash.added_at ASC`).all(...mergedIds);
+  const extraByApplicant = new Map();
+  for (const e of extra) {
+    if (!extraByApplicant.has(e.applicant_id)) extraByApplicant.set(e.applicant_id, []);
+    extraByApplicant.get(e.applicant_id).push({ shul_id: e.shul_id, shul_name: e.shul_name || null, added_at: e.added_at });
   }
-  const seenGroups = new Set();
-  const out = [];
-  for (const r of rows) {
-    const groupKey = r.merge_group_id || r.id;
-    if (seenGroups.has(groupKey)) continue;
-    seenGroups.add(groupKey);
-    if (r.merge_group_id && r.merge_group_id !== r.id && primaryById.has(r.merge_group_id)) {
-      // Substitute only the primary's curated MERGE_FIELDS (name/contact/
-      // etc — see the comment above) onto THIS row — never its id, status,
-      // or any other operational field, so this stays the exact record
-      // Approve/Reject/etc will act on.
-      const primary = primaryById.get(r.merge_group_id);
-      const curated = {};
-      for (const f of MERGE_FIELDS) curated[f] = primary[f];
-      out.push({ ...r, ...curated });
-    } else {
-      out.push(r);
-    }
-  }
-  // Attach the ordered contributing-shul list to every row that's part of a
-  // group, one bulk query rather than N+1.
-  const groupKeys = [...new Set(out.filter(r => r.merge_group_id).map(r => r.merge_group_id))];
-  if (groupKeys.length) {
-    const members = db.prepare(`SELECT a.id, a.merge_group_id, a.created_at, s.name_en as member_shul_name FROM applicants a
-      LEFT JOIN shuls s ON s.id = a.shul_id WHERE a.org_id = ? AND a.merge_group_id IN (${groupKeys.map(() => '?').join(',')}) ORDER BY a.created_at ASC`).all(orgId, ...groupKeys);
-    const byGroup = new Map();
-    for (const m of members) {
-      if (!byGroup.has(m.merge_group_id)) byGroup.set(m.merge_group_id, []);
-      byGroup.get(m.merge_group_id).push({ shul_name: m.member_shul_name || null, created_at: m.created_at });
-    }
-    for (const r of out) if (r.merge_group_id && byGroup.has(r.merge_group_id)) r.mergeShuls = byGroup.get(r.merge_group_id);
-  }
-  return out;
+  return rows.map(r => {
+    if (!r.merge_group_id) return r;
+    const own = { shul_id: r.shul_id, shul_name: r.shul_name || null, added_at: null };
+    return { ...r, mergeShuls: [own, ...(extraByApplicant.get(r.id) || [])] };
+  });
 }
 
 // Full-detail CSV export — every field, no pagination, respects the same
@@ -329,7 +298,13 @@ router.get('/export', requirePermission('applicants', 'can_export'), (req, res) 
   let { where, params } = scopeWhere(req);
   if (status) { where += ' AND a.approval_status = ?'; params.push(status); }
   if (paused === '1' || paused === '0') { where += ' AND a.is_paused = ?'; params.push(+paused); }
-  if (shul_id) { where += ' AND a.shul_id = ?'; params.push(shul_id); }
+  // Same membership-aware match as scopeWhere above — filtering to one
+  // shul should surface a merged applicant for every member shul, not
+  // just whichever one happens to be a.shul_id.
+  if (shul_id) {
+    where += ` AND (a.shul_id = ? OR EXISTS (SELECT 1 FROM applicant_shuls asx WHERE asx.applicant_id = a.id AND asx.shul_id = ?))`;
+    params.push(shul_id, shul_id);
+  }
   if (season_id) { where += ' AND a.season_id = ?'; params.push(season_id); }
   if (marital_status) { where += ' AND a.marital_status = ?'; params.push(marital_status); }
   if (home_for_yomtov !== undefined && home_for_yomtov !== '') { where += ' AND a.home_for_yomtov = ?'; params.push(home_for_yomtov === 'true' || home_for_yomtov === '1' ? 1 : 0); }
@@ -363,8 +338,12 @@ router.get('/export', requirePermission('applicants', 'can_export'), (req, res) 
 // reenrollment / mass-submit-drafts) with their own required-field rules.
 router.get('/my-export', (req, res) => {
   if (req.user.role !== 'shul') return res.status(403).json({ error: 'Not permitted' });
-  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND shul_id = ? AND approval_status IN ('pending','approved') ORDER BY created_at DESC`)
-    .all(req.user.org_id, req.user.shul_id);
+  // Same membership-aware match as scopeWhere above — a merged applicant
+  // this shul is a non-primary member of still belongs in their export.
+  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND approval_status IN ('pending','approved')
+      AND (shul_id = ? OR EXISTS (SELECT 1 FROM applicant_shuls asx WHERE asx.applicant_id = applicants.id AND asx.shul_id = ?))
+      ORDER BY created_at DESC`)
+    .all(req.user.org_id, req.user.shul_id, req.user.shul_id);
   const columns = ['id', ...APPLICANT_IMPORT_COLUMNS.filter(c => c !== 'shul_id')];
   const out = rows.map(r => Object.fromEntries(columns.map(c => {
     if (c === 'id') return [c, r.id];
@@ -418,7 +397,10 @@ router.get('/:id', (req, res) => {
       LEFT JOIN shuls ps ON ps.id=a.previous_shul_id
       WHERE a.id = ? AND a.org_id = ?`).get(req.params.id, req.user.org_id);
   if (!applicant) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role === 'shul' && applicant.shul_id !== req.user.shul_id) return res.status(403).json({ error: 'Not your applicant' });
+  // Membership-aware — a merged applicant belongs to every shul that
+  // submitted them, not just the row's own shul_id (see db.js's
+  // mergeApplicantRowsInto).
+  if (req.user.role === 'shul' && !isApplicantMemberOfShul(applicant.id, req.user.shul_id)) return res.status(403).json({ error: 'Not your applicant' });
   // Internal admin notes and duplicate flags may reference rejection/duplicate
   // reasons directly, so a shul-portal viewer gets neither, on top of the
   // approval_status/duplicate_status masking below.
@@ -476,7 +458,15 @@ router.get('/:id', (req, res) => {
     }
   }
   const requiresShulContribution = !!db.prepare('SELECT require_shul_contribution FROM seasons WHERE id = ?').get(applicant.season_id)?.require_shul_contribution;
-  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, requiresShulContribution, balance, allocations, cardTransactions });
+  // The shul pills themselves — this record's own shul plus every extra
+  // applicant_shuls membership (see db.js's mergeApplicantRowsInto),
+  // oldest-added first. Distinct from `mergeGroup` above, which is now
+  // genuinely just "other STILL-SEPARATE records that look like the same
+  // person" (an open duplicate flag not yet merged in) — a merged shul no
+  // longer has a row of its own to appear there at all. Admin-only, same
+  // as mergeGroup.
+  const mergeShuls = req.user.role === 'shul' ? [] : attachMergeShuls(req.user.org_id, [applicant])[0]?.mergeShuls || [];
+  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, mergeShuls, requiresShulContribution, balance, allocations, cardTransactions });
 });
 
 // Who edited this record and when — a shul viewing their own applicant
@@ -605,7 +595,7 @@ router.post('/', requirePermission('applicants', 'can_edit'), (req, res) => {
 router.put('/:id', requirePermission('applicants', 'can_edit'), async (req, res) => {
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!applicant) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role === 'shul' && applicant.shul_id !== req.user.shul_id) return res.status(403).json({ error: 'Not your applicant' });
+  if (req.user.role === 'shul' && !isApplicantMemberOfShul(applicant.id, req.user.shul_id)) return res.status(403).json({ error: 'Not your applicant' });
   // A shul can edit its own applicant's info right up until an admin has
   // actually reviewed it — once approved, the record is locked to the shul,
   // EXCEPT phone numbers, which stay editable indefinitely: a family's
@@ -1199,38 +1189,44 @@ router.post('/:id/soft-reject', requirePermission('applicants', 'can_edit'), asy
   res.json({ ok: true, cardLockErrors });
 });
 
-// Removes ONE member of a merged applicant from its shul entirely (the "x"
-// on a shul pill in the admin profile). Admin-only; works on an approved
-// member too, unlike Soft Reject. Money-safe by construction:
-//  - any outstanding give from that shul to this member is undone first
-//    (real claw-back via reverseAllocation, same confirmUndoAll handshake
-//    as DELETE /shul-payments/:id), never silently deleted — the history
-//    rows stay so the group's `loaded` ledger keeps netting correctly.
-//  - the row itself is detached (shul_id → NULL, previous_shul_id kept,
-//    status soft_rejected) rather than hard-deleted, so its allocation
-//    history, notes, and audit trail survive and its approval-time
-//    card_amount simply stops counting toward the shared card.
-//  - the shared disccardpromos customer is only locked when NO other
-//    member of the group is still approved; otherwise it stays live and
-//    its committed amount is re-pushed to the new (lower) ledger total.
-//  - if the removed member was the group's PRIMARY, the earliest-created
-//    remaining member is promoted (every member's merge_group_id repointed)
-//    so the group still has an anchor; the next amount push re-keys the
-//    customer's external_id to the new primary (every PATCH sends it).
+// Removes ONE shul from a merged applicant's `mergeShuls` list (the "x" on
+// a shul pill in the admin profile) — `shul_id` in the body says which one.
+// Admin-only. A merged applicant is one row (see db.js's
+// mergeApplicantRowsInto), so removing a shul never changes the record's
+// own id, approval_status, card, or balance — those were never "that
+// shul's" to begin with, only which shuls are still listed as having
+// submitted this person. Money-safe by construction: any of THAT shul's
+// own still-outstanding gives to this applicant (shul_allocations scoped
+// to this applicant_id AND that shul_id — each shul's own contribution
+// stays separately tracked even after the rows merge) are undone first,
+// real claw-back via reverseAllocation, same confirmUndoAll handshake as
+// DELETE /shul-payments/:id, never silently discarded.
+//  - Removing the row's own shul_id promotes another membership (oldest
+//    first) to take its place, so the applicant keeps a shul; if none is
+//    left, this is exactly a full removal — shul_id → NULL,
+//    previous_shul_id kept, status soft_rejected, cards locked, same as
+//    a non-merged applicant's Soft Reject.
+//  - Removing any OTHER membership just deletes that applicant_shuls row
+//    — the applicant, its card, and its approved balance are completely
+//    unaffected; only that one shul stops being listed and stops being
+//    able to give this applicant anything further.
 router.post('/:id/remove-from-shul', requirePermission('applicants', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!applicant) return res.status(404).json({ error: 'Not found' });
-  if (!applicant.merge_group_id) return res.status(400).json({ error: 'This applicant isn\'t part of a merged group — use Soft Reject, Reject, or Delete instead.' });
-  if (!applicant.shul_id) return res.status(400).json({ error: 'This record isn\'t currently assigned to a shul.' });
+  const shulId = req.body?.shul_id;
+  if (!shulId) return res.status(400).json({ error: 'shul_id is required.' });
+  const isPrimaryShul = applicant.shul_id === shulId;
+  const extraMembership = isPrimaryShul ? null : db.prepare('SELECT * FROM applicant_shuls WHERE applicant_id = ? AND shul_id = ?').get(applicant.id, shulId);
+  if (!isPrimaryShul && !extraMembership) return res.status(400).json({ error: 'This applicant isn\'t linked to that shul.' });
 
-  const outstanding = db.prepare(`SELECT sa.*, s.name_en AS shul_name FROM shul_allocations sa LEFT JOIN shuls s ON s.id = sa.shul_id
-    WHERE sa.applicant_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL`).all(applicant.id);
+  const shul = db.prepare('SELECT name_en FROM shuls WHERE id = ?').get(shulId);
+  const outstanding = db.prepare(`SELECT * FROM shul_allocations WHERE applicant_id = ? AND shul_id = ? AND reversed_at IS NULL AND reversal_of IS NULL`).all(applicant.id, shulId);
   if (outstanding.length && !req.body?.confirmUndoAll) {
     return res.status(409).json({
-      error: `This shul has given this applicant money ${outstanding.length} time(s) that hasn't been undone — removing them undoes those gives first (whatever is still unspent goes back to the shul's balance).`,
+      error: `${shul?.name_en || 'This shul'} has given this applicant money ${outstanding.length} time(s) that hasn't been undone — removing them undoes those gives first (whatever is still unspent goes back to the shul's balance).`,
       requiresUndoAll: true,
-      activeAllocations: outstanding.map(a => ({ id: a.id, shul_name: a.shul_name, total_amount: a.total_amount })),
+      activeAllocations: outstanding.map(a => ({ id: a.id, shul_name: shul?.name_en, total_amount: a.total_amount })),
     });
   }
   const failures = [];
@@ -1238,38 +1234,29 @@ router.post('/:id/remove-from-shul', requirePermission('applicants', 'can_edit')
     try { await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip }); }
     catch (e) { failures.push({ id: alloc.id, error: e.message }); }
   }
-  if (failures.length) return res.status(500).json({ error: 'Some of this shul\'s gives could not be undone, so the applicant was not removed. Any that did succeed stay undone — retry to finish.', failures });
+  if (failures.length) return res.status(500).json({ error: 'Some of this shul\'s gives could not be undone, so it was not removed. Any that did succeed stay undone — retry to finish.', failures });
 
-  const groupId = applicant.merge_group_id;
-  const before = { shul_id: applicant.shul_id, approval_status: applicant.approval_status, merge_group_id: groupId };
-  db.prepare(`UPDATE applicants SET shul_id = NULL, previous_shul_id = ?, approval_status = 'soft_rejected', updated_at = datetime('now') WHERE id = ?`).run(applicant.shul_id, applicant.id);
-
-  let newPrimaryId = groupId;
-  if (groupId === applicant.id) {
-    const successor = db.prepare(`SELECT id FROM applicants WHERE merge_group_id = ? AND id != ? ORDER BY (approval_status = 'approved') DESC, created_at ASC LIMIT 1`).get(groupId, applicant.id);
-    if (successor) {
-      newPrimaryId = successor.id;
-      db.prepare(`UPDATE applicants SET merge_group_id = ? WHERE merge_group_id = ?`).run(newPrimaryId, groupId);
+  const before = { shul_id: applicant.shul_id };
+  let remainingShulCount, fullyDetached = false;
+  if (isPrimaryShul) {
+    const nextMembership = db.prepare('SELECT * FROM applicant_shuls WHERE applicant_id = ? ORDER BY added_at ASC LIMIT 1').get(applicant.id);
+    if (nextMembership) {
+      db.prepare(`UPDATE applicants SET shul_id = ?, previous_shul_id = ?, updated_at = datetime('now') WHERE id = ?`).run(nextMembership.shul_id, applicant.shul_id, applicant.id);
+      db.prepare('DELETE FROM applicant_shuls WHERE id = ?').run(nextMembership.id);
+    } else {
+      db.prepare(`UPDATE applicants SET shul_id = NULL, previous_shul_id = ?, approval_status = 'soft_rejected', updated_at = datetime('now') WHERE id = ?`).run(applicant.shul_id, applicant.id);
+      fullyDetached = true;
     }
-  }
-  logAudit(req.user.org_id, req.user.id, 'remove-from-shul', 'applicant', applicant.id, before,
-    { shul_id: null, previous_shul_id: applicant.shul_id, approval_status: 'soft_rejected', merge_group_id: newPrimaryId, undone: outstanding.length }, req.ip);
-
-  const stillApproved = db.prepare(`SELECT COUNT(*) c FROM applicants WHERE (id = ? OR merge_group_id = ?) AND approval_status = 'approved'`).get(newPrimaryId, newPrimaryId).c;
-  let cardLockErrors = [], providerError = null;
-  if (!stillApproved) {
-    ({ errors: cardLockErrors } = await lockApplicantCards(req.user.org_id, applicant));
   } else {
-    // Group still live: re-push its (now lower) ledger total so the card's
-    // committed amount drops this member's approval-time card_amount.
-    const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
-    const anchor = db.prepare('SELECT * FROM applicants WHERE id = ?').get(newPrimaryId);
-    if (discountId && anchor?.provider_account_id) {
-      try { await creditGapToMatchLedger(req.user.org_id, anchor, discountId); }
-      catch (e) { providerError = e.message; scheduleProviderEnforceSoon(req.user.org_id, `amount re-push failed after remove-from-shul for applicant ${applicant.id}`); }
-    }
+    db.prepare('DELETE FROM applicant_shuls WHERE id = ?').run(extraMembership.id);
   }
-  res.json({ ok: true, undone: outstanding.length, newPrimaryId, cardLockErrors, providerError });
+  remainingShulCount = (fullyDetached ? 0 : 1) + db.prepare('SELECT COUNT(*) c FROM applicant_shuls WHERE applicant_id = ?').get(applicant.id).c;
+  logAudit(req.user.org_id, req.user.id, 'remove-from-shul', 'applicant', applicant.id, before,
+    { removedShulId: shulId, removedShulName: shul?.name_en, remainingShulCount, undone: outstanding.length }, req.ip);
+
+  let cardLockErrors = [];
+  if (fullyDetached) ({ errors: cardLockErrors } = await lockApplicantCards(req.user.org_id, applicant));
+  res.json({ ok: true, undone: outstanding.length, remainingShulCount, cardLockErrors });
 });
 
 router.post('/mass-reject', requirePermission('applicants', 'can_edit'), async (req, res) => {

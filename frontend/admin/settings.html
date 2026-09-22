@@ -534,9 +534,10 @@ async function loadPaymentMethods() {
 }
 function renderPaymentMethods() {
   qs('#payment-methods-list').innerHTML = paymentMethods.map((m, i) => `
-    <div class="grid-2" style="grid-template-columns:1fr auto auto;gap:8px;align-items:center;margin-top:6px">
+    <div class="grid-2" style="grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;margin-top:6px">
       <input value="${esc(m.label)}" oninput="paymentMethods[${i}].label = this.value" placeholder="Label">
       <label class="checkbox-row" style="margin:0"><input type="checkbox" ${m.active !== false ? 'checked' : ''} onchange="paymentMethods[${i}].active = this.checked"> Active</label>
+      <label class="checkbox-row" style="margin:0" title="Shown as a payment option in the shul portal (Make a Payment / Request a Different Method). Unchecking keeps it usable for admin manual entry, just hidden from shuls."><input type="checkbox" ${m.visibleToShul !== false ? 'checked' : ''} onchange="paymentMethods[${i}].visibleToShul = this.checked"> Visible to shul</label>
       <span class="small-muted" title="Internal key — never changes">${esc(m.value)}</span>
     </div>
   `).join('');
@@ -549,7 +550,7 @@ window.addPaymentMethodRow = () => {
   // deactivated one, by suffixing -2/-3/... rather than colliding.
   let n = 2, base = value;
   while (paymentMethods.some(m => m.value === value)) value = `${base}_${n++}`;
-  paymentMethods.push({ value, label: label.trim(), active: true });
+  paymentMethods.push({ value, label: label.trim(), active: true, visibleToShul: true });
   renderPaymentMethods();
 };
 window.savePaymentMethods = async () => {

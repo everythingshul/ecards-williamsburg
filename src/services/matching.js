@@ -4,6 +4,7 @@ import { approvedBalance } from './shulBalance.js';
 import { logAudit } from './audit.js';
 import { resolveFundingAnchor, scheduleProviderEnforceSoon } from './providerAccount.js';
 import { getApplicantBalances } from './applicantBalance.js';
+import { isApplicantMemberOfShul } from './duplicates.js';
 
 // Most-specific-wins, consistent with every other override chain in this
 // app (min_contribution, required-field overrides, ...): an applicant's own
@@ -105,14 +106,16 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   if (applicant.approval_status !== 'approved') throw new Error('This applicant has not been approved yet — funds can only be allocated to an approved applicant with an active card.');
   if (applicant.provider_exempt) throw new Error('This applicant is exempt from gift card provisioning and cannot receive an allocation.');
   if (!applicant.provider_account_id) throw new Error('This applicant has no disccardpromos account on file yet — funds cannot be loaded.');
-  if (!isAdminOverride && applicant.shul_id !== shulId) throw new Error('This applicant does not belong to your shul.');
+  // A merged applicant belongs to every shul that submitted them (see
+  // db.js's mergeApplicantRowsInto), not just whichever one is the row's
+  // own shul_id — a non-primary member shul giving money is exactly the
+  // "shuls should always see only their shul, even if not primary" case.
+  if (!isAdminOverride && !isApplicantMemberOfShul(applicantId, shulId)) throw new Error('This applicant does not belong to your shul.');
 
   const balance = approvedBalance(shulId);
   if (baseAmount > balance + 1e-9) throw new Error(`Amount ($${baseAmount.toFixed(2)}) exceeds this shul's approved balance ($${balance.toFixed(2)}).`);
 
   const season = db.prepare('SELECT * FROM seasons WHERE id = ?').get(applicant.season_id);
-  const { rate, matchAmount } = computeRealMatch({ applicant, shul, season, baseAmount });
-  const totalAmount = Math.round((baseAmount + matchAmount) * 100) / 100;
 
   // A merge-group secondary (see services/duplicates.js's mergeApplicants
   // and routes/applicants.js's isMergedSecondary) shares one real
@@ -150,10 +153,23 @@ export async function createAllocation({ orgId, userId, shulId, applicantId, bas
   // is simply the applicant's current remaining total (already includes
   // this allocation) rather than a separately-added figure — removing the
   // add-after-read step that was the other half of the race.
+  //
+  // HARDENED FURTHER (reported: one contribution still landed over a
+  // shul's match cap) — wrapped the cap computation and the INSERT that
+  // consumes it in ONE db.transaction(). better-sqlite3 transactions run
+  // fully synchronously and refuse to contain an `await`, so this makes it
+  // structurally impossible — not just currently-true — for the two steps
+  // to ever again be split apart by a future edit that adds an await in
+  // between. Nothing async happens inside this block.
   const id = uuid();
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, shulId, applicantId, applicant.season_id, baseAmount, matchAmount, totalAmount, rate, isAdminOverride ? 1 : 0, createdBy, 'pending', null);
+  const { rate, matchAmount, totalAmount } = db.transaction(() => {
+    const { rate, matchAmount } = computeRealMatch({ applicant, shul, season, baseAmount });
+    const totalAmount = Math.round((baseAmount + matchAmount) * 100) / 100;
+    db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, orgId, shulId, applicantId, applicant.season_id, baseAmount, matchAmount, totalAmount, rate, isAdminOverride ? 1 : 0, createdBy, 'pending', null);
+    return { rate, matchAmount, totalAmount };
+  })();
 
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   let giftcardStatus = 'ok', giftcardError = null;

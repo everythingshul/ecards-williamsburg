@@ -1,4 +1,16 @@
-import { db, uuid } from '../db.js';
+import { db, uuid, mergeApplicantRowsInto } from '../db.js';
+
+// A merged applicant is now ONE row (see db.js's mergeApplicantRowsInto) —
+// this is the one membership check every other shul-scoped applicant query
+// and ownership check funnels through, so "shuls should always see only
+// their shul, even if not primary" (ANY member, not just the row's own
+// shul_id) stays a single source of truth as those call sites grow.
+export function isApplicantMemberOfShul(applicantId, shulId) {
+  const a = db.prepare('SELECT shul_id FROM applicants WHERE id = ?').get(applicantId);
+  if (!a) return false;
+  if (a.shul_id === shulId) return true;
+  return !!db.prepare('SELECT 1 FROM applicant_shuls WHERE applicant_id = ? AND shul_id = ?').get(applicantId, shulId);
+}
 
 const norm = (s) => (s || '').toString().trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -337,34 +349,19 @@ export function mergeApplicants(orgId, userId, { primaryId, values, memberIds } 
   const setSql = sets.length ? `, ${sets.map(k => `${k} = ?`).join(', ')}` : '';
   db.prepare(`UPDATE applicants SET merge_group_id = ?, duplicate_status = 'merged', is_paused = 0, updated_at = datetime('now')${setSql} WHERE id = ?`)
     .run(primaryId, ...sets.map(k => values[k]), primaryId);
-  for (const m of members) {
-    if (m.id === primaryId) continue;
-    // A losing member that was soft-rejected is now permanently subsumed
-    // into the primary (not just "orphaned and recoverable" anymore, which
-    // is what 'soft_rejected' means) — 'rejected' is the correct terminal
-    // state for it, and keeps it out of the Soft Reject filter/queue going
-    // forward. Every other loser keeps whatever status it already had, same
-    // as before.
-    const loserStatus = m.approval_status === 'soft_rejected' ? `, approval_status = 'rejected'` : '';
-    db.prepare(`UPDATE applicants SET merge_group_id = ?, duplicate_status = 'merged', is_paused = 0, updated_at = datetime('now')${loserStatus} WHERE id = ?`).run(primaryId, m.id);
-  }
-  const flagIds = db.prepare(`SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type='applicant' AND status='open'
-      AND entity_id IN (${placeholders}) AND matched_entity_id IN (${placeholders})`).all(orgId, ...groupIds, ...groupIds).map(r => r.id);
-  if (flagIds.length) {
-    const fp = flagIds.map(() => '?').join(',');
-    db.prepare(`UPDATE duplicate_flags SET status='resolved', resolved_by=?, resolved_at=datetime('now') WHERE id IN (${fp})`).run(userId, ...flagIds);
-  }
+
   // One real disccardpromos account for the whole group, from this moment
   // on — routes/applicants.js's POST /:id/approve already does this
   // propagation, but only reactively (whichever member happens to be
   // approved next inherits whatever account exists at that time). Doing it
   // here too means a group where one member was already approved (and so
-  // already has a real account) shows that same account on every member's
-  // profile immediately, not just after the next approval.
+  // already has a real account) carries that same account onto the
+  // survivor immediately, not just after the next approval. Computed from
+  // the ORIGINAL member rows, before any of them are deleted below.
   const distinctAccounts = [...new Set(members.map(m => m.provider_account_id).filter(Boolean))];
   let accountConflict = false;
   if (distinctAccounts.length === 1) {
-    db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id IN (${placeholders}) AND provider_account_id IS NULL`).run(distinctAccounts[0], ...groupIds);
+    db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? AND provider_account_id IS NULL`).run(distinctAccounts[0], primaryId);
   } else if (distinctAccounts.length > 1) {
     // More than one member was independently approved before being merged,
     // so more than one real (and possibly funded) disccardpromos account
@@ -373,6 +370,26 @@ export function mergeApplicants(orgId, userId, { primaryId, values, memberIds } 
     // to reconcile manually rather than guessed at automatically.
     accountConflict = true;
   }
+
+  const flagIds = db.prepare(`SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type='applicant' AND status='open'
+      AND entity_id IN (${placeholders}) AND matched_entity_id IN (${placeholders})`).all(orgId, ...groupIds, ...groupIds).map(r => r.id);
+  if (flagIds.length) {
+    const fp = flagIds.map(() => '?').join(',');
+    db.prepare(`UPDATE duplicate_flags SET status='resolved', resolved_by=?, resolved_at=datetime('now') WHERE id IN (${fp})`).run(userId, ...flagIds);
+  }
+
+  // Collapse every other member into the primary — one real row per real
+  // person, from here on (see db.js's mergeApplicantRowsInto): each
+  // loser's own shul becomes an extra membership (applicant_shuls) unless
+  // it's already the primary's own shul_id, every live reference (cards,
+  // allocations, notes, open tasks/documents/flags, message history)
+  // repoints to the primary, and the loser row itself is deleted. A losing
+  // member that was soft-rejected has no further identity of its own to
+  // preserve (that status means exactly that), so it's simply absorbed —
+  // there's no separate row left for it to show up as "rejected" on.
+  const loserIds = groupIds.filter(id => id !== primaryId);
+  mergeApplicantRowsInto(primaryId, loserIds);
+
   return { primaryId, memberIds: groupIds, accountConflict };
 }
 

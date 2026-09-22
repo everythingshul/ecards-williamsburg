@@ -111,9 +111,15 @@ router.get('/mine/config', (req, res) => {
   const orgDefault = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'sola_payments_enabled_default'`).get(req.user.org_id)?.value !== '0';
   const enabled = shul?.stripe_payments_enabled != null ? !!shul.stripe_payments_enabled : orgDefault;
   // Also handed to the shul portal's "Request a Different Payment Method"
-  // modal — active-only, since that's the one place a shul themselves picks
-  // from the admin-configured list (see getManualPaymentMethods above).
-  const manualPaymentMethods = getManualPaymentMethods(req.user.org_id).filter(m => m.active !== false);
+  // modal — active AND visible-to-shul only (Settings > Shul Payments >
+  // Payment Method Options' own "Visible to shul" checkbox, independent of
+  // Active — a method can stay usable for admin manual entry while being
+  // hidden from the shul-facing list entirely, e.g. an in-person/cash
+  // arrangement the office handles directly and never wants a shul to pick
+  // for themselves). isActiveManualMethod (used when a shul submits a
+  // request) intentionally does NOT also check visibility, so hiding a
+  // method here is a UI convenience, not a hard block.
+  const manualPaymentMethods = getManualPaymentMethods(req.user.org_id).filter(m => m.active !== false && m.visibleToShul !== false);
   res.json({ solaEnabled: enabled, mockMode: solaPay.isSolaMockMode(), manualPaymentMethods, cardFee: getCardFeeConfig(req.user.org_id) });
 });
 
@@ -741,6 +747,21 @@ router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req
 
   if (payment.status !== 'approved') { deleteRow(); return res.json({ ok: true, undone: 0 }); }
 
+  // Only pull money back off cards if this shul's OTHER approved payments
+  // can no longer cover what's already been given out. Removing one
+  // payment used to unconditionally undo EVERY outstanding allocation this
+  // shul ever made, even when the shul had plenty of other money on file —
+  // e.g. a shul with two $1,000 wire payments and $1,000 already given to
+  // one applicant would have that applicant's card wiped out just for
+  // deleting a duplicate/mistaken SECOND payment, despite the first
+  // payment alone still covering the full amount given. Recomputed exactly
+  // like services/shulBalance.js's approvedBalance, just excluding this
+  // one payment from the "paid in" side.
+  const paidExcludingThis = db.prepare(`SELECT COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id = ? AND status = 'approved' AND id != ?`).get(payment.shul_id, payment.id).t;
+  const given = db.prepare(`SELECT COALESCE(SUM(base_amount),0) t FROM shul_allocations WHERE shul_id = ?`).get(payment.shul_id).t;
+  const balanceAfterRemoval = Math.round((paidExcludingThis - given) * 100) / 100;
+  if (balanceAfterRemoval >= -0.005) { deleteRow(); return res.json({ ok: true, undone: 0 }); }
+
   const activeAllocations = db.prepare(`SELECT sa.*, a.first_name, a.last_name FROM shul_allocations sa
     LEFT JOIN applicants a ON a.id = sa.applicant_id
     WHERE sa.shul_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL`).all(payment.shul_id);
@@ -749,8 +770,9 @@ router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req
 
   if (!req.body?.confirmUndoAll) {
     return res.status(409).json({
-      error: `This shul has already given out money to applicants — deleting this payment requires undoing all ${activeAllocations.length} outstanding distribution(s) first.`,
+      error: `Deleting this payment leaves this shul short by $${(-balanceAfterRemoval).toFixed(2)} — their other approved payments no longer cover everything already given out, so ${activeAllocations.length} outstanding distribution(s) must be undone first.`,
       requiresUndoAll: true,
+      shortfall: -balanceAfterRemoval,
       activeAllocations: activeAllocations.map(a => ({ id: a.id, applicant_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(), total_amount: a.total_amount })),
     });
   }

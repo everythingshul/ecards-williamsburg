@@ -16,12 +16,6 @@ if (!Auth.can('shul_payments')) { location.href = '/admin/dashboard'; }
 renderShell('/admin/shul-transactions', `
   <h2>Shul Transactions</h2>
   <p class="small-muted">Every shul's payments and money given to applicants, in one place — the same actions available from a shul's own Payments tab, across every shul at once.</p>
-  <div class="toolbar">
-    <select id="f-shul"><option value="">All Shuls</option></select>
-    <select id="f-season"><option value="">All Seasons</option></select>
-    <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="refunded">Refunded</option></select>
-    <input id="p-search" placeholder="Search shul, method, ref#…" style="max-width:240px">
-  </div>
   <div class="tabs">
     <button class="active" id="tab-payments-btn">Payments</button>
     <button id="tab-allocations-btn">Allocations</button>
@@ -88,10 +82,29 @@ renderShell('/admin/shul-transactions', `
       <label style="margin-top:10px">Notes</label><textarea id="po-notes" rows="2"></textarea>
       <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitPayout()">Pay Shul</button>
     </div>
-    <div class="card" style="padding:0;overflow-x:auto">
+    <div id="shared-filter-toolbar" class="card" style="margin-bottom:16px">
+      <div class="toolbar" style="margin-bottom:0">
+        <select id="f-shul"><option value="">All Shuls</option></select>
+        <select id="f-season"><option value="">All Seasons</option></select>
+        <select id="f-status" style="display:none"><option value="">All Statuses</option><option value="pending_approval">Pending Approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="refunded">Refunded</option></select>
+        <select id="f-method" style="display:none"><option value="">All Methods</option></select>
+        <select id="f-type" style="display:none"><option value="">All Types</option><option value="in">Paid In</option><option value="out">Paid to Shul</option></select>
+        <select id="f-entered-by" style="display:none"><option value="">All (Entered By)</option></select>
+        <input id="p-search" placeholder="Search shul, method, ref#…" style="max-width:240px">
+      </div>
+      <div class="toolbar" id="f-row-2" style="display:none;margin-bottom:0;margin-top:10px">
+        <label class="small-muted" style="margin:0">Amount $<input id="f-amount-min" type="number" step="0.01" placeholder="min" style="width:100px;margin-left:4px"></label>
+        <label class="small-muted" style="margin:0">to <input id="f-amount-max" type="number" step="0.01" placeholder="max" style="width:100px;margin-left:4px"></label>
+        <label class="small-muted" style="margin:0">Date <input id="f-date-from" type="date" style="margin-left:4px"></label>
+        <label class="small-muted" style="margin:0">to <input id="f-date-to" type="date" style="margin-left:4px"></label>
+        <button class="btn btn-outline btn-sm" onclick="clearExtraFilters()">Clear filters</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto" id="payments-results-card">
       <table><thead><tr><th>Shul</th><th>Type</th><th>Method</th><th>Amount</th><th>Fee</th><th>Net</th><th>Status</th><th>Ref#</th><th>Entered By</th><th>Date</th><th></th></tr></thead>
       <tbody id="tbody-payments"><tr><td colspan="11" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
+    <div id="payments-filtered-total" class="small-muted" style="display:none;margin-top:8px;text-align:right"></div>
   </div>
   <div id="panel-allocations" style="display:none">
     <div class="card" style="margin-bottom:16px">
@@ -107,14 +120,14 @@ renderShell('/admin/shul-transactions', `
       </div>
       <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitAdminAllocation()">Give</button>
     </div>
-    <div class="card" style="padding:0;overflow-x:auto">
+    <div class="card" style="padding:0;overflow-x:auto" id="allocations-results-card">
       <table><thead><tr><th>Shul</th><th>Applicant</th><th>Given</th><th>Match</th><th>Total</th><th>By</th><th>Date</th><th></th></tr></thead>
       <tbody id="tbody-allocations"><tr><td colspan="8" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
   </div>
   <div id="panel-requests" style="display:none">
     <p class="small-muted">A shul asking for a payment method other than online card payment (Settings > Notify on Payment Method Requests controls who gets emailed when one comes in).</p>
-    <div class="card" style="padding:0;overflow-x:auto">
+    <div class="card" style="padding:0;overflow-x:auto" id="requests-results-card">
       <table><thead><tr><th>Shul</th><th>Requested Method</th><th>Message</th><th>Date</th></tr></thead>
       <tbody id="tbody-requests"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table>
     </div>
@@ -162,21 +175,56 @@ let lastPayments = [];
 async function loadPayments() {
   const { payments } = await api('/shul-payments?' + currentFilterParams());
   lastPayments = payments;
+  populateEnteredByFilter();
   renderPaymentsTable();
 }
-// Client-side search over whatever's already loaded (shul name, method
-// label, ref#/check#, notes) — this list is unpaginated and already fully
-// fetched per the current shul/season/status filters, same pattern as the
-// Shul Totals tab's own search box, so no server round-trip is needed per
-// keystroke.
+function enteredByName(p) { return `${p.entered_by_first || ''} ${p.entered_by_last || ''}`.trim(); }
+// Rebuilds the "Entered By" filter's options from whoever's actually on
+// the currently-loaded (shul/season/status-filtered) list — narrower and
+// always accurate, instead of a full staff list that would mostly be
+// people who never entered anything for this filter set.
+function populateEnteredByFilter() {
+  const sel = qs('#f-entered-by');
+  const current = sel.value;
+  const names = [...new Set(lastPayments.map(enteredByName).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  sel.innerHTML = '<option value="">All (Entered By)</option>' + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (names.includes(current)) sel.value = current;
+}
+// Client-side filtering over whatever's already loaded (shul name, method
+// label, ref#/check#, notes for the free-text search; method/type/amount
+// range/entered-by/date range as their own dedicated filters) — this list
+// is unpaginated and already fully fetched per the current shul/season/
+// status filters, same pattern as the Shul Totals tab's own search box, so
+// no server round-trip is needed per keystroke.
 function renderPaymentsTable() {
   const q = (qs('#p-search')?.value || '').trim().toLowerCase();
-  const payments = q ? lastPayments.filter(p =>
-    (p.shul_name || '').toLowerCase().includes(q) ||
-    (MANUAL_METHOD_LABEL[p.method] || p.method || '').toLowerCase().includes(q) ||
-    (p.manual_ref || '').toLowerCase().includes(q) ||
-    (p.notes || '').toLowerCase().includes(q)
-  ) : lastPayments;
+  const fMethod = qs('#f-method').value;
+  const fType = qs('#f-type').value;
+  const fEnteredBy = qs('#f-entered-by').value;
+  const fMin = qs('#f-amount-min').value !== '' ? +qs('#f-amount-min').value : null;
+  const fMax = qs('#f-amount-max').value !== '' ? +qs('#f-amount-max').value : null;
+  const fFrom = qs('#f-date-from').value || null;
+  const fTo = qs('#f-date-to').value || null;
+  const anyFilterActive = !!(q || fMethod || fType || fEnteredBy || fMin != null || fMax != null || fFrom || fTo);
+  const payments = lastPayments.filter(p => {
+    if (q && !(
+      (p.shul_name || '').toLowerCase().includes(q) ||
+      (MANUAL_METHOD_LABEL[p.method] || p.method || '').toLowerCase().includes(q) ||
+      (p.manual_ref || '').toLowerCase().includes(q) ||
+      (p.notes || '').toLowerCase().includes(q)
+    )) return false;
+    if (fMethod && p.method !== fMethod) return false;
+    if (fType && p.direction !== fType) return false;
+    if (fEnteredBy && enteredByName(p) !== fEnteredBy) return false;
+    if (fMin != null && p.amount < fMin) return false;
+    if (fMax != null && p.amount > fMax) return false;
+    // created_at is "YYYY-MM-DD HH:MM:SS"; a plain string slice/compare
+    // against the date input's own "YYYY-MM-DD" works without parsing.
+    const day = (p.created_at || '').slice(0, 10);
+    if (fFrom && day < fFrom) return false;
+    if (fTo && day > fTo) return false;
+    return true;
+  });
   // Refunds are their own rows (method sola_refund, refund_of pointing back
   // at the original charge) — summed here just to know how much of each
   // charge is still refundable and to show a small "Refunded: $X" note;
@@ -220,6 +268,21 @@ function renderPaymentsTable() {
       <td>${p.status === 'pending_approval' ? `<button class="btn btn-outline btn-sm" onclick="approvePayment('${p.id}')">Approve</button> <button class="btn btn-outline btn-sm" onclick="rejectPayment('${p.id}')">Reject</button> ` : ''}${refundable > 0.005 ? `<button class="btn btn-outline btn-sm" onclick="openRefundModal('${p.id}')">Refund</button> ` : ''}${isCardMethod ? (Auth.can('shul_payment_transfer') && !p.refund_of ? `<button class="btn btn-outline btn-sm" onclick="openEditPaymentModal('${p.id}')">Edit</button>` : '') : `<button class="btn btn-outline btn-sm" onclick="openEditPaymentModal('${p.id}')">Edit</button> <button class="btn btn-outline btn-sm" onclick="deletePayment('${p.id}')">Delete</button>`}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="11" class="empty-state">No payments match these filters.</td></tr>';
+
+  // Total of money IN the current filter — only shown once a filter is
+  // actually narrowing the list (the shul/season/status pickers above the
+  // tabs already imply "some filter", counted here too), never for the
+  // full unfiltered list. Net directional total (paid-to-shul rows
+  // subtract), same sign convention as the Amount column itself.
+  const totalEl = qs('#payments-filtered-total');
+  const filtersActive = anyFilterActive || !!state.shul_id || !!state.season_id || !!state.status;
+  if (filtersActive && payments.length) {
+    const sum = payments.reduce((s, p) => s + (p.direction === 'out' ? -p.amount : p.amount), 0);
+    totalEl.style.display = '';
+    totalEl.textContent = `${payments.length.toLocaleString()} transaction${payments.length === 1 ? '' : 's'} in this filter — total: ${fmtMoney(Math.round(sum * 100) / 100)}`;
+  } else {
+    totalEl.style.display = 'none';
+  }
 }
 window.approvePayment = async (id) => {
   try { await api(`/shul-payments/${id}/approve`, { method: 'POST' }); toast('Approved'); loadPayments(); } catch (err) { toast(err.message, true); }
@@ -579,15 +642,33 @@ qs('#panel-shultotals').querySelector('thead').addEventListener('click', (e) => 
 
 const TABS = ['payments', 'allocations', 'requests', 'shultotals'];
 const TAB_LOADERS = { payments: loadPayments, allocations: loadAllocations, requests: loadRequests, shultotals: loadShulTotals };
+// The shared shul/season filter bar is ONE set of inputs (stable ids, one
+// set of listeners) physically relocated to sit right above whichever
+// tab's own results list is currently showing, instead of living above
+// every tab's "add a new..." forms — moving it into a tab whose panel is
+// display:none would hide it too, so this runs on every switch, not once.
+const TOOLBAR_SLOT = { payments: '#payments-results-card', allocations: '#allocations-results-card', requests: '#requests-results-card' };
+function relocateToolbar(t) {
+  const slotSel = TOOLBAR_SLOT[t];
+  if (!slotSel) return; // Shul Totals has its own search box and never shows f-shul/f-season anyway
+  const target = qs(slotSel);
+  const toolbar = qs('#shared-filter-toolbar');
+  if (target && toolbar) target.parentNode.insertBefore(toolbar, target);
+}
 function switchTab(t) {
   activeTab = t;
   TABS.forEach(x => { qs('#tab-' + x + '-btn').classList.toggle('active', x === t); qs('#panel-' + x).style.display = x === t ? 'block' : 'none'; });
   qs('#f-status').style.display = t === 'payments' ? '' : 'none';
   qs('#p-search').style.display = t === 'payments' ? '' : 'none';
+  qs('#f-method').style.display = t === 'payments' ? '' : 'none';
+  qs('#f-type').style.display = t === 'payments' ? '' : 'none';
+  qs('#f-entered-by').style.display = t === 'payments' ? '' : 'none';
+  qs('#f-row-2').style.display = t === 'payments' ? '' : 'none';
   // Shul Totals is a lifetime, all-seasons rollup with its own search box —
   // the shul/season filters above the tabs don't apply to it.
   qs('#f-shul').style.display = t === 'shultotals' ? 'none' : '';
   qs('#f-season').style.display = t === 'shultotals' ? 'none' : '';
+  relocateToolbar(t);
   TAB_LOADERS[t]();
 }
 TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switchTab(t)));
@@ -595,14 +676,30 @@ TABS.forEach(t => qs('#tab-' + t + '-btn').addEventListener('click', () => switc
 qs('#f-shul').addEventListener('change', () => { state.shul_id = qs('#f-shul').value; TAB_LOADERS[activeTab](); });
 qs('#f-season').addEventListener('change', () => { state.season_id = qs('#f-season').value; populateShulFilter('f-shul', state.season_id); TAB_LOADERS[activeTab](); });
 qs('#f-status').addEventListener('change', () => { state.status = qs('#f-status').value; TAB_LOADERS[activeTab](); });
+// Method/type/amount-range/entered-by/date-range filter the already-loaded
+// Payments list client-side, same as the existing search box — the list is
+// small and unpaginated (per-shul/season/status), so no extra round trip.
+['f-method', 'f-type', 'f-entered-by', 'f-amount-min', 'f-amount-max', 'f-date-from', 'f-date-to'].forEach(id => {
+  qs('#' + id).addEventListener('input', renderPaymentsTable);
+});
+window.clearExtraFilters = () => {
+  ['f-method', 'f-type', 'f-entered-by'].forEach(id => { qs('#' + id).value = ''; });
+  ['f-amount-min', 'f-amount-max', 'f-date-from', 'f-date-to'].forEach(id => { qs('#' + id).value = ''; });
+  qs('#p-search').value = '';
+  renderPaymentsTable();
+};
 
 // Loaded first so the Payments table's very first render already has real
 // (possibly admin-renamed) method labels instead of the fallback defaults.
 loadMethodOptions().then(() => {
+  qs('#f-method').innerHTML = '<option value="">All Methods</option>' + Object.entries(MANUAL_METHOD_LABEL).map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
   populateSeasonFilter('f-season').then(activeId => {
     state.season_id = activeId;
     populateShulFilter('f-shul', activeId);
-    loadPayments();
+    // switchTab (not a bare loadPayments()) so the Payments-only filter
+    // fields and toolbar position are correctly set up on first load too,
+    // not only after switching tabs away and back.
+    switchTab('payments');
   });
 });
 // The manual-payment / allocate forms' own shul dropdowns are deliberately

@@ -3,7 +3,7 @@ import { db } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { getPermission, requirePermission } from '../middleware/permissions.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { orgFundsSummary } from '../services/applicantBalance.js';
+import { orgFundsSummary, loadedAccountsActive } from '../services/applicantBalance.js';
 
 const router = Router();
 // Internal team only — every count below is computed org-wide (total shuls,
@@ -106,6 +106,7 @@ router.get('/stats', (req, res) => {
     // than a derived guess. orgFundsSummary dedupes by merge group (so a
     // shared disccardpromos account isn't double-counted across its members).
     stats.funds = orgFundsSummary(orgId, seasonId);
+    stats.loadedAccounts = loadedAccountsActive(orgId, seasonId);
   }
   // Duplicate flags aren't tied to a season (a flagged duplicate is either
   // resolved or not, independent of which season it was raised in), so this

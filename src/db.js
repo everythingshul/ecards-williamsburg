@@ -1145,6 +1145,100 @@ safeAlter(`ALTER TABLE duplicate_flags ADD COLUMN bypassed_reasons TEXT`);
 // `loaded` would re-credit it onto the primary on the next amount push.
 safeAlter(`ALTER TABLE applicants ADD COLUMN merged_spend_adjustment REAL NOT NULL DEFAULT 0`);
 
+// ---------------------------------------------------------------------------
+// Merged applicants now collapse to ONE row (2026-09) — previously a merge
+// kept every member as its own row, linked only by merge_group_id, so each
+// shul's own submission stayed intact but disccardpromos only ever had ONE
+// real customer per real person while this app tracked that person across
+// several rows, each with its own (possibly stale) copy of
+// provider_account_id — the most likely real cause of a legitimately-active
+// account getting swept up as an "orphan" by the enforcement job (services/
+// providerAccount.js), since a query keyed off any ONE member's row could
+// miss what another member's row actually had current.
+// `applicant_shuls` is the new home for "which OTHER shuls does this one
+// merged person also belong to" — the survivor's own `shul_id` column
+// keeps working exactly as before for every non-merged applicant (still the
+// overwhelming majority), so almost nothing else in the app needs to
+// change for that case.
+db.exec(`CREATE TABLE IF NOT EXISTS applicant_shuls (
+  id TEXT PRIMARY KEY,
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  shul_id TEXT NOT NULL REFERENCES shuls(id),
+  added_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(applicant_id, shul_id)
+)`);
+
+// Shared by the one-time collapse below and services/duplicates.js's
+// mergeApplicants (every merge from here on) — folds every `loserIds` row
+// into `primaryId`: records each loser's own shul as an EXTRA membership
+// (applicant_shuls) unless the primary already covers it, repoints every
+// LIVE reference (cards, allocations, notes, open tasks/documents/
+// duplicate flags, message history) from the loser's id to the primary's,
+// then deletes the loser row. Runs as one transaction per call so a crash
+// mid-collapse never leaves a loser half-repointed — retrying (the
+// migration below re-checks every group on every boot) just repeats
+// already-applied UPDATEs harmlessly and INSERT OR IGNOREs the membership
+// row. Deliberately never touches audit_log/emails_sent/sms_messages'
+// PAST rows beyond the related-entity pointer used to look message history
+// back up — those are a record of what already happened, not a live
+// reference that needs to keep resolving to a row that still exists.
+export const mergeApplicantRowsInto = db.transaction((primaryId, loserIds) => {
+  if (!loserIds || !loserIds.length) return;
+  const primary = db.prepare('SELECT * FROM applicants WHERE id = ?').get(primaryId);
+  if (!primary) throw new Error(`mergeApplicantRowsInto: primary ${primaryId} not found`);
+  const insertMembership = db.prepare(`INSERT OR IGNORE INTO applicant_shuls (id, applicant_id, shul_id) VALUES (?,?,?)`);
+  const repoint = (table, column, loserId) => db.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${column} = ?`).run(primaryId, loserId);
+  for (const loserId of loserIds) {
+    if (loserId === primaryId) continue;
+    const loser = db.prepare('SELECT * FROM applicants WHERE id = ?').get(loserId);
+    if (!loser) continue;
+    if (loser.shul_id && loser.shul_id !== primary.shul_id) insertMembership.run(randomUUID(), primaryId, loser.shul_id);
+    // Bring over every OTHER shul the loser itself already tracked (a
+    // group collapsed in more than one pass can have a loser that was
+    // already a merge survivor of its own smaller group).
+    for (const row of db.prepare(`SELECT shul_id FROM applicant_shuls WHERE applicant_id = ?`).all(loserId)) {
+      if (row.shul_id !== primary.shul_id) insertMembership.run(randomUUID(), primaryId, row.shul_id);
+    }
+    repoint('applicant_notes', 'applicant_id', loserId);
+    repoint('cards', 'applicant_id', loserId);
+    repoint('card_reconciliation_flags', 'applicant_id', loserId);
+    repoint('shul_allocations', 'applicant_id', loserId);
+    db.prepare(`UPDATE documents SET entity_id = ? WHERE entity_type = 'applicant' AND entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE tasks SET entity_id = ? WHERE entity_type = 'applicant' AND entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE duplicate_flags SET entity_id = ? WHERE entity_type = 'applicant' AND entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE duplicate_flags SET matched_entity_id = ? WHERE entity_type = 'applicant' AND matched_entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE sms_messages SET related_entity_id = ? WHERE related_entity_type = 'applicant' AND related_entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE emails_sent SET related_entity_id = ? WHERE related_entity_type = 'applicant' AND related_entity_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE applicants SET duplicate_of_applicant_id = ? WHERE duplicate_of_applicant_id = ?`).run(primaryId, loserId);
+    db.prepare(`UPDATE applicants SET carried_from_applicant_id = ? WHERE carried_from_applicant_id = ?`).run(primaryId, loserId);
+    db.prepare(`DELETE FROM applicants WHERE id = ?`).run(loserId);
+  }
+});
+
+// One-time-per-boot collapse of every EXISTING merge group that still has
+// more than one row under it — a no-op once every group has already been
+// collapsed to its single survivor, checked per-group via COUNT(*) (not a
+// single "have we ever run this" flag), so a group that somehow ends up
+// with an extra row again later still gets finished on the next boot.
+{
+  const groupIds = db.prepare(`SELECT DISTINCT merge_group_id FROM applicants WHERE merge_group_id IS NOT NULL`).all().map(r => r.merge_group_id);
+  let collapsed = 0;
+  for (const groupId of groupIds) {
+    const members = db.prepare(`SELECT id, created_at FROM applicants WHERE merge_group_id = ?`).all(groupId);
+    if (members.length < 2) continue; // already collapsed (or a stale/self-only group id)
+    const primaryId = members.some(m => m.id === groupId) ? groupId
+      : members.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))[0].id;
+    const loserIds = members.map(m => m.id).filter(id => id !== primaryId);
+    try {
+      mergeApplicantRowsInto(primaryId, loserIds);
+      collapsed++;
+    } catch (e) {
+      console.error(`[db] failed to collapse merge group ${groupId} into ${primaryId}:`, e.message);
+    }
+  }
+  if (collapsed) console.log(`[db] collapsed ${collapsed} existing merge group(s) into a single record each`);
+}
+
 // Leftover from the removed "transactions not recognized" banner (the
 // transactions field is confirmed now — see services/cardSync.js).
 try { db.prepare(`DELETE FROM settings WHERE key = 'disccard_txn_shape_diagnostic'`).run(); } catch {}
