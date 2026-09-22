@@ -128,13 +128,32 @@ const fullAddress = (a) => norm([a.address, a.city, a.state, a.zip].filter(Boole
 // below can report "reasonsNow[0]" for plain creation-time checks (identical
 // behavior to before) while also being able to diff the full set against a
 // prior state for the continuous re-check case.
+// Any of a's phone numbers matching ANY of c's — not just the same field
+// against itself (home vs. home, cell vs. cell). The same family often
+// gets submitted with numbers shuffled between fields (one shul's "home
+// phone" is another's "husband cell" for the same actual line), so a
+// real duplicate was being missed whenever the matching number landed in
+// a different field on each side. PHONE_FIELD_LABELS below is also reused
+// by applicantsSharePhone's own any-field comparison further down.
+const PHONE_FIELD_LABELS = { home_phone: 'home phone', husband_cell: 'husband cell', wife_cell: 'wife cell' };
+function phoneMatchReasons(a, c) {
+  const reasons = [];
+  for (const [aField, aLabel] of Object.entries(PHONE_FIELD_LABELS)) {
+    const aVal = norm(a[aField]);
+    if (!aVal) continue;
+    for (const [cField, cLabel] of Object.entries(PHONE_FIELD_LABELS)) {
+      if (norm(c[cField]) !== aVal) continue;
+      const label = aField === cField ? `Same ${aLabel} number` : `Same phone number (${aLabel} matches their ${cLabel})`;
+      if (!reasons.includes(label)) reasons.push(label);
+    }
+  }
+  return reasons;
+}
 function matchReasons(a, aAddress, c) {
   const reasons = [];
   const sameName = norm(a.first_name) && norm(a.last_name) && norm(c.first_name) === norm(a.first_name) && norm(c.last_name) === norm(a.last_name);
   if (sameName) reasons.push('Same first and last name');
-  if (a.home_phone && norm(c.home_phone) === norm(a.home_phone)) reasons.push('Same home phone number');
-  if (a.husband_cell && norm(c.husband_cell) === norm(a.husband_cell)) reasons.push('Same husband cell number');
-  if (a.wife_cell && norm(c.wife_cell) === norm(a.wife_cell)) reasons.push('Same wife cell number');
+  reasons.push(...phoneMatchReasons(a, c));
   if (a.email && norm(c.email) === norm(a.email)) reasons.push('Same email address');
   if (a.address && aAddress === fullAddress(c)) reasons.push('Same address');
   return reasons;
@@ -211,12 +230,47 @@ export function detectAndFlag(orgId, entityType, entity, excludeIds = [], previo
   return db.prepare('SELECT * FROM duplicate_flags WHERE id = ?').get(id);
 }
 
+// Re-runs checkApplicantDuplicate (and so whatever matchReasons currently
+// considers a match — e.g. the any-to-any phone comparison above) across
+// applicants already in the system, not just ones being saved right now.
+// Needed whenever the matching rules themselves change: without this, an
+// old pair that only becomes a match under a NEW rule sits there forever
+// unflagged, since detectAndFlag only ever runs at save time. Reuses
+// detectAndFlag exactly as a live save would for each applicant in turn —
+// same flag creation, same "only the entity side gets paused/has its cards
+// locked, the side it matched against is left alone" rule — so an old pair
+// caught by this sweep is treated identically to a brand-new catch.
+// Processed oldest-created first so the outcome is deterministic: given a
+// match, the longer-standing record is the one whose turn comes first and
+// so is the one that gets paused; when the newer record's own turn comes
+// later, detectAndFlag finds the flag already open between the two and
+// returns it without pausing a second time.
+// season_id (optional) scopes which applicants are walked as the "entity"
+// side of the check — the check itself is still always season-scoped (see
+// checkApplicantDuplicate), so this only limits which season's applicants
+// are swept this run, not which season a match can be found in.
+export function recheckApplicantDuplicates(orgId, seasonId) {
+  const beforeOpenIds = new Set(db.prepare(
+    `SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type = 'applicant' AND status = 'open'`
+  ).all(orgId).map(r => r.id));
+  const rows = seasonId
+    ? db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId, seasonId)
+    : db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId);
+  const newFlags = [];
+  for (const a of rows) {
+    const flag = detectAndFlag(orgId, 'applicant', a);
+    if (flag && !beforeOpenIds.has(flag.id)) { newFlags.push(flag); beforeOpenIds.add(flag.id); }
+  }
+  return { checked: rows.length, newFlags };
+}
+
 // Which fields count as "a phone number" for the never-bypass-if-matched
 // rule below — checked as a set against a set, so a cell on one side
 // matching the OTHER side's home phone (not just the same field) still
 // counts; only an actual phone-to-phone match blocks bypass, never an
-// address/name coincidence.
-const PHONE_FIELDS = ['home_phone', 'husband_cell', 'wife_cell'];
+// address/name coincidence. Same three fields phoneMatchReasons above
+// compares any-to-any for the actual flagging reasons.
+const PHONE_FIELDS = Object.keys(PHONE_FIELD_LABELS);
 function phoneSet(a) { return new Set(PHONE_FIELDS.map(f => norm(a[f])).filter(Boolean)); }
 export function applicantsSharePhone(a, b) {
   const setA = phoneSet(a);

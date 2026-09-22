@@ -3,7 +3,7 @@ import multer from 'multer';
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth, requireAdmin } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
-import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, isApplicantMemberOfShul } from '../services/duplicates.js';
+import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, isApplicantMemberOfShul, recheckApplicantDuplicates } from '../services/duplicates.js';
 import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
 import { sendSmsChecked } from '../services/sms.js';
 import * as giftcard from '../services/giftcard.js';
@@ -1673,6 +1673,22 @@ router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_ed
     logAudit(req.user.org_id, req.user.id, 'merge', 'applicant', primaryId, null, result, req.ip);
     res.json({ ...result, consolidation });
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Re-runs duplicate detection across applicants ALREADY in the system, not
+// just ones being saved right now — for when the matching rules themselves
+// change (e.g. the any-to-any phone comparison added to matchReasons) and
+// old records need to be caught too. season_id (optional) limits the sweep
+// to one season's applicants; omitted sweeps every season. Exactly the same
+// flag/pause behavior as a normal save-time catch (see
+// recheckApplicantDuplicates in services/duplicates.js) — an old pair newly
+// caught by this rule change gets paused/card-locked just like a fresh one.
+router.post('/duplicates/recheck-all', requireAdmin, (req, res) => {
+  const { season_id } = req.body || {};
+  const result = recheckApplicantDuplicates(req.user.org_id, season_id || null);
+  logAudit(req.user.org_id, req.user.id, 'recheck-duplicates', 'applicant', null,
+    null, { checked: result.checked, newFlags: result.newFlags.length, seasonId: season_id || null }, req.ip);
+  res.json({ checked: result.checked, newFlagCount: result.newFlags.length });
 });
 
 // ============================= Disccardpromos reconciliation (super_admin only) =============================

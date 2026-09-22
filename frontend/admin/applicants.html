@@ -720,12 +720,31 @@ async function showDuplicates() {
   } catch (err) { toast(err.message, true); }
 }
 function renderDuplicatesList() {
-  const body = `<input id="dup-search" placeholder="Search by name, shul, or reason…" value="${esc(dupSearchTerm)}" style="margin-bottom:12px">
+  const body = `<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+      <input id="dup-search" placeholder="Search by name, shul, or reason…" value="${esc(dupSearchTerm)}" style="flex:1;margin-bottom:0">
+      <button class="btn btn-outline btn-sm" id="dup-recheck-all" title="Re-run duplicate matching against every existing applicant, not just new ones — use after a matching rule changes so older records get caught too">Recheck All</button>
+    </div>
     <div id="dup-list">${renderDupListOnly()}</div>`;
   openModal('Duplicate Applicant Flags', body);
   qs('#dup-search').addEventListener('input', (e) => { dupSearchTerm = e.target.value; qs('#dup-list').innerHTML = renderDupListOnly(); });
   qs('#dup-search').focus();
   qs('#dup-search').selectionStart = qs('#dup-search').selectionEnd = dupSearchTerm.length;
+  qs('#dup-recheck-all').addEventListener('click', recheckAllDuplicates);
+}
+// Re-runs duplicate matching against every applicant already in the
+// system (not just new saves) — for after a matching rule changes, so
+// older records that only now match get caught too. Same pause/card-lock
+// behavior as a normal new catch, so this is confirmed up front like any
+// other bulk action with real side effects.
+async function recheckAllDuplicates() {
+  if (!confirm('Re-check every existing applicant for duplicates using the current matching rules?\n\nAny newly-found match will be flagged and paused, exactly like a brand-new duplicate catch — this can pause accounts that have been active for a while.' + (state.season_id ? '\n\nThis will only check the currently-selected season.' : '\n\nThis will check every season.'))) return;
+  const btn = qs('#dup-recheck-all');
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const r = await api('/applicants/duplicates/recheck-all', { method: 'POST', body: { season_id: state.season_id || null } });
+    toast(`Checked ${r.checked} applicant${r.checked === 1 ? '' : 's'} — ${r.newFlagCount} new duplicate${r.newFlagCount === 1 ? '' : 's'} flagged.`);
+    await showDuplicates();
+  } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = 'Recheck All'; }
 }
 function renderDupListOnly() {
   const term = dupSearchTerm.trim().toLowerCase();
