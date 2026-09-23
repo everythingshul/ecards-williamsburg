@@ -895,6 +895,17 @@ router.post('/:id/impersonate', requireAdmin, requirePermission('portal_imperson
   if (!shul) return res.status(404).json({ error: 'Not found' });
   const portalUser = db.prepare(`SELECT * FROM users WHERE shul_id = ? AND role = 'shul'`).get(shul.id);
   if (!portalUser || !portalUser.is_active) return res.status(400).json({ error: "This shul doesn't have an active portal login yet — approve or invite them first." });
+  // Neither this mint nor the redeem in routes/auth.js's POST
+  // /impersonate/:token ever checked is_paused (only login does) — so an
+  // admin clicking "Enter Portal" for a shul paused pending a duplicate
+  // flag used to sail straight through both steps, land on what looks like
+  // a working dashboard, and only THEN have every real API call (auth
+  // middleware's own is_paused check) fail with a 423 — a confusing dead
+  // end with no explanation, easily read as "the portal is broken" rather
+  // than "this shul is paused". Caught here instead, before a token is
+  // even minted, with the same message a paused shul's own login attempt
+  // would get.
+  if (shul.is_paused || portalUser.is_paused) return res.status(423).json({ error: 'This shul is paused pending a duplicate resolution — resolve that first, then Enter Portal will work.', code: 'ACCOUNT_PAUSED' });
   const token = uuid();
   const expires = new Date(Date.now() + 2 * 60 * 1000).toISOString();
   db.prepare(`INSERT INTO impersonation_tokens (token, user_id, created_by, org_id, expires_at) VALUES (?,?,?,?,?)`)

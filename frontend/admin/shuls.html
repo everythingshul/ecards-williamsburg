@@ -391,7 +391,9 @@ async function openShul(id) {
       ${shul.is_paused ? `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',false)">Unpause</button>` : `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',true)">Pause</button>`}
       ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteShul('${id}')">Delete Permanently</button>` : ''}
       ${!shul.portal_user_id ? `<button class="btn btn-outline btn-sm" onclick="inviteShul('${id}')">Invite to Portal</button>` : ''}
-      ${shul.portal_user_id && Auth.can('portal_impersonation') ? `<button class="btn btn-outline btn-sm" onclick="enterPortal('shuls','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Enter Portal</button>` : ''}
+      ${shul.portal_user_id && Auth.can('portal_impersonation') ? (shul.is_paused
+        ? `<button class="btn btn-outline btn-sm" disabled title="This shul is paused pending a duplicate resolution — unpause it first">Enter Portal</button>`
+        : `<button class="btn btn-outline btn-sm" onclick="enterPortal('shuls','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Enter Portal</button>`) : ''}
       ${['approved','rejected'].includes(shul.status) ? `<button class="btn btn-outline btn-sm" onclick="setShulPending('${id}')">Set to Pending</button>` : ''}
       ${shul.status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="rejectShul('${id}')">Reject</button><button class="btn btn-primary btn-sm" onclick="approveShul('${id}')">Approve</button>` : `<button class="btn btn-outline btn-sm" onclick="resendWelcome('${id}')">Resend Welcome Email</button>`}
       ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Set Password</button>` : ''}

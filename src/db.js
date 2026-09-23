@@ -751,6 +751,17 @@ CREATE INDEX IF NOT EXISTS idx_shuls_status ON shuls(status);
 CREATE INDEX IF NOT EXISTS idx_applicants_org ON applicants(org_id);
 CREATE INDEX IF NOT EXISTS idx_applicants_shul ON applicants(shul_id);
 CREATE INDEX IF NOT EXISTS idx_applicants_status ON applicants(approval_status);
+-- Missing until now — every season-scoped applicant query (duplicate
+-- detection foremost, but also the admin list/export filters, dashboard
+-- stats, cardSync, etc.) filters WHERE season_id = ?, and org_id gives
+-- SQLite no help narrowing that down at all in a single-org app (every row
+-- shares the same org_id). Without this, that filter was a full scan of
+-- EVERY applicant ever created, across every past season, every time —
+-- the real reason services/duplicates.js's recheckApplicantDuplicates sweep
+-- (one such query per applicant being checked) got dramatically slower on
+-- a real production history than on a fresh/small database, on top of the
+-- separate event-loop-blocking bug already fixed there.
+CREATE INDEX IF NOT EXISTS idx_applicants_season ON applicants(season_id);
 CREATE INDEX IF NOT EXISTS idx_cards_applicant ON cards(applicant_id);
 CREATE INDEX IF NOT EXISTS idx_txn_card ON card_transactions(card_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);

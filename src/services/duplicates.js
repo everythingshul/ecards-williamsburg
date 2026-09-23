@@ -179,9 +179,17 @@ function matchReasons(a, aAddress, c) {
 // still gets checked (and can be flagged) once it's actually saved as a
 // real submission — see detectAndFlag's call sites, all of which run after
 // approval_status has already left draft/incomplete.
+// Only the columns matchReasons/fullAddress/the merge_group_id check below
+// actually touch — narrowed from SELECT * since this runs once per
+// applicant across a full season every time (save-time checks, and every
+// iteration of recheckApplicantDuplicates' sweep), and a season can hold a
+// meaningful number of rows; skipping every unused text column (comments,
+// permanent_comments, etc.) cuts real per-query I/O/copy cost with zero
+// behavior change — the return value only ever exposes c.id and reason.
+const CANDIDATE_COLUMNS = 'id, merge_group_id, first_name, last_name, home_phone, husband_cell, wife_cell, email, address, city, state, zip';
 export function checkApplicantDuplicate(orgId, applicant, previousApplicant) {
   if (['draft', 'incomplete'].includes(applicant.approval_status)) return null;
-  const candidates = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND id != ? AND approval_status NOT IN ('draft', 'incomplete')`).all(orgId, applicant.season_id, applicant.id);
+  const candidates = db.prepare(`SELECT ${CANDIDATE_COLUMNS} FROM applicants WHERE org_id = ? AND season_id = ? AND id != ? AND approval_status NOT IN ('draft', 'incomplete')`).all(orgId, applicant.season_id, applicant.id);
   const applicantAddress = fullAddress(applicant);
   const previousAddress = previousApplicant ? fullAddress(previousApplicant) : null;
   for (const c of candidates) {
@@ -272,9 +280,14 @@ export async function recheckApplicantDuplicates(orgId, seasonId, job = { progre
   const beforeOpenIds = new Set(db.prepare(
     `SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type = 'applicant' AND status = 'open'`
   ).all(orgId).map(r => r.id));
+  // Same narrowed column set as CANDIDATE_COLUMNS, plus season_id/
+  // approval_status (checkApplicantDuplicate reads both off this exact
+  // row) — everything detectAndFlag/pauseAccountsFor need beyond that is
+  // just the id already included.
+  const entityColumns = `${CANDIDATE_COLUMNS}, season_id, approval_status`;
   const rows = seasonId
-    ? db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId, seasonId)
-    : db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId);
+    ? db.prepare(`SELECT ${entityColumns} FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId, seasonId)
+    : db.prepare(`SELECT ${entityColumns} FROM applicants WHERE org_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId);
   job.total = rows.length;
   const newFlags = [];
   let i = 0;
