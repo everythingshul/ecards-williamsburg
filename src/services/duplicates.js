@@ -1,4 +1,5 @@
 import { db, uuid, mergeApplicantRowsInto } from '../db.js';
+import { logAudit } from './audit.js';
 
 // A merged applicant is now ONE row (see db.js's mergeApplicantRowsInto) —
 // this is the one membership check every other shul-scoped applicant query
@@ -252,19 +253,62 @@ export function detectAndFlag(orgId, entityType, entity, excludeIds = [], previo
 // side of the check — the check itself is still always season-scoped (see
 // checkApplicantDuplicate), so this only limits which season's applicants
 // are swept this run, not which season a match can be found in.
-export function recheckApplicantDuplicates(orgId, seasonId) {
+//
+// CRITICAL: better-sqlite3 is fully synchronous, and Node is single-
+// threaded — a version of this that looped over every applicant with no
+// yield point ran as ONE uninterrupted synchronous block for its entire
+// duration, during which the whole server could not service ANY other
+// request (every device, every page, all at once — not just this admin's
+// own tab). For an org with a real season or two of accumulated
+// applicants, that's long enough to look like — and, under Render's
+// health-check/restart behavior, potentially become — a full outage. Every
+// 25 applicants this now awaits a setImmediate tick, handing control back
+// to the event loop so pending requests actually get serviced in between
+// batches. See startRecheckJob below for why this also runs as a
+// poll-for-progress background job (same reason runProviderAudit/
+// runProviderEnforce in providerAccount.js do) rather than one long
+// request-response.
+export async function recheckApplicantDuplicates(orgId, seasonId, job = { progress: 0, total: 0 }) {
   const beforeOpenIds = new Set(db.prepare(
     `SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type = 'applicant' AND status = 'open'`
   ).all(orgId).map(r => r.id));
   const rows = seasonId
     ? db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId, seasonId)
     : db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId);
+  job.total = rows.length;
   const newFlags = [];
+  let i = 0;
   for (const a of rows) {
     const flag = detectAndFlag(orgId, 'applicant', a);
     if (flag && !beforeOpenIds.has(flag.id)) { newFlags.push(flag); beforeOpenIds.add(flag.id); }
+    job.progress = ++i;
+    if (i % 25 === 0) await new Promise(resolve => setImmediate(resolve));
   }
   return { checked: rows.length, newFlags };
+}
+
+// Async job wrapper (see the CRITICAL note above) — same
+// kick-off-then-poll shape as providerAccount.js's startProviderAudit/
+// getProviderAuditJob, reusing that exact { status, progress, total,
+// result, error } job shape so the frontend can poll it the same way.
+// Logs the action once the job finishes (moved out of the route, since the
+// route only ever sees the immediately-returned "started" state now).
+const recheckJobs = new Map(); // orgId -> job state
+export function getRecheckJob(orgId) { return recheckJobs.get(orgId) || null; }
+export function startRecheckJob(orgId, userId, seasonId, ip) {
+  const existing = recheckJobs.get(orgId);
+  if (existing?.status === 'running') return existing;
+  const job = { status: 'running', progress: 0, total: 0, result: null, error: null, startedAt: new Date().toISOString(), finishedAt: null };
+  recheckJobs.set(orgId, job);
+  recheckApplicantDuplicates(orgId, seasonId, job).then(result => {
+    job.result = { checked: result.checked, newFlagCount: result.newFlags.length };
+    job.status = 'done'; job.finishedAt = new Date().toISOString();
+    logAudit(orgId, userId, 'recheck-duplicates', 'applicant', null,
+      null, { checked: result.checked, newFlags: result.newFlags.length, seasonId: seasonId || null }, ip);
+  }).catch(e => {
+    job.status = 'error'; job.error = e.message; job.finishedAt = new Date().toISOString();
+  });
+  return job;
 }
 
 // Which fields count as "a phone number" for the never-bypass-if-matched

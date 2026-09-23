@@ -3,7 +3,7 @@ import multer from 'multer';
 import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth, requireAdmin } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
-import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, isApplicantMemberOfShul, recheckApplicantDuplicates } from '../services/duplicates.js';
+import { detectAndFlag, resolveFlag, getMergeGroupIds, mergeApplicants, applicantsSharePhone, isApplicantMemberOfShul, startRecheckJob, getRecheckJob } from '../services/duplicates.js';
 import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
 import { sendSmsChecked } from '../services/sms.js';
 import * as giftcard from '../services/giftcard.js';
@@ -1686,12 +1686,17 @@ router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_ed
 // flag/pause behavior as a normal save-time catch (see
 // recheckApplicantDuplicates in services/duplicates.js) — an old pair newly
 // caught by this rule change gets paused/card-locked just like a fresh one.
+// Async job (POST starts it, GET polls it) — see recheckApplicantDuplicates'
+// own comment for why this can no longer run as one long synchronous
+// request the way it first shipped: better-sqlite3 is synchronous and Node
+// is single-threaded, so a full sweep with no yield points blocked request
+// handling for EVERY visitor, not just this admin, for its whole duration.
 router.post('/duplicates/recheck-all', requireAdmin, (req, res) => {
   const { season_id } = req.body || {};
-  const result = recheckApplicantDuplicates(req.user.org_id, season_id || null);
-  logAudit(req.user.org_id, req.user.id, 'recheck-duplicates', 'applicant', null,
-    null, { checked: result.checked, newFlags: result.newFlags.length, seasonId: season_id || null }, req.ip);
-  res.json({ checked: result.checked, newFlagCount: result.newFlags.length });
+  res.json(startRecheckJob(req.user.org_id, req.user.id, season_id || null, req.ip));
+});
+router.get('/duplicates/recheck-all', requireAdmin, (req, res) => {
+  res.json(getRecheckJob(req.user.org_id) || { status: 'idle' });
 });
 
 // ============================= Disccardpromos reconciliation (super_admin only) =============================
