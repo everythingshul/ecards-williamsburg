@@ -192,6 +192,7 @@ async function refreshProviderSyncModal() {
     ['synced', 'Synced', summary.synced, 'active'],
     ['exempt', 'Exempt', summary.exempt, 'pending'],
     ['missing', 'Missing Account', summary.missing, 'rejected'],
+    ['mock_leftover', 'Mock-Mode Leftover', summary.mockLeftover, 'rejected'],
     ['deactivated', 'Should Be Deactivated', summary.deactivated, 'rejected'],
     ['deactivate_error', 'Deactivation Failed', summary.deactivateError, 'rejected'],
   ];
@@ -203,13 +204,16 @@ async function refreshProviderSyncModal() {
         <div style="font-size:22px;font-weight:600">${badge(String(n), n > 0 && key !== 'synced' ? tone : 'active')}</div>
       </div>`).join('')}
     </div>
+    ${summary.mockLeftover ? `<p class="small-muted" style="margin-top:6px">Mock-Mode Leftover = approved while this season had no real disccardpromos keys configured yet — disccardpromos never actually created these accounts. Click the number above to see exactly who, then use the button below to create their real accounts and load their funds.</p>` : ''}
     <div class="divider"></div>
     <div class="pill-row">
       ${summary.deactivateError ? `<button class="btn btn-sm btn-outline" onclick="retryAllDeactivations()">Retry All Deactivation Failures (${summary.deactivateError})</button>` : ''}
+      ${summary.mockLeftover ? `<button class="btn btn-sm btn-outline" onclick="fixMockAccounts(${summary.mockLeftover})">Fix Mock-Mode Accounts (${summary.mockLeftover})</button>` : ''}
       <button class="btn btn-sm btn-outline" onclick="reconcileMergedAccounts()">Reconcile Merged Accounts</button>
       <button class="btn btn-sm btn-outline" onclick="runProviderJob('provider-audit', 'psync-audit-result')">Run Full Audit</button>
       <button class="btn btn-sm btn-primary" onclick="runProviderJob('provider-enforce', 'psync-enforce-result')">Make Disccardpromos Match</button>
     </div>
+    <div id="psync-mockfix-result" style="margin-top:10px"></div>
     <p class="small-muted" style="margin-top:6px">Click this to push every approved applicant's full computed amount to disccardpromos, even ones that already looked fine — safe to re-run any time (disccardpromos itself deducts real store purchases from that amount automatically). The automatic background sync (every 15 minutes) only creates missing accounts and retries previously-failed ones — it does not repeat this full pass on its own, to avoid flooding the Logs with a provider call per applicant every 15 minutes.</p>
     <div id="psync-audit-result" style="margin-top:10px"></div>
     <div id="psync-enforce-result" style="margin-top:10px"></div>
@@ -226,6 +230,24 @@ window.retryAllDeactivations = async () => {
     toast(`Retried ${r.attempted}: ${r.succeeded} succeeded, ${r.failed} still failing`);
     refreshProviderSyncModal();
   } catch (err) { toast(err.message, true); }
+};
+// Creates real disccardpromos accounts (and loads their funds) for every
+// applicant this season whose provider_account_id is still a mock-mode
+// placeholder — see providerSyncStatus's 'mock_leftover' status. This
+// creates real accounts on the live disccardpromos org, so it's confirmed
+// up front, same as any other real-money bulk action.
+window.fixMockAccounts = async (count) => {
+  if (!confirm(`Create real disccardpromos accounts (and load funds) for ${count} applicant(s) currently stuck on a mock-mode placeholder account? This writes to your live disccardpromos org.`)) return;
+  const el = qs('#psync-mockfix-result');
+  el.innerHTML = '<p class="small-muted">Working…</p>';
+  try {
+    const r = await api('/applicants/fix-mock-accounts', { method: 'POST', body: { season_id: state.season_id || undefined } });
+    let msg = `Checked ${r.checked} — fixed ${r.fixed}${r.failed ? `, ${r.failed} still failed` : ''}.`;
+    if (r.fundsWarning) msg += ` ${r.fundsWarning}`;
+    el.innerHTML = `<p class="small-muted">${esc(msg)}</p>` + (r.errors?.length ? `<pre style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(r.errors, null, 2))}</pre>` : '');
+    toast(msg, !!r.failed);
+    refreshProviderSyncModal();
+  } catch (err) { el.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; toast(err.message, true); }
 };
 window.reconcileMergedAccounts = async () => {
   try {

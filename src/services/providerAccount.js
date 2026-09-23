@@ -61,16 +61,25 @@ export function isMergedSecondary(applicant) {
   return !!applicant.merge_group_id && applicant.merge_group_id !== applicant.id;
 }
 
-// null unless this applicant has actually been approved — a pending/draft/
-// rejected applicant never has (or needs) a disccardpromos account, so
-// "missing" would be meaningless noise for them. Both approve routes push a
-// customer account on approval regardless of card_amount (amount only gates
-// the separate fund-load) — so "approved but no account" always means a
-// write that failed and was never retried, never an amount thing.
+// 'mock_leftover': this applicant's provider_account_id is one of
+// giftcard.js's fake `mock_acct_<externalId>`/`mock_<uuid>` placeholders
+// (see upsertAccountForApproval/assignCard) — it was approved while this
+// season had no real disccardpromos keys configured, and NOTHING ever
+// replaces it once real keys are added, because ensureProviderAccount's
+// very first check ("does this applicant already have a
+// provider_account_id?") trusts ANY non-null value forever and returns
+// immediately, real or fake — the account, and any funds meant to be on
+// it, were never actually created on disccardpromos. Only reported once the
+// season itself is no longer in mock mode — while still legitimately in
+// mock mode, a mock_ id is exactly the intended, correct value, not
+// something wrong. See POST /applicants/fix-mock-accounts for the repair.
 export function providerSyncStatus(a) {
   if (a.approval_status !== 'approved') return null;
   if (a.provider_exempt) return 'exempt';
-  if (a.provider_account_id) return 'synced';
+  if (a.provider_account_id) {
+    if (String(a.provider_account_id).startsWith('mock_') && !giftcard.isMockMode(a.season_id)) return 'mock_leftover';
+    return 'synced';
+  }
   return 'missing';
 }
 

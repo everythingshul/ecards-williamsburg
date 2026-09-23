@@ -20,7 +20,8 @@ import { lockApplicantCards } from '../services/cardSync.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
-  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger, consolidateProviderAccounts } from '../services/providerAccount.js';
+  scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger, consolidateProviderAccounts,
+  resolveFundingAnchor } from '../services/providerAccount.js';
 import { reverseAllocation } from '../services/matching.js';
 
 const router = Router();
@@ -217,6 +218,7 @@ router.get('/', (req, res) => {
     else if (provider_sync === 'exempt') where += ` AND a.approval_status = 'approved' AND a.provider_exempt = 1`;
     else if (provider_sync === 'deactivated') where += ` AND a.approval_status IN ('rejected','pending') AND a.provider_account_id IS NOT NULL`;
     else if (provider_sync === 'deactivate_error') where += ` AND a.provider_deactivate_error IS NOT NULL`;
+    else if (provider_sync === 'mock_leftover') where += ` AND a.approval_status = 'approved' AND a.provider_account_id LIKE 'mock\_%' ESCAPE '\'`;
   }
   if (paused === '1' || paused === '0') { where += ' AND a.is_paused = ?'; params.push(+paused); }
   // Same membership-aware match as scopeWhere above — filtering to one
@@ -368,21 +370,22 @@ router.get('/my-export', (req, res) => {
 // write that failed and was never retried, not an amount thing.
 router.get('/provider-sync-summary', requireSuperAdmin, (req, res) => {
   const seasonId = req.query.season_id || getActiveSeasonId(req.user.org_id);
-  if (!seasonId) return res.json({ synced: 0, exempt: 0, missing: 0, deactivated: 0, deactivateError: 0, seasonId: null });
-  const rows = db.prepare(`SELECT approval_status, provider_exempt, provider_account_id, provider_deactivate_error FROM applicants WHERE org_id = ? AND season_id = ?`).all(req.user.org_id, seasonId);
-  let synced = 0, exempt = 0, missing = 0, deactivated = 0, deactivateError = 0;
+  if (!seasonId) return res.json({ synced: 0, exempt: 0, missing: 0, deactivated: 0, deactivateError: 0, mockLeftover: 0, seasonId: null });
+  const rows = db.prepare(`SELECT approval_status, provider_exempt, provider_account_id, provider_deactivate_error, season_id FROM applicants WHERE org_id = ? AND season_id = ?`).all(req.user.org_id, seasonId);
+  let synced = 0, exempt = 0, missing = 0, deactivated = 0, deactivateError = 0, mockLeftover = 0;
   for (const r of rows) {
     const status = providerSyncStatus(r);
     if (status === 'synced') synced++;
     else if (status === 'exempt') exempt++;
     else if (status === 'missing') missing++;
+    else if (status === 'mock_leftover') mockLeftover++;
     // A rejected/pending-reverted applicant that still holds a real account
     // should have been locked by lockApplicantCards — if it's still here,
     // that lock either never ran or failed silently.
     if (['rejected', 'pending'].includes(r.approval_status) && r.provider_account_id) deactivated++;
     if (r.provider_deactivate_error) deactivateError++;
   }
-  res.json({ synced, exempt, missing, deactivated, deactivateError, seasonId, total: rows.length });
+  res.json({ synced, exempt, missing, deactivated, deactivateError, mockLeftover, seasonId, total: rows.length });
 });
 router.get('/provider-audit', requireSuperAdmin, (req, res) => {
   res.json(getProviderAuditJob(req.user.org_id) || { status: 'idle' });
@@ -1765,6 +1768,50 @@ router.post('/retry-deactivation-all', requireSuperAdmin, async (req, res) => {
 router.post('/reconcile-merged-accounts', requireSuperAdmin, (req, res) => {
   const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
   res.json(reconcileAllMergedAccounts(req.user.org_id, seasonId));
+});
+
+// Fixes applicants whose provider_account_id is still one of giftcard.js's
+// fake mock-mode placeholders (`mock_acct_...`/`mock_...`) left over from
+// before this season had real disccardpromos keys — see providerSyncStatus's
+// 'mock_leftover' status for the full explanation of why these never heal
+// on their own. Clears the stale placeholder (every applicant sharing that
+// exact id together, since a merge group's shared account was set on every
+// member at once) and re-runs the same account-creation + fund-load an
+// approval does, so the applicant ends up in the same state as if approved
+// for the first time now that the season is actually live. Scoped to one
+// season at a time, same as every other bucket in this diagnostic — an
+// admin reviews exactly who's affected by clicking the bucket count (which
+// filters the main list to provider_sync=mock_leftover) before running this.
+router.post('/fix-mock-accounts', requireSuperAdmin, async (req, res) => {
+  const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
+  if (!seasonId) return res.status(400).json({ error: 'No season selected' });
+  if (giftcard.isMockMode(seasonId)) return res.status(400).json({ error: 'This season is still in mock mode — there is no real disccardpromos account to create yet.' });
+  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status = 'approved' AND provider_account_id LIKE 'mock\_%' ESCAPE '\'`).all(req.user.org_id, seasonId);
+  const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
+  let fixed = 0, failed = 0;
+  const errors = [];
+  const clearedStaleIds = new Set();
+  for (const a of rows) {
+    if (clearedStaleIds.has(a.provider_account_id)) continue; // already handled via a merge-group-mate processed earlier in this loop
+    const staleId = a.provider_account_id;
+    clearedStaleIds.add(staleId);
+    db.prepare(`UPDATE applicants SET provider_account_id = NULL WHERE org_id = ? AND provider_account_id = ?`).run(req.user.org_id, staleId);
+    const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
+    const acctResult = await ensureProviderAccount(req.user.org_id, fresh);
+    if (acctResult.error) { failed++; errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: acctResult.error }); continue; }
+    if (discountId) {
+      const refreshed = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
+      const anchor = resolveFundingAnchor(refreshed);
+      try { await creditGapToMatchLedger(req.user.org_id, anchor, discountId); }
+      catch (e) { errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Account created but funds failed to load: ${e.message}` }); }
+    }
+    fixed++;
+  }
+  logAudit(req.user.org_id, req.user.id, 'fix-mock-accounts', 'applicant', null, null, { checked: rows.length, fixed, failed, seasonId }, req.ip);
+  res.json({
+    checked: rows.length, fixed, failed, errors,
+    fundsWarning: discountId ? null : 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — accounts were created but no funds were pushed.',
+  });
 });
 
 // Full two-way audit against disccardpromos' own real customer list — see
