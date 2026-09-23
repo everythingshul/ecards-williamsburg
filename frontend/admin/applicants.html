@@ -277,11 +277,44 @@ window.runProviderJob = async (path, resultElId) => {
     } else if (job.status === 'done') {
       el.innerHTML = `<pre style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(job.result, null, 2))}</pre>`;
       if (resultElId === 'psync-enforce-result') refreshProviderSyncModal();
+      // notFoundIds = applicants whose stored account id doesn't match any
+      // REAL disccardpromos customer this audit just confirmed live — a
+      // broader case than the Mock-Mode Leftover bucket (that's a pure
+      // local string check; this one only a live pull can prove). Stashed
+      // on window rather than re-parsed from the ids since JSON-in-onclick
+      // gets messy with quoting.
+      if (resultElId === 'psync-audit-result') {
+        lastAuditNotFoundIds = job.result?.notFoundIds || [];
+        if (lastAuditNotFoundIds.length) {
+          el.innerHTML += `<button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="fixNotFoundAccounts()">Fix All Not-Found Accounts (${lastAuditNotFoundIds.length})</button><div id="psync-notfound-fix-result" style="margin-top:8px"></div>`;
+        }
+      }
     } else {
       el.innerHTML = '<p class="small-muted">Idle.</p>';
     }
   };
   poll();
+};
+let lastAuditNotFoundIds = [];
+// Repairs applicants a just-completed Full Audit confirmed have a
+// provider_account_id that doesn't match any real disccardpromos customer
+// right now (deleted on their side, or the account never actually finished
+// being created) — same repair as fixMockAccounts (clear the stale id,
+// create a real account, load its funds), just driven by the audit's own
+// live-verified list instead of a mock_-prefix guess.
+window.fixNotFoundAccounts = async () => {
+  if (!lastAuditNotFoundIds.length) return;
+  if (!confirm(`Create real disccardpromos accounts (and load funds) for ${lastAuditNotFoundIds.length} applicant(s) whose stored account doesn't match anything on disccardpromos right now? This writes to your live disccardpromos org.`)) return;
+  const el = qs('#psync-notfound-fix-result');
+  el.innerHTML = '<p class="small-muted">Working…</p>';
+  try {
+    const r = await api('/applicants/fix-not-found-accounts', { method: 'POST', body: { applicant_ids: lastAuditNotFoundIds } });
+    let msg = `Checked ${r.checked} — fixed ${r.fixed}${r.failed ? `, ${r.failed} still failed` : ''}.`;
+    if (r.fundsWarning) msg += ` ${r.fundsWarning}`;
+    el.innerHTML = `<p class="small-muted">${esc(msg)}</p>` + (r.errors?.length ? `<pre style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(r.errors, null, 2))}</pre>` : '');
+    toast(msg, !!r.failed);
+    refreshProviderSyncModal();
+  } catch (err) { el.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; toast(err.message, true); }
 };
 const MASS_ACTIONS = {
   approve: {

@@ -21,7 +21,7 @@ import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
   scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger, consolidateProviderAccounts,
-  resolveFundingAnchor } from '../services/providerAccount.js';
+  repairStaleProviderAccounts } from '../services/providerAccount.js';
 import { reverseAllocation } from '../services/matching.js';
 
 const router = Router();
@@ -1786,32 +1786,26 @@ router.post('/fix-mock-accounts', requireSuperAdmin, async (req, res) => {
   const seasonId = req.body?.season_id || getActiveSeasonId(req.user.org_id);
   if (!seasonId) return res.status(400).json({ error: 'No season selected' });
   if (giftcard.isMockMode(seasonId)) return res.status(400).json({ error: 'This season is still in mock mode — there is no real disccardpromos account to create yet.' });
-  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status = 'approved' AND provider_account_id LIKE 'mock\_%' ESCAPE '\'`).all(req.user.org_id, seasonId);
-  const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(req.user.org_id)?.value;
-  let fixed = 0, failed = 0;
-  const errors = [];
-  const clearedStaleIds = new Set();
-  for (const a of rows) {
-    if (clearedStaleIds.has(a.provider_account_id)) continue; // already handled via a merge-group-mate processed earlier in this loop
-    const staleId = a.provider_account_id;
-    clearedStaleIds.add(staleId);
-    db.prepare(`UPDATE applicants SET provider_account_id = NULL WHERE org_id = ? AND provider_account_id = ?`).run(req.user.org_id, staleId);
-    const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
-    const acctResult = await ensureProviderAccount(req.user.org_id, fresh);
-    if (acctResult.error) { failed++; errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: acctResult.error }); continue; }
-    if (discountId) {
-      const refreshed = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
-      const anchor = resolveFundingAnchor(refreshed);
-      try { await creditGapToMatchLedger(req.user.org_id, anchor, discountId); }
-      catch (e) { errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Account created but funds failed to load: ${e.message}` }); }
-    }
-    fixed++;
-  }
-  logAudit(req.user.org_id, req.user.id, 'fix-mock-accounts', 'applicant', null, null, { checked: rows.length, fixed, failed, seasonId }, req.ip);
-  res.json({
-    checked: rows.length, fixed, failed, errors,
-    fundsWarning: discountId ? null : 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — accounts were created but no funds were pushed.',
-  });
+  const rows = db.prepare(`SELECT id FROM applicants WHERE org_id = ? AND season_id = ? AND approval_status = 'approved' AND provider_account_id LIKE 'mock\_%' ESCAPE '\'`).all(req.user.org_id, seasonId);
+  const result = await repairStaleProviderAccounts(req.user.org_id, rows.map(r => r.id));
+  logAudit(req.user.org_id, req.user.id, 'fix-mock-accounts', 'applicant', null, null, { checked: result.checked, fixed: result.fixed, failed: result.failed, seasonId }, req.ip);
+  res.json(result);
+});
+
+// Companion to fix-mock-accounts above, for the OTHER way a
+// provider_account_id goes stale: a real-looking id that simply doesn't
+// match any actual disccardpromos customer any more (deleted on their side,
+// or the account creation never fully completed) — not detectable from the
+// id's shape alone the way a mock_ placeholder is, so this always runs
+// against the applicant ids from a just-completed Full Audit's notFoundIds
+// (a real live pull against disccardpromos), never a guess made locally.
+// Same repair as fix-mock-accounts otherwise: clear + recreate + re-fund.
+router.post('/fix-not-found-accounts', requireSuperAdmin, async (req, res) => {
+  const { applicant_ids } = req.body || {};
+  if (!Array.isArray(applicant_ids) || !applicant_ids.length) return res.status(400).json({ error: 'No applicant ids provided — run a Full Audit first and use its Not Found list.' });
+  const result = await repairStaleProviderAccounts(req.user.org_id, applicant_ids);
+  logAudit(req.user.org_id, req.user.id, 'fix-not-found-accounts', 'applicant', null, null, { checked: result.checked, fixed: result.fixed, failed: result.failed }, req.ip);
+  res.json(result);
 });
 
 // Full two-way audit against disccardpromos' own real customer list — see

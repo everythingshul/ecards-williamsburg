@@ -176,6 +176,47 @@ export async function ensureProviderAccount(orgId, applicant, index) {
   }
 }
 
+// Shared repair routine for a set of applicants whose stored
+// provider_account_id is known-stale — either a mock-mode placeholder (see
+// providerSyncStatus's 'mock_leftover', a pure local string check) or a
+// real-looking id runProviderAudit's live pull confirmed doesn't match any
+// actual disccardpromos customer any more (deleted on their side, or the
+// create call never actually finished — see ensureProviderAccount's header:
+// it trusts ANY already-set id forever, real or not, which is the actual
+// bug behind both cases). Clears the stale id (every applicant currently
+// sharing that exact value together, in case it's a merge group's shared
+// account, in one pass) and re-runs the same account-creation + fund-load
+// an approval does. Only ever touches the applicant ids explicitly passed
+// in — nothing is cleared/recreated for anyone not listed.
+export async function repairStaleProviderAccounts(orgId, applicantIds) {
+  const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
+  let fixed = 0, failed = 0;
+  const errors = [];
+  const clearedStaleIds = new Set();
+  for (const id of applicantIds) {
+    const a = db.prepare('SELECT * FROM applicants WHERE id = ? AND org_id = ?').get(id, orgId);
+    if (!a || !a.provider_account_id) continue;
+    if (clearedStaleIds.has(a.provider_account_id)) continue;
+    const staleId = a.provider_account_id;
+    clearedStaleIds.add(staleId);
+    db.prepare(`UPDATE applicants SET provider_account_id = NULL WHERE org_id = ? AND provider_account_id = ?`).run(orgId, staleId);
+    const fresh = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
+    const acctResult = await ensureProviderAccount(orgId, fresh);
+    if (acctResult.error) { failed++; errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: acctResult.error }); continue; }
+    if (discountId) {
+      const refreshed = db.prepare('SELECT * FROM applicants WHERE id = ?').get(a.id);
+      const anchor = resolveFundingAnchor(refreshed);
+      try { await creditGapToMatchLedger(orgId, anchor, discountId); }
+      catch (e) { errors.push({ applicantId: a.id, name: `${a.first_name} ${a.last_name}`.trim(), error: `Account created but funds failed to load: ${e.message}` }); }
+    }
+    fixed++;
+  }
+  return {
+    checked: applicantIds.length, fixed, failed, errors,
+    fundsWarning: discountId ? null : 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading) — accounts were created but no funds were pushed.',
+  };
+}
+
 // ============================= Historical merge reconciliation =============================
 
 // A merged-duplicate secondary (services/duplicates.js's mergeApplicants)
