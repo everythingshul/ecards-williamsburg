@@ -21,8 +21,8 @@ import { getApplicantBalances } from '../services/applicantBalance.js';
 import { ensureProviderAccount, reconcileAccountsForGroup, reconcileAllMergedAccounts, providerSyncStatus,
   startProviderAudit, getProviderAuditJob, startProviderEnforce, getProviderEnforceJob, retryDeactivation,
   scheduleProviderEnforceSoon, isMergedSecondary, buildProviderOpts, creditGapToMatchLedger, consolidateProviderAccounts,
-  repairStaleProviderAccounts } from '../services/providerAccount.js';
-import { reverseAllocation } from '../services/matching.js';
+  repairStaleProviderAccounts, checkAccountConflicts } from '../services/providerAccount.js';
+import { reverseAllocation, checkMatchCapOverage } from '../services/matching.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -1254,12 +1254,41 @@ router.post('/:id/remove-from-shul', requirePermission('applicants', 'can_edit')
     db.prepare('DELETE FROM applicant_shuls WHERE id = ?').run(extraMembership.id);
   }
   remainingShulCount = (fullyDetached ? 0 : 1) + db.prepare('SELECT COUNT(*) c FROM applicant_shuls WHERE applicant_id = ?').get(applicant.id).c;
+
+  // "Unmerge": the departing shul doesn't just lose the applicant outright
+  // — they get a fresh record of their own to keep using, since this was a
+  // real merge (merge_group_id set), not just a solo applicant's only shul
+  // being removed. There's no way to restore what THEY originally
+  // submitted before the merge (merging deletes the loser row entirely —
+  // see db.js's mergeApplicantRowsInto), so this copies the identity/
+  // contact fields off the CURRENT surviving record instead — it's still
+  // the same real person either way. Deliberately excludes card_amount and
+  // anything financial/status-related (approval_status, cards,
+  // provider_account_id, merge_group_id) — this is a brand-new, unfunded,
+  // unapproved application for that shul to take from here, not a copy of
+  // money or standing. Never runs duplicate detection against itself —
+  // it's expected to match the record it was just split from, and flagging
+  // that would be noise, not a real duplicate to review.
+  let newApplicant = null;
+  if (applicant.merge_group_id) {
+    const newId = uuid();
+    const newExternalId = generateApplicantExternalId(db);
+    db.prepare(`INSERT INTO applicants (id, org_id, shul_id, season_id, external_id, first_name, last_name, marital_status,
+        home_phone, husband_cell, wife_cell, email, address, city, state, zip, preferred_contact_method, preferred_number,
+        num_children, home_for_yomtov, comments, source, approval_status)
+      VALUES (?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?, 'admin', 'pending')`)
+      .run(newId, req.user.org_id, shulId, applicant.season_id, newExternalId, applicant.first_name, applicant.last_name, applicant.marital_status,
+        applicant.home_phone, applicant.husband_cell, applicant.wife_cell, applicant.email, applicant.address, applicant.city, applicant.state, applicant.zip,
+        applicant.preferred_contact_method, applicant.preferred_number, applicant.num_children, applicant.home_for_yomtov, applicant.comments);
+    newApplicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(newId);
+  }
+
   logAudit(req.user.org_id, req.user.id, 'remove-from-shul', 'applicant', applicant.id, before,
-    { removedShulId: shulId, removedShulName: shul?.name_en, remainingShulCount, undone: outstanding.length }, req.ip);
+    { removedShulId: shulId, removedShulName: shul?.name_en, remainingShulCount, undone: outstanding.length, newApplicantId: newApplicant?.id || null }, req.ip);
 
   let cardLockErrors = [];
   if (fullyDetached) ({ errors: cardLockErrors } = await lockApplicantCards(req.user.org_id, applicant));
-  res.json({ ok: true, undone: outstanding.length, remainingShulCount, cardLockErrors });
+  res.json({ ok: true, undone: outstanding.length, remainingShulCount, cardLockErrors, newApplicant });
 });
 
 router.post('/mass-reject', requirePermission('applicants', 'can_edit'), async (req, res) => {
@@ -1658,8 +1687,47 @@ router.get('/duplicates/:flagId/group', requireAdmin, (req, res) => {
 router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_edit'), async (req, res) => {
   const flag = db.prepare(`SELECT * FROM duplicate_flags WHERE id = ? AND org_id = ? AND entity_type='applicant'`).get(req.params.flagId, req.user.org_id);
   if (!flag) return res.status(404).json({ error: 'Not found' });
-  const { primaryId, values, memberIds } = req.body || {};
+  const { primaryId, values, memberIds, resolutions } = req.body || {};
   try {
+    // Pre-flight, BEFORE any destructive write: only a REAL money decision
+    // (both the surviving account and a losing account confirmed to hold
+    // actual money right now, via a live disccardpromos read — never a
+    // cached balance) blocks the merge here. Every other case — one side
+    // empty, neither side ever had a real account — proceeds straight
+    // through exactly as before, no popup, same as always. `memberIds`
+    // mirrors mergeApplicants' own param so a partial-group merge is
+    // checked against the same members it's about to actually merge, not
+    // the full transitive group.
+    let preMergeMembers = null;
+    if (primaryId) {
+      const fullGroupIds = getMergeGroupIds(req.user.org_id, [primaryId]);
+      const groupIds = Array.isArray(memberIds) && memberIds.length
+        ? [...new Set(memberIds.filter(id => fullGroupIds.includes(id)).concat(primaryId))]
+        : fullGroupIds;
+      // Snapshot every member's own row — including provider_account_id and
+      // its own card ids — BEFORE mergeApplicants runs. A merge collapses
+      // every non-primary member down to the primary's single surviving row
+      // (services/duplicates.js's mergeApplicantRowsInto DELETEs the loser
+      // rows and repoints their cards onto the primary), so if
+      // consolidateProviderAccounts below queried fresh AFTER that ran,
+      // every losing account/card would already be gone or indistinguishable
+      // from the primary's own — it would silently find nothing to close,
+      // even on a real accountConflict. This is the only point the data
+      // still exists to capture.
+      const cardsByApplicant = new Map();
+      for (const c of db.prepare(`SELECT id, applicant_id FROM cards WHERE applicant_id IN (${groupIds.map(() => '?').join(',')})`).all(...groupIds)) {
+        if (!cardsByApplicant.has(c.applicant_id)) cardsByApplicant.set(c.applicant_id, []);
+        cardsByApplicant.get(c.applicant_id).push(c.id);
+      }
+      preMergeMembers = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND id IN (${groupIds.map(() => '?').join(',')})`).all(req.user.org_id, ...groupIds)
+        .map(m => ({ ...m, _cardIds: cardsByApplicant.get(m.id) || [] }));
+      const conflicts = await checkAccountConflicts(req.user.org_id, primaryId, groupIds);
+      const unresolved = conflicts.filter(c => !resolutions?.[c.secondaryAccountId]);
+      if (unresolved.length) {
+        return res.status(409).json({ code: 'ACCOUNT_CONFLICT', conflicts: unresolved });
+      }
+    }
+
     const result = mergeApplicants(req.user.org_id, req.user.id, { primaryId, values, memberIds });
     // Two (or more) members each already had their own real disccardpromos
     // account — both were approved and funded before the duplicate was
@@ -1668,13 +1736,35 @@ router.post('/duplicates/:flagId/merge', requirePermission('applicants', 'can_ed
     // services/providerAccount.js's consolidateProviderAccounts). The local
     // merge above has already committed either way; this is the provider-
     // side follow-through, reported back rather than allowed to undo it.
+    // `resolutions` (if any conflict needed one, per the pre-flight check
+    // above) tells it exactly how to split each contested account instead
+    // of always summing. `preMergeMembers` is the pre-collapse snapshot
+    // captured above — required for it to find anything at all now that the
+    // loser rows are gone (see that function's own header comment).
     let consolidation = null;
     if (result.accountConflict) {
-      consolidation = await consolidateProviderAccounts(req.user.org_id, primaryId);
-      logAudit(req.user.org_id, req.user.id, 'consolidate-accounts', 'applicant', primaryId, null, consolidation, req.ip);
+      consolidation = await consolidateProviderAccounts(req.user.org_id, primaryId, resolutions || {}, preMergeMembers);
+      logAudit(req.user.org_id, req.user.id, 'consolidate-accounts', 'applicant', primaryId, null, { ...consolidation, resolutions: resolutions || null }, req.ip);
+    }
+    // Each shul may have independently stayed within the per-applicant match
+    // cap before anyone knew they were the same person — the combined total
+    // this merge just collapsed onto one row can be over that cap even
+    // though neither side ever individually exceeded it. Never auto-clawed-
+    // back (that money's already real, already on the shared disccardpromos
+    // account) — just documented so an admin sees it and can decide (e.g.
+    // an Undo Payment write-off to bring it back under the cap). Every NEW
+    // Give from here on is already correctly capped against this combined
+    // total (services/matching.js's computeRealMatch sums by merge group),
+    // so this is strictly about the historical overage the merge revealed.
+    const capOverage = checkMatchCapOverage(primaryId);
+    if (capOverage) {
+      const noteId = uuid();
+      const note = `Merge match-cap check: this merged record's combined match usage is $${capOverage.used.toFixed(2)}, over its $${capOverage.cap.toFixed(2)} per-applicant cap by $${capOverage.excess.toFixed(2)} — each shul stayed within the cap independently before the merge revealed they're the same person. Not automatically corrected; review and write off the excess (e.g. via Undo Payment) if needed.`;
+      db.prepare('INSERT INTO applicant_notes (id, applicant_id, user_id, note) VALUES (?,?,?,?)').run(noteId, primaryId, req.user.id, note);
+      logAudit(req.user.org_id, req.user.id, 'match-cap-overage', 'applicant', primaryId, null, capOverage, req.ip);
     }
     logAudit(req.user.org_id, req.user.id, 'merge', 'applicant', primaryId, null, result, req.ip);
-    res.json({ ...result, consolidation });
+    res.json({ ...result, consolidation, capOverage });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

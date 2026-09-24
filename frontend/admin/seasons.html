@@ -63,8 +63,8 @@ async function loadSeasons() {
         <label for="s-fee-${s.id}" style="margin:0">Shul pays the card processing fee</label></div>
       <p class="small-muted">When on, the processor's actual fee for that charge (when known) is deducted before the payment ever shows up as pending balance. Sola's charge API doesn't currently return a per-transaction fee figure, so this has no effect on new card payments until that's confirmed with Sola — it still applies to historical Stripe-processed payments.</p>
       <div class="divider"></div>
-      <button class="btn btn-sm btn-outline" onclick="openSeasonNotes('${s.id}','${esc(s.name).replace(/'/g,"\\'")}')">Notes</button>
-      <button class="btn btn-sm btn-outline" onclick="openSeasonGiftCardApi('${s.id}','${esc(s.name).replace(/'/g,"\\'")}', ${JSON.stringify(s.disccardpromos_api_base||'')}, ${!!s.has_disccardpromos_api_key})">Gift Card API${s.disccardpromos_api_base && s.has_disccardpromos_api_key ? ' ' + badge('configured','active') : ''}</button>
+      <button class="btn btn-sm btn-outline" onclick="openSeasonNotes('${s.id}','${jsAttr(s.name)}')">Notes</button>
+      <button class="btn btn-sm btn-outline" onclick="openSeasonGiftCardApi('${s.id}','${jsAttr(s.name)}', ${JSON.stringify(s.disccardpromos_api_base||'')}, ${!!s.has_disccardpromos_api_key})">Gift Card API${s.disccardpromos_api_base && s.has_disccardpromos_api_key ? ' ' + badge('configured','active') : ''}</button>
     </div>`).join('') || '<p class="small-muted">No seasons yet.</p>';
 }
 window.updateSeason = async (id, body) => { try { await api(`/seasons/${id}`, { method: 'PUT', body }); toast('Saved'); loadSeasons(); } catch (err) { toast(err.message, true); } };
@@ -72,7 +72,7 @@ window.openSeasonNotes = async (id, name) => {
   try {
     const { notes } = await api(`/seasons/${id}/notes`);
     const body = `
-      <div style="display:flex;gap:8px"><input id="new-season-note" placeholder="Add a note about this season…"><button class="btn btn-sm btn-primary" onclick="addSeasonNote('${id}','${name.replace(/'/g,"\\'")}')">Add</button></div>
+      <div style="display:flex;gap:8px"><input id="new-season-note" placeholder="Add a note about this season…"><button class="btn btn-sm btn-primary" onclick="addSeasonNote('${id}','${jsAttr(name)}')">Add</button></div>
       <div style="margin-top:14px">${notes.map(n => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div>${esc(n.note)}</div><div class="small-muted">${esc(n.first_name||'')} ${esc(n.last_name||'')} · ${fmtDateTime(n.created_at)}</div></div>`).join('') || '<p class="small-muted">No notes yet.</p>'}</div>
     `;
     openModal(`${name}: Notes`, body);

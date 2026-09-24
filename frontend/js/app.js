@@ -261,6 +261,33 @@ function esignConsentChecked(idPrefix) {
   return true;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// For a value embedded as a single-quoted JS string literal INSIDE an
+// onclick="..." (double-quoted) HTML attribute — e.g.
+// `onclick="enterPortal('shuls','${id}','${jsAttr(shul.name_en)}')"`.
+// The old, widespread pattern for this (`esc(x).replace(/'/g,"\\'")`) looks
+// right but is a no-op bug: esc() already turns every `'` into the HTML
+// entity `&#39;` first, so by the time .replace() runs there's no literal
+// `'` left to escape — and the browser decodes `&#39;` back into a real `'`
+// when it parses the HTML attribute, BEFORE handing the string to the JS
+// parser. That raw apostrophe then prematurely closes the JS string
+// literal, throwing a syntax error in the onclick handler — silently
+// breaking the button for ANY name containing one, which is common in shul/
+// store names (Sh'arei, K'hal, B'nai, ...). This is exactly why "Enter
+// Portal" only ever failed for specific shuls, not randomly. Order matters:
+// backslash-escape first (so the backslash this function itself adds for
+// the quote isn't re-escaped), THEN escape the quote for JS, THEN
+// HTML-escape the rest for the attribute context — never touching '&#39;'
+// again, since the browser's HTML-decode pass runs before JS sees this.
+function jsAttr(s) {
+  return String(s ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 // Thousands-separated everywhere in the app — every page calls this one
 // shared function for any dollar figure (lists, totals, dashboards, stat
 // tiles, ...), so fixing it here fixes it systemwide in one place. Handles
@@ -1077,7 +1104,7 @@ function loadPdfJs() {
 async function loadDocumentsTab(entityType, entityId, containerId, defaultEmail) {
   const container = qs('#' + containerId);
   container.innerHTML = '<p class="small-muted">Loading…</p>';
-  const safeEmail = esc(defaultEmail || '').replace(/'/g, "\\'");
+  const safeEmail = jsAttr(defaultEmail || '');
   try {
     const { documents } = await api(`/documents?entity_type=${entityType}&entity_id=${entityId}`);
     container.innerHTML = `
@@ -1091,7 +1118,7 @@ async function loadDocumentsTab(entityType, entityId, containerId, defaultEmail)
 }
 function documentRowHtml(d, entityType, entityId, containerId, defaultEmail) {
   const inputId = `doc-email-${d.id}`;
-  const safeEmail = esc(defaultEmail || '').replace(/'/g, "\\'");
+  const safeEmail = jsAttr(defaultEmail || '');
   const canAct = d.status !== 'signed' && d.status !== 'void';
   return `<div class="card" style="margin-bottom:10px">
     <div class="flex-between"><strong>${esc(d.title || 'Agreement')}</strong>${badge(d.status, d.status)}</div>
@@ -1188,8 +1215,8 @@ async function loadMessagesTab(entityType, entityId, containerId, defaultPhone, 
   const container = qs('#' + containerId);
   container.innerHTML = '<p class="small-muted">Loading…</p>';
   const prefix = `/${entityType}s/${entityId}`;
-  const safePhone = esc(defaultPhone || '').replace(/'/g, "\\'");
-  const safeEmail = esc(defaultEmail || '').replace(/'/g, "\\'");
+  const safePhone = jsAttr(defaultPhone || '');
+  const safeEmail = jsAttr(defaultEmail || '');
   // Reload-after-send calls (sendQuickSms/sendQuickEmail below) don't have
   // the entity record handy, so fall back to what the first load cached.
   entity = entity || window.__msgTemplates?.[entityId]?.entity;

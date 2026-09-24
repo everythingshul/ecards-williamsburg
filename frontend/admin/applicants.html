@@ -500,7 +500,7 @@ async function openApplicant(id) {
       </div>`;
     const footer = `
       <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Applicant', '/applicants/${id}/other-seasons', 'openApplicant')">View Other Seasons</button>
-      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('applicant','${id}','${esc(a.first_name+' '+a.last_name).replace(/'/g,"\\'")}')">+ Add Task</button>
+      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('applicant','${id}','${jsAttr(a.first_name+' '+a.last_name)}')">+ Add Task</button>
       ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteApplicant('${id}')">Delete Permanently</button>` : ''}
       ${a.approval_status !== 'pending' ? `<button class="btn btn-outline btn-sm" onclick="setApplicantPending('${id}')">Set to Pending</button>` : ''}
       ${!a.is_paused && a.shul_id && a.approval_status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="openSoftReject('${id}')">Soft Reject…</button>` : ''}
@@ -599,11 +599,12 @@ window.softRejectApplicant = async (memberId, fromId) => {
 // then — only if that shul still has un-undone gives — a second one that
 // lists the actual dollar amounts about to be pulled back.
 window.removeFromShul = async (applicantId, shulId, shulName) => {
-  if (!confirm(`Remove ${shulName} from this applicant?\n\nThat shul will no longer be listed on this record. Any money ${shulName} gave them that hasn't been undone yet will be undone first — whatever is still unspent goes back to that shul's balance.\n\nThe other shul(s) on this applicant, the applicant's own record, and their card are not affected — unless this was their only shul, in which case the applicant is detached entirely (marked Soft Reject) and their card is locked.`)) return;
+  if (!confirm(`Unmerge ${shulName} from this applicant?\n\nThat shul will no longer be listed on this record — instead, ${shulName} gets a brand-new applicant record of their own (same name/contact info, but no money, cards, or approval — a fresh pending application they'll need to get approved again). Any money ${shulName} gave that hasn't been undone yet will be undone first — whatever is still unspent goes back to their balance.\n\nThe other shul(s) on this applicant, the applicant's own record, and their card are not affected — unless this was their only shul, in which case the applicant is detached entirely (marked Soft Reject) and their card is locked.`)) return;
   const done = (r) => {
     const warn = [];
     if (r.cardLockErrors?.length) warn.push(`card lock failed: ${r.cardLockErrors.join('; ')}`);
-    toast(`Removed ${shulName}${r.undone ? ` — ${r.undone} give(s) undone` : ''}${warn.length ? ` — but ${warn.join('; ')}` : ''}`, !!warn.length);
+    const newMsg = r.newApplicant ? ` — ${shulName} now has a new applicant record to complete and re-approve` : '';
+    toast(`Unmerged ${shulName}${r.undone ? ` — ${r.undone} give(s) undone` : ''}${newMsg}${warn.length ? ` — but ${warn.join('; ')}` : ''}`, !!warn.length);
     closeModal(); load();
     openApplicant(applicantId);
   };
@@ -950,8 +951,16 @@ window.submitMerge = async (flagId) => {
   // Only the members still shown (not Dismissed) go into this merge — the
   // backend leaves everyone else, and their flags, exactly as they are.
   const memberIds = mergeGroupCache.members.filter(m => !dismissedMemberIds.has(m.id)).map(m => m.id);
+  await submitMergeWithResolutions(flagId, primaryId, values, memberIds);
+};
+// Split out from submitMerge so it can be called again, with resolutions
+// attached, once the admin picks an option in the conflict modal — the
+// exact same merge request, just resubmitted (see the merge-instructions
+// doc this implements: no separate "pending merge" state needed, the merge
+// call is the one entry point whether or not a conflict occurs).
+async function submitMergeWithResolutions(flagId, primaryId, values, memberIds, resolutions) {
   try {
-    const r = await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds } });
+    const r = await api(`/applicants/duplicates/${flagId}/merge`, { method: 'POST', body: { primaryId, values, memberIds, resolutions } });
     // More than one member already had its own real disccardpromos account
     // (each was approved separately before turning out to be the same
     // person): the server closed every non-primary account and moved its
@@ -960,10 +969,20 @@ window.submitMerge = async (flagId) => {
     // modal the admin has to dismiss — never a toast that fades before it's
     // read. Its Close continues to wherever the merge flow would have gone.
     const c = r.consolidation;
-    if (c && (c.closed || c.errors?.length || c.details?.length)) {
+    // A per-applicant match cap that both shuls independently stayed within
+    // before the merge revealed they're the same person — real money
+    // already given, never auto-clawed-back (see checkMatchCapOverage in
+    // services/matching.js), so this always gets a modal the admin has to
+    // actually dismiss, same treatment as the account-consolidation result
+    // below, never a toast that could fade before it's read.
+    const capWarning = r.capOverage ? `<div class="card" style="border-color:var(--danger,#b91c1c);margin-top:10px">
+        <strong>Over the per-applicant match cap</strong>
+        <p style="margin:6px 0 0">This merged record's combined match usage is now <strong>${fmtMoney(r.capOverage.used)}</strong>, over its <strong>${fmtMoney(r.capOverage.cap)}</strong> cap by <strong>${fmtMoney(r.capOverage.excess)}</strong>. Each shul stayed within the cap on its own before the merge combined them onto one record. Nothing was automatically corrected — a note was added to this applicant's Notes tab; use Undo Payment on one of the contributing shul's payments to write off the excess if it should come back under the cap.</p>
+      </div>` : '';
+    if ((c && (c.closed || c.errors?.length || c.details?.length)) || capWarning) {
       closeModal(); load();
       const row = (label, val) => `<tr><td class="small-muted" style="padding:2px 10px 2px 0">${label}</td><td style="text-align:right;padding:2px 0"><strong>${val}</strong></td></tr>`;
-      const accounts = (c.details || []).map(d => `<div class="card" style="margin-bottom:10px">
+      const accounts = (c?.details || []).map(d => `<div class="card" style="margin-bottom:10px">
           <div><strong>${esc(d.memberName || 'Unnamed')}</strong>${d.shulName ? ` <span class="small-muted">— ${esc(d.shulName)}</span>` : ''} <span class="small-muted">(disccardpromos account ${esc(String(d.accountId))}${d.externalId ? `, ID ${esc(String(d.externalId))}` : ''})</span></div>
           ${d.foundOnProvider ? `<table style="margin-top:6px">
             ${row('Was committed to this account', fmtMoney(d.committed))}
@@ -973,19 +992,63 @@ window.submitMerge = async (flagId) => {
           : '<div class="small-muted" style="margin-top:6px">Not found on disccardpromos — nothing to close or move; the record now points at the primary\'s account.</div>'}
         </div>`).join('');
       const body = `
-        <p>Merged into <strong>${esc(c.primaryName || 'the primary')}</strong>${c.primaryShulName ? ` <span class="small-muted">(${esc(c.primaryShulName)})</span>` : ''}. ${c.closed ? `Closed ${c.closed} duplicate gift card account${c.closed === 1 ? '' : 's'}.` : 'No duplicate account was closed.'}</p>
+        ${c ? `<p>Merged into <strong>${esc(c.primaryName || 'the primary')}</strong>${c.primaryShulName ? ` <span class="small-muted">(${esc(c.primaryShulName)})</span>` : ''}. ${c.closed ? `Closed ${c.closed} duplicate gift card account${c.closed === 1 ? '' : 's'}.` : 'No duplicate account was closed.'}</p>` : '<p>Merged.</p>'}
         ${accounts}
-        <table style="margin-top:4px">
+        ${c ? `<table style="margin-top:4px">
           ${row('Total unspent moved onto the primary\'s card', fmtMoney(c.movedUnspent || 0))}
           ${c.newPrimaryTotal != null ? row('Primary\'s card now committed at', fmtMoney(c.newPrimaryTotal)) : ''}
-        </table>
-        ${c.errors?.length ? `<div class="card" style="border-color:var(--danger,#b91c1c);margin-top:10px"><strong>Problems</strong><ul style="margin:6px 0 0;padding-left:18px">${c.errors.map(e => `<li>${esc(e)}</li>`).join('')}</ul><p class="small-muted" style="margin:6px 0 0">An account listed here was left as it was (still live, still pointed at). The merge itself went through.</p></div>` : ''}`;
-      openModal('Gift Card Accounts Consolidated', body, `<button class="btn btn-primary btn-sm" onclick="closeModal(); if (mergeViewReturnToApplicant) openApplicant(mergeViewReturnToApplicant); else showDuplicates();">Close</button>`);
+        </table>` : ''}
+        ${c?.errors?.length ? `<div class="card" style="border-color:var(--danger,#b91c1c);margin-top:10px"><strong>Problems</strong><ul style="margin:6px 0 0;padding-left:18px">${c.errors.map(e => `<li>${esc(e)}</li>`).join('')}</ul><p class="small-muted" style="margin:6px 0 0">An account listed here was left as it was (still live, still pointed at). The merge itself went through.</p></div>` : ''}
+        ${capWarning}`;
+      openModal(c ? 'Gift Card Accounts Consolidated' : 'Merged — Match Cap Warning', body, `<button class="btn btn-primary btn-sm" onclick="closeModal(); if (mergeViewReturnToApplicant) openApplicant(mergeViewReturnToApplicant); else showDuplicates();">Close</button>`);
       return;
     }
     toast('Merged');
     afterDuplicateResolved();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    if (err.data?.code === 'ACCOUNT_CONFLICT') { openAccountConflictModal(flagId, primaryId, values, memberIds, err.data.conflicts); return; }
+    toast(err.message, true);
+  }
+}
+// Both sides of a merge currently hold real, live-confirmed money — asks
+// which of three ways to handle it instead of silently combining (see the
+// merge-instructions doc this implements). One conflict per contested
+// account; each gets its own three-way radio choice, pre-filled with the
+// real live numbers so the admin sees the actual dollar amounts before
+// picking anything.
+function openAccountConflictModal(flagId, primaryId, values, memberIds, conflicts) {
+  // A live balance read can fail (or, right now, be genuinely unknowable —
+  // disccardpromos isn't live yet, see CLAUDE.md's mock-mode note) — that's
+  // surfaced here as null and treated as "might have money" (fail toward
+  // asking, never toward a misleading $0.00 that looks like nothing's at
+  // stake — see the merge-instructions doc's own explicit warning about
+  // this exact trap).
+  const fmtBal = (n) => n == null ? 'Unknown (assumed non-zero)' : fmtMoney(n);
+  const sumBal = (a, b) => (a == null || b == null) ? 'Unknown' : fmtMoney(a + b);
+  const body = `<p>Both sides of this merge currently hold real money on disccardpromos — pick what happens to each, per pair. Nothing has been changed yet.</p>
+    ${conflicts.map((c, i) => `<div class="card" style="margin-bottom:12px" data-secondary-account="${esc(c.secondaryAccountId)}">
+      <table style="margin-bottom:8px">
+        <tr><td class="small-muted">Keeping (primary)</td><td><strong>${esc(c.primaryName || 'Unnamed')}</strong></td><td style="text-align:right"><strong>${fmtBal(c.primaryBalance)}</strong></td></tr>
+        <tr><td class="small-muted">Closing</td><td><strong>${esc(c.secondaryName || 'Unnamed')}</strong></td><td style="text-align:right"><strong>${fmtBal(c.secondaryBalance)}</strong></td></tr>
+      </table>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:normal"><input type="radio" name="ac-${i}" value="transfer" checked> Merge the balances — ${sumBal(c.primaryBalance, c.secondaryBalance)} total on the surviving account</label>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin-top:4px"><input type="radio" name="ac-${i}" value="keep_primary"> Keep the primary's total (${fmtBal(c.primaryBalance)}) — the ${fmtBal(c.secondaryBalance)} on the closed account is <strong>not</strong> moved, it's written off</label>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin-top:4px"><input type="radio" name="ac-${i}" value="use_secondary"> Use the closing account's total instead (${fmtBal(c.secondaryBalance)}) — the primary's own ${fmtBal(c.primaryBalance)} is overwritten, not added</label>
+    </div>`).join('')}`;
+  const footer = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary btn-sm" onclick="confirmAccountConflict('${flagId}','${primaryId}',${conflicts.length})">Confirm &amp; Merge</button>`;
+  window._pendingMergeValues = values; window._pendingMergeMemberIds = memberIds;
+  openModal('Both Accounts Have Money', body, footer, { wide: true });
+}
+window.confirmAccountConflict = async (flagId, primaryId, count) => {
+  const resolutions = {};
+  const cards = document.querySelectorAll('#ec-modal [data-secondary-account]');
+  for (let i = 0; i < count; i++) {
+    const accountId = cards[i]?.dataset.secondaryAccount;
+    const choice = qs(`input[name="ac-${i}"]:checked`)?.value || 'transfer';
+    if (accountId) resolutions[accountId] = choice;
+  }
+  await submitMergeWithResolutions(flagId, primaryId, window._pendingMergeValues, window._pendingMergeMemberIds, resolutions);
 };
 
 // Deliberately no load() in this initial-resolution .then() (only in the

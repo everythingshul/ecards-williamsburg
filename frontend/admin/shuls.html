@@ -387,16 +387,16 @@ async function openShul(id) {
       <button class="btn btn-outline btn-sm" onclick="location.href='/admin/applicants?shul_id=${id}'">View Applicants</button>
       <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Shul', '/shuls/${id}/other-seasons', 'openShul')">View Other Seasons</button>
       <button class="btn btn-outline btn-sm" onclick="openCarryForwardModal()">Carry Forward to Season…</button>
-      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('shul','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">+ Add Task</button>
+      <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('shul','${id}','${jsAttr(shul.name_en)}')">+ Add Task</button>
       ${shul.is_paused ? `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',false)">Unpause</button>` : `<button class="btn btn-outline btn-sm" onclick="pauseToggle('${id}',true)">Pause</button>`}
       ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteShul('${id}')">Delete Permanently</button>` : ''}
       ${!shul.portal_user_id ? `<button class="btn btn-outline btn-sm" onclick="inviteShul('${id}')">Invite to Portal</button>` : ''}
       ${shul.portal_user_id && Auth.can('portal_impersonation') ? (shul.is_paused
         ? `<button class="btn btn-outline btn-sm" disabled title="This shul is paused pending a duplicate resolution — unpause it first">Enter Portal</button>`
-        : `<button class="btn btn-outline btn-sm" onclick="enterPortal('shuls','${id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Enter Portal</button>`) : ''}
+        : `<button class="btn btn-outline btn-sm" onclick="enterPortal('shuls','${id}','${jsAttr(shul.name_en)}')">Enter Portal</button>`) : ''}
       ${['approved','rejected'].includes(shul.status) ? `<button class="btn btn-outline btn-sm" onclick="setShulPending('${id}')">Set to Pending</button>` : ''}
       ${shul.status !== 'approved' ? `<button class="btn btn-outline btn-sm" onclick="rejectShul('${id}')">Reject</button><button class="btn btn-primary btn-sm" onclick="approveShul('${id}')">Approve</button>` : `<button class="btn btn-outline btn-sm" onclick="resendWelcome('${id}')">Resend Welcome Email</button>`}
-      ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${esc(shul.name_en).replace(/'/g,"\\'")}')">Set Password</button>` : ''}
+      ${shul.portal_user_id && ['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${shul.portal_user_id}','${jsAttr(shul.name_en)}')">Set Password</button>` : ''}
       <button class="btn btn-primary btn-sm" onclick="saveShul('${id}')">Save</button>`;
     carryForwardContext = { id, name: shul.name_en, applicants };
     openModal(shul.name_en, body, footer, { maxWidth: '1150px' });

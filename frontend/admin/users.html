@@ -169,7 +169,7 @@ async function openUser(id) {
     // Only a still-pending account (invite sent, never signed in yet) has a
     // setup link to resend or copy — an active user already has a password.
     const pendingSetupBtns = !u.is_active ? `<button class="btn btn-outline btn-sm" onclick="resendInvite('${id}')">Resend Invite</button><button class="btn btn-outline btn-sm" onclick="copyInviteLink('${id}')">Copy Setup Link</button>` : '';
-    openModal(`${u.first_name} ${u.last_name}`, body, `<button class="btn btn-danger btn-sm" onclick="deleteUserPermanently('${id}')">Delete Permanently</button><button class="btn btn-outline btn-sm" onclick="deactivateUser('${id}')">Deactivate</button>${pendingSetupBtns}${canSetPassword ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${id}','${esc(u.first_name+' '+u.last_name).replace(/'/g,"\\'")}')">Set Password</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveUser('${id}')">Save</button>`);
+    openModal(`${u.first_name} ${u.last_name}`, body, `<button class="btn btn-danger btn-sm" onclick="deleteUserPermanently('${id}')">Delete Permanently</button><button class="btn btn-outline btn-sm" onclick="deactivateUser('${id}')">Deactivate</button>${pendingSetupBtns}${canSetPassword ? `<button class="btn btn-outline btn-sm" onclick="openSetPasswordModal('${id}','${jsAttr(u.first_name+' '+u.last_name)}')">Set Password</button>` : ''}<button class="btn btn-primary btn-sm" onclick="saveUser('${id}')">Save</button>`);
   } catch (err) { toast(err.message, true); }
 }
 

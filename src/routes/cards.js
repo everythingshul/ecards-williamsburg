@@ -71,8 +71,10 @@ router.get('/export', requirePermission('cards', 'can_export'), (req, res) => {
 // so "Allocated" is the same per-applicant `loaded` figure
 // services/applicantBalance.js computes (card_amount for approved
 // applicants + every allocation row, reversals netting out, minus any
-// merged_spend_adjustment), summed over the applicants belonging to each
-// shul. Named parameters, since the optional season filter repeats.
+// merged_spend_adjustment, plus/minus any merged_funding_adjustment — see
+// db.js for why those are two separate columns), summed over the applicants
+// belonging to each shul. Named parameters, since the optional season
+// filter repeats.
 router.get('/by-shul', (req, res) => {
   const { season_id } = req.query;
   const seasonClause = season_id ? ' AND a2.season_id = @season_id' : '';
@@ -85,6 +87,8 @@ router.get('/by-shul', (req, res) => {
       + COALESCE((SELECT SUM(sa.total_amount) FROM shul_allocations sa JOIN applicants a2 ON a2.id = sa.applicant_id
         WHERE a2.shul_id = s.id${seasonClause}), 0)
       - COALESCE((SELECT SUM(a2.merged_spend_adjustment) FROM applicants a2
+        WHERE a2.shul_id = s.id${seasonClause}), 0)
+      + COALESCE((SELECT SUM(a2.merged_funding_adjustment) FROM applicants a2
         WHERE a2.shul_id = s.id${seasonClause}), 0) AS allocated,
       COALESCE((SELECT SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END)
         FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id JOIN applicants a2 ON a2.id = c2.applicant_id

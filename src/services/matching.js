@@ -49,6 +49,35 @@ function usedMatchForApplicant(applicant) {
   return db.prepare(`SELECT COALESCE(SUM(match_amount),0) t FROM shul_allocations WHERE applicant_id IN (${placeholders})`).get(...memberIds).t;
 }
 
+// Every NEW allocation is already correctly capped against the per-
+// applicant limit summed across a whole merge group (computeRealMatch above
+// uses usedMatchForApplicant, which already sums by merge group) — so going
+// forward, a merged person can never be pushed past their cap by a future
+// Give. What that can't prevent is the moment of the merge itself: two
+// shuls each independently gave this same real person match under their
+// OWN separate, previously-untied caps before anyone knew they were the
+// same person — each stayed within its own limit at the time, but the
+// COMBINED total the merge reveals can be over the single cap that now
+// applies to them as one person. That money is already given (real,
+// already on the shared disccardpromos account) — merging doesn't move or
+// duplicate it, it just reveals a real total that was never checked
+// against a shared limit before. Nothing here reverses it automatically;
+// see routes/applicants.js's merge route, which calls this right after a
+// merge completes and writes a note + surfaces it to the admin so they can
+// decide (e.g. an Undo Payment write-off) rather than something silently
+// clawing back money on its own initiative.
+export function checkMatchCapOverage(applicantId) {
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
+  if (!applicant) return null;
+  const season = db.prepare('SELECT * FROM seasons WHERE id = ?').get(applicant.season_id);
+  if (!season) return null;
+  const cap = resolveApplicantCap(applicant, season);
+  if (cap == null) return null;
+  const used = Math.round(usedMatchForApplicant(applicant) * 100) / 100;
+  if (used <= cap + 0.01) return null;
+  return { cap, used, excess: Math.round((used - cap) * 100) / 100 };
+}
+
 // The REAL match a new allocation actually earns — order-dependent against
 // however much room is left in each applicable cap right now (whichever
 // shul got there first keeps what they already consumed; a later
@@ -255,17 +284,12 @@ function buildReversalNote({ neverLoaded, total, retrievable, shortfall, rawDiag
   return `${fmt(retrievable)} returned to the shul's balance; ${fmt(shortfall)} had already been spent by the applicant and could not be retrieved.${diag}`;
 }
 
-// Reverses an allocation as an equal-and-opposite entry (never a delete —
-// same reasoning as every other money record in this app). A fungible
-// balance can't prove which specific dollars are still sitting there, so
-// "how much is left on the card right now" is the only check that's
-// actually possible — but unlike before, a lower balance no longer blocks
-// the whole reversal: it pulls back whatever's still retrievable (up to the
-// full original amount) and WRITES OFF the rest — the shul's balance is
-// only restored for the portion actually retrieved, never for money the
-// applicant already spent, since that's real money that's genuinely gone.
-// The shortfall (if any) is returned so the caller can warn about it.
-export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
+// Live-reads how much of a given allocation is still retrievable right now
+// — extracted from reverseAllocation so shulPayments.js's DELETE preview
+// (the 409 response, before any confirm) can show the admin the SAME live
+// "how much is left in the account" figure the actual reversal will use,
+// rather than a guess or a stale cached number. Never writes anything.
+export async function computeRetrievable(orgId, allocationId) {
   const original = db.prepare('SELECT * FROM shul_allocations WHERE id = ? AND org_id = ?').get(allocationId, orgId);
   if (!original) throw new Error('Allocation not found');
   if (original.reversed_at) throw new Error('This allocation has already been reversed');
@@ -397,13 +421,66 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
     }
   }
 
-  // Split the retrievable amount between base/match in the same proportion
-  // as the original allocation, so a partial reversal claws back match-cap
-  // room (see usedMatch() above) in proportion to what was actually pulled
-  // back, rather than over- or under-crediting either bucket.
-  const matchRatio = original.total_amount > 0 ? original.match_amount / original.total_amount : 0;
-  const reversalMatch = Math.round(retrievable * matchRatio * 100) / 100;
-  const reversalBase = Math.round((retrievable - reversalMatch) * 100) / 100;
+  return { original, applicant, fundingAnchor, fundingExternalId, discountId, neverLoaded, retrievable, shortfall, rawDiagnostic };
+}
+
+// Reverses an allocation as an equal-and-opposite entry (never a delete —
+// same reasoning as every other money record in this app). A fungible
+// balance can't prove which specific dollars are still sitting there, so
+// "how much is left on the card right now" is the only check that's
+// actually possible — but unlike before, a lower balance no longer blocks
+// the whole reversal: it pulls back whatever's still retrievable (up to the
+// full original amount) and WRITES OFF the rest — the shul's balance is
+// only restored for the portion actually retrieved, never for money the
+// applicant already spent, since that's real money that's genuinely gone.
+// The shortfall (if any) is returned so the caller can warn about it.
+//
+// shulAmount/orgWriteoffAmount (both optional): an admin's explicit split
+// of the live-retrievable amount between "credited back to the shul's own
+// balance" and "pulled off the card but written off as returned org
+// matched funds, not credited anywhere" (see shulPayments.js's enhanced
+// Undo Payment flow / the merge-instructions doc this pairs with). Left
+// undefined, behavior is byte-for-byte the same as before this existed:
+// the full retrievable amount goes to the shul, nothing written off — so
+// every other caller (a plain per-allocation Undo, remove-from-shul's
+// automatic reversal of a departing shul's outstanding gives) is
+// unaffected. When provided, shulAmount + orgWriteoffAmount can never
+// exceed what was actually confirmed retrievable — enforced here
+// server-side regardless of what the client sent, same as the "never more
+// than what's in the account" rule the UI itself also enforces.
+export async function reverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, adminReversalNote }) {
+  const { original, applicant, fundingAnchor, fundingExternalId, discountId, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
+
+  const hasOverride = shulAmount != null || orgWriteoffAmount != null;
+  let creditToShul = retrievable, writeoffAmount = 0;
+  if (hasOverride) {
+    creditToShul = Math.max(0, Math.round((Number(shulAmount) || 0) * 100) / 100);
+    writeoffAmount = Math.max(0, Math.round((Number(orgWriteoffAmount) || 0) * 100) / 100);
+    if (creditToShul + writeoffAmount > retrievable + 0.01) {
+      throw new Error(`Can't return more than what's actually in the account — $${retrievable.toFixed(2)} is retrievable right now, but $${(creditToShul + writeoffAmount).toFixed(2)} was requested (back to the shul + written off to the org).`);
+    }
+  }
+  // The TOTAL pulled off the card — both the shul's portion and the
+  // written-off org portion leave the card; only the shul portion is ever
+  // credited to the shul's own balance. Left as plain `retrievable` (pull
+  // everything, all to the shul) when no override is given.
+  const totalPulled = hasOverride ? Math.round((creditToShul + writeoffAmount) * 100) / 100 : retrievable;
+
+  // Split PULLED between base/match: normally proportional to the original
+  // allocation's own base/match ratio (so a partial reversal claws back
+  // match-cap room in proportion to what was actually retrieved). With an
+  // override, base/match instead directly ARE the admin's own split —
+  // base_amount is what this app already treats as "the shul's own money"
+  // everywhere else (see shulBalance.js), match_amount as "the org's".
+  let reversalBase, reversalMatch;
+  if (hasOverride) {
+    reversalBase = creditToShul;
+    reversalMatch = writeoffAmount;
+  } else {
+    const matchRatio = original.total_amount > 0 ? original.match_amount / original.total_amount : 0;
+    reversalMatch = Math.round(totalPulled * matchRatio * 100) / 100;
+    reversalBase = Math.round((totalPulled - reversalMatch) * 100) / 100;
+  }
 
   // FIXED (2026-09) — same lost-update race as createAllocation above (see
   // its comment for the full mechanism): this row used to get INSERTed only
@@ -417,9 +494,9 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // — never half-applied.
   const id = uuid();
   const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
-  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -retrievable, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id, reversalNote);
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note, admin_reversal_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -totalPulled, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id, reversalNote, hasOverride ? (adminReversalNote || null) : null);
   db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
 
   // giftcardStatus/giftcardError, not a bare try/throw — CRITICAL: unlike
@@ -437,17 +514,20 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
   // clicked "Undo." That silent, all-or-nothing failure was the actual bug
   // behind "Undo Payment doesn't remove the money."
   let giftcardStatus = 'ok', giftcardError = null;
-  if (discountId && retrievable > 0 && fundingAnchor?.provider_account_id) {
+  if (discountId && totalPulled > 0 && fundingAnchor?.provider_account_id) {
     // Ledger read AFTER this reversal's own row is already committed above
     // — `loaded` already has this reversal's credit-back applied, so it's
     // sent to disccardpromos as-is (no separate subtraction here, removing
     // the other half of the race). Pushes `loaded`, not `remaining` — see
-    // createAllocation's identical note above.
+    // createAllocation's identical note above. Gated on totalPulled (not
+    // the older `retrievable`) so an override that deliberately leaves
+    // everything on the card (shulAmount=0, orgWriteoffAmount=0 despite
+    // retrievable>0) correctly skips this write — nothing actually changed.
     const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { loaded: 0 };
     const newTotal = Math.max(0, existing.loaded);
     // Diagnostic — see giftcard.js's setPackageAmountAbsolute for the
     // matching log on the actual write.
-    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);
+    console.log(`[matching] reverseAllocation original=${original.id} applicant=${applicant.id} fundingAnchor=${fundingAnchor.provider_account_id} retrievable=$${retrievable} totalPulled=$${totalPulled} shortfall=$${shortfall} -> newTotal (ledger, already includes this reversal)=$${newTotal}`);
     try {
       await giftcard.setPackageAmountAbsolute(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, totalAmount: newTotal, discountId });
     } catch (e) {
@@ -476,5 +556,5 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip }) {
 
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
   logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
-  return { ...reversalRow, shortfall, neverLoaded };
+  return { ...reversalRow, shortfall, neverLoaded, retrievable };
 }

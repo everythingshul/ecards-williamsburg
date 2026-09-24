@@ -1123,6 +1123,17 @@ safeAlter(`ALTER TABLE shul_payments ADD COLUMN card_last4 TEXT`);
 // later sees the real reasoning, not just a bare negative dollar amount.
 safeAlter(`ALTER TABLE shul_allocations ADD COLUMN reversal_note TEXT`);
 
+// Admin-typed explanation for WHY, on a reversal that split retrieved money
+// between "back to the shul" and "written off as returned org matched
+// funds" (see services/matching.js's reverseAllocation shulAmount/
+// orgWriteoffAmount override), distinct from reversal_note above (that one
+// is this app's own auto-generated technical summary of what a plain,
+// full reversal did — this one only exists when an admin deliberately
+// chose to keep some of the retrieved money out of the shul's balance and
+// needs to record why, e.g. "shul only asked for their $500 back; the
+// $300 match stays written off per board decision 2026-09-24").
+safeAlter(`ALTER TABLE shul_allocations ADD COLUMN admin_reversal_note TEXT`);
+
 // One-time, idempotent repair of card_transactions rows synced before the
 // disccardpromos transaction shape was confirmed (see services/cardSync.js
 // and STORE-TRANSACTIONS-INSTRUCTIONS.md §6): a raw numeric id bound into
@@ -1155,6 +1166,24 @@ safeAlter(`ALTER TABLE duplicate_flags ADD COLUMN bypassed_reasons TEXT`);
 // spend against it — it's history on a closed account, and leaving it in
 // `loaded` would re-credit it onto the primary on the next amount push.
 safeAlter(`ALTER TABLE applicants ADD COLUMN merged_spend_adjustment REAL NOT NULL DEFAULT 0`);
+
+// A SEPARATE running delta to `loaded` alone (never `spent`) from a merge's
+// account-conflict resolution (see services/providerAccount.js's
+// consolidateProviderAccounts) — deliberately its own column rather than
+// folded into merged_spend_adjustment above, because that one's very name
+// (and services/applicantBalance.js's formula) means "money already spent,
+// so subtract it from both loaded AND spent." This column's contents are
+// never spend history: it's either (a) a loser's own approval-time
+// card_amount, credited back after mergeApplicantRowsInto silently drops it
+// (only shul_allocations rows get repointed onto the survivor, never
+// card_amount — a raw column on a row about to be deleted), or (b) a
+// keep_primary/use_secondary write-off/override of money that was never
+// actually spent. Subtracting either of those from merged_spend_adjustment
+// would have also wrongly deflated `spent` (unrelated real store purchases
+// on the SURVIVING card could read as negative and get clamped to 0) — a
+// real bug caught by the merge-conflict feature's own end-to-end HTTP test
+// before ever shipping.
+safeAlter(`ALTER TABLE applicants ADD COLUMN merged_funding_adjustment REAL NOT NULL DEFAULT 0`);
 
 // ---------------------------------------------------------------------------
 // Merged applicants now collapse to ONE row (2026-09) — previously a merge

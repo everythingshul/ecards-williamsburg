@@ -3,7 +3,7 @@ import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { pendingBalance, approvedBalance, shulBalances } from '../services/shulBalance.js';
-import { createAllocation, reverseAllocation, shulDisplayMatch } from '../services/matching.js';
+import { createAllocation, reverseAllocation, shulDisplayMatch, computeRetrievable } from '../services/matching.js';
 import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
@@ -768,19 +768,49 @@ router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req
 
   if (!activeAllocations.length) { deleteRow(); return res.json({ ok: true, undone: 0 }); }
 
-  if (!req.body?.confirmUndoAll) {
+  // resolutions: { [allocationId]: { shulAmount, orgWriteoffAmount, note } }
+  // — an admin's explicit per-allocation split, from the "review before
+  // undoing" modal below. Omitted (old confirmUndoAll:true, or no
+  // resolution supplied for a given allocation) falls back to the original
+  // behavior for that allocation: pull everything retrievable, all of it
+  // credited to the shul, nothing written off — see reverseAllocation's own
+  // default-preserving comment.
+  const { resolutions } = req.body || {};
+  if (!resolutions && !req.body?.confirmUndoAll) {
+    // Preview (the 409): live-reads "how much is left in the account" for
+    // EVERY active allocation up front — never a cached/guessed number, per
+    // the same "always ask disccardpromos live" rule the rest of this
+    // app's money code already follows — so the admin sees the real
+    // numbers before choosing anything, not just the original give amount.
+    const previews = [];
+    for (const a of activeAllocations) {
+      const applicant_name = `${a.first_name || ''} ${a.last_name || ''}`.trim();
+      try {
+        const { retrievable } = await computeRetrievable(req.user.org_id, a.id);
+        previews.push({ id: a.id, applicant_id: a.applicant_id, applicant_name, total_amount: a.total_amount, base_amount: a.base_amount, match_amount: a.match_amount, retrievable });
+      } catch (e) {
+        previews.push({ id: a.id, applicant_id: a.applicant_id, applicant_name, total_amount: a.total_amount, base_amount: a.base_amount, match_amount: a.match_amount, retrievable: null, error: e.message });
+      }
+    }
     return res.status(409).json({
-      error: `Deleting this payment leaves this shul short by $${(-balanceAfterRemoval).toFixed(2)} — their other approved payments no longer cover everything already given out, so ${activeAllocations.length} outstanding distribution(s) must be undone first.`,
+      error: `Deleting this payment leaves this shul short by $${(-balanceAfterRemoval).toFixed(2)} — their other approved payments no longer cover everything already given out, so ${activeAllocations.length} outstanding distribution(s) must be reviewed first.`,
       requiresUndoAll: true,
       shortfall: -balanceAfterRemoval,
-      activeAllocations: activeAllocations.map(a => ({ id: a.id, applicant_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(), total_amount: a.total_amount })),
+      activeAllocations: previews,
     });
   }
 
   const failures = [];
   for (const alloc of activeAllocations) {
-    try { await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip }); }
-    catch (e) { failures.push({ id: alloc.id, applicant_name: `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim(), error: e.message }); }
+    const applicant_name = `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim();
+    const resolution = resolutions?.[alloc.id];
+    try {
+      await reverseAllocation({
+        orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip,
+        shulAmount: resolution?.shulAmount, orgWriteoffAmount: resolution?.orgWriteoffAmount, adminReversalNote: resolution?.note,
+      });
+    }
+    catch (e) { failures.push({ id: alloc.id, applicant_name, error: e.message }); }
   }
   if (failures.length) {
     return res.status(500).json({ error: 'Some distributions could not be undone, so the payment was not deleted. Any that did succeed stay undone — retry to finish the rest.', failures });

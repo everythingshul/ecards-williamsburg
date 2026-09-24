@@ -410,19 +410,86 @@ window.deletePayment = async (id) => {
     toast('Deleted');
     loadPayments();
   } catch (err) {
-    if (err.data?.requiresUndoAll) {
-      const names = err.data.activeAllocations.map(a => `${a.applicant_name || 'Unknown'} (${fmtMoney(a.total_amount)})`).join(', ');
-      if (confirm(`${err.message}\n\nOutstanding: ${names}\n\nUndo all of these now (pulls money back off each applicant's card) and then delete this payment?`)) {
-        try {
-          await api(`/shul-payments/${id}`, { method: 'DELETE', body: { confirmUndoAll: true } });
-          toast('Distributions undone and payment deleted');
-          loadPayments();
-        } catch (err2) { toast(err2.message, true); }
-      }
-      return;
-    }
+    if (err.data?.requiresUndoAll) { openUndoReviewModal(id, err.data); return; }
     toast(err.message, true);
   }
+};
+
+// The review-before-undoing modal a shortfall on delete opens — replaces
+// the old blind "undo everything, all of it back to the shul" confirm()
+// dialog. Shows the shul's own recent transactions for context, and for
+// EACH outstanding distribution: what's actually left in that account
+// right now (live, from the same 409 response the server just computed —
+// never a stale number), a prefilled "back to the shul" amount (capped at
+// what's left), and a separate "written off / returned to the org
+// (matched funds)" amount the admin can fill in and document — neither of
+// which the shul's balance is credited for, per how matched funds work.
+async function openUndoReviewModal(paymentId, data) {
+  // shul_id isn't on the preview rows themselves — read it off the payment
+  // being deleted instead (already loaded into lastPayments from the list
+  // this page renders).
+  const paymentRow = (lastPayments || []).find(p => p.id === paymentId);
+  const shulId = paymentRow?.shul_id;
+  const shulName = paymentRow?.shul_name || 'This shul';
+  let shulPayments = [];
+  try { shulPayments = shulId ? (await api(`/shul-payments?shul_id=${shulId}`)).payments : []; } catch { shulPayments = []; }
+
+  const rows = shulPayments.slice(0, 10).map(p => `<tr>
+      <td>${esc(p.manual_date || (p.created_at || '').slice(0,10))}</td>
+      <td>${esc(p.method)}</td>
+      <td>${fmtMoney(p.net_amount)}</td>
+      <td>${badge(p.status, p.status === 'approved' ? 'active' : p.status)}</td>
+    </tr>`).join('');
+
+  const allocRows = data.activeAllocations.map(a => {
+    const retrievable = a.retrievable ?? 0;
+    return `<div class="card" style="margin-bottom:10px" data-alloc-id="${a.id}">
+      <strong>${esc(a.applicant_name || 'Unknown applicant')}</strong>
+      <div class="small-muted">Originally given ${fmtMoney(a.total_amount)} (${fmtMoney(a.base_amount)} from the shul + ${fmtMoney(a.match_amount)} matched)</div>
+      ${a.error ? `<p class="small-muted" style="color:#b71c1c">Couldn't confirm live balance: ${esc(a.error)}</p>` :
+        `<div style="margin:6px 0"><strong>Currently left in the account: ${fmtMoney(retrievable)}</strong></div>
+        <div class="grid-2">
+          <div><label style="margin-top:0">Back to the shul</label>
+            <input type="number" step="0.01" min="0" max="${retrievable}" value="${retrievable}" class="ra-shul" data-max="${retrievable}"></div>
+          <div><label style="margin-top:0">Written off / returned to org (matched funds)</label>
+            <input type="number" step="0.01" min="0" value="0" class="ra-org"></div>
+        </div>
+        <label style="margin-top:6px">Note (documents the org write-off, if any)</label>
+        <input type="text" class="ra-note" placeholder="e.g. board approved, shul only wants their own $X back">`}
+    </div>`;
+  }).join('');
+
+  const body = `<p>${esc(data.error)}</p>
+    ${shulPayments.length ? `<h4 style="margin-bottom:6px">Recent transactions for ${esc(shulName)}</h4>
+    <table style="margin-bottom:16px"><thead><tr><th>Date</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead>
+    <tbody>${rows}</tbody></table>` : ''}
+    <h4 style="margin-bottom:6px">Outstanding distributions to review</h4>
+    <p class="small-muted">Never more than what's actually left in each account. Anything not returned to the shul and not written off to the org stays exactly as it is — untouched.</p>
+    ${allocRows}`;
+  const footer = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary btn-sm" onclick="confirmUndoReview('${paymentId}')">Confirm &amp; Delete Payment</button>`;
+  openModal('Review Before Deleting This Payment', body, footer, { wide: true });
+}
+window.confirmUndoReview = async (paymentId) => {
+  const resolutions = {};
+  for (const card of document.querySelectorAll('#ec-modal [data-alloc-id]')) {
+    const allocId = card.dataset.allocId;
+    const shulInput = card.querySelector('.ra-shul');
+    if (!shulInput) continue; // the error-only branch (no live balance) has no inputs
+    const shulAmount = +shulInput.value || 0;
+    const orgAmount = +card.querySelector('.ra-org').value || 0;
+    const note = card.querySelector('.ra-note').value.trim();
+    const max = +shulInput.dataset.max;
+    if (shulAmount < 0 || orgAmount < 0) return toast('Amounts can\'t be negative', true);
+    if (shulAmount + orgAmount > max + 0.01) return toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true);
+    resolutions[allocId] = { shulAmount, orgWriteoffAmount: orgAmount, note: note || undefined };
+  }
+  try {
+    await api(`/shul-payments/${paymentId}`, { method: 'DELETE', body: { resolutions } });
+    toast('Distributions resolved and payment deleted');
+    closeModal();
+    loadPayments();
+  } catch (err) { toast(err.message, true); }
 };
 window.submitManualPayment = async () => {
   const shul_id = qs('#mp-shul').value, season_id = qs('#mp-season').value;

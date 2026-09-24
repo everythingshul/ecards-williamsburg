@@ -484,7 +484,7 @@ function esignRowHtml(d) {
     <td>${d.signed_at ? fmtDateTime(d.signed_at) + ' by ' + esc(d.signer_name || '') : ''}</td>
     <td style="display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn btn-sm btn-outline" onclick="viewDocumentPdf('${d.id}')">View PDF</button>
-      ${d.status !== 'signed' ? `<button class="btn btn-sm btn-outline" onclick="openStandaloneFieldEditor('${d.id}','${esc(d.title || 'Agreement').replace(/'/g,"\\'")}')">Edit Fields</button>` : ''}
+      ${d.status !== 'signed' ? `<button class="btn btn-sm btn-outline" onclick="openStandaloneFieldEditor('${d.id}','${jsAttr(d.title || 'Agreement')}')">Edit Fields</button>` : ''}
       ${canAct ? `<button class="btn btn-sm btn-primary" onclick="sendStandaloneDoc('${d.id}')">${d.status === 'sent' ? 'Resend' : 'Send'}</button>` : ''}
       ${canAct ? `<button class="btn btn-sm btn-outline" onclick="voidStandaloneDoc('${d.id}')">Void</button>` : ''}
       ${d.status === 'signed' ? `<button class="btn btn-sm btn-outline" onclick="retractStandaloneDoc('${d.id}')">Retract Signature</button>` : ''}

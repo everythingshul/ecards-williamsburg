@@ -418,6 +418,63 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
   return { target: ledger.loaded };
 }
 
+// Live-checks, BEFORE any destructive merge write happens, whether merging
+// this group is a REAL money decision — see the merge-conflict-resolution
+// spec this implements: only ask when BOTH the surviving account and a
+// losing account are confirmed (or unknown, which fails toward "assume
+// there might be money" rather than skipping the check) to hold actual
+// money right now. Never trusts a cached/locally-synced balance column —
+// always a live disccardpromos read, the same rule every other money
+// decision in this app already follows. Returns [] (auto-merge, no ask
+// needed) when there's at most one real account in the group, or when the
+// non-primary account(s) are confirmed empty. Pure read — mutates nothing.
+export async function checkAccountConflicts(orgId, primaryId, memberIds) {
+  const groupIds = Array.isArray(memberIds) && memberIds.length ? memberIds : [primaryId];
+  const members = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND id IN (${groupIds.map(() => '?').join(',')})`).all(orgId, ...groupIds);
+  const primary = members.find(m => m.id === primaryId);
+  if (!primary) return [];
+  const withAccount = members.filter(m => m.provider_account_id);
+  const primaryAccountId = primary.provider_account_id ? cleanId(primary.provider_account_id) : null;
+  const distinctLoserIds = [...new Set(withAccount.map(m => cleanId(m.provider_account_id)))].filter(id => id !== primaryAccountId);
+  if (!primaryAccountId || !distinctLoserIds.length) return [];
+  // Mock mode (no real disccardpromos keys configured yet — see CLAUDE.md)
+  // has no real money to lose at all; every provider_account_id here is a
+  // synthetic mock_acct_... placeholder, not a live balance that could
+  // fail to read. Treating that as "unknown, assume there might be money"
+  // (the right call for a genuine read FAILURE) would instead flag every
+  // single merge with more than one mock account as a conflict, which is
+  // just noise until the org actually goes live — so this returns no
+  // conflicts at all while still mocked, same as the auto-merge path
+  // already used before this feature existed.
+  if (giftcard.isMockMode(primary.season_id)) return [];
+  const readLiveBalance = async (accountId) => {
+    try {
+      const live = await giftcard.getCustomerById(primary.season_id, accountId, { balances: true, suppressNotFound: true });
+      if (!live) return { balance: 0, unknown: false };
+      const bal = (live.packages || []).reduce((s, p) => s + (Number(p.balance) || 0), 0);
+      return { balance: Math.round(bal * 100) / 100, unknown: false };
+    } catch (e) {
+      console.error(`[providerAccount] checkAccountConflicts: live balance read failed for account ${accountId} — assuming there might be money rather than skipping the check:`, e.message);
+      return { balance: null, unknown: true };
+    }
+  };
+  const primaryRead = await readLiveBalance(primaryAccountId);
+  const primaryHasMoney = primaryRead.unknown || primaryRead.balance > 0;
+  const conflicts = [];
+  for (const loserId of distinctLoserIds) {
+    const rep = withAccount.find(m => cleanId(m.provider_account_id) === loserId);
+    const secondaryRead = await readLiveBalance(loserId);
+    const secondaryHasMoney = secondaryRead.unknown || secondaryRead.balance > 0;
+    if (primaryHasMoney && secondaryHasMoney) {
+      conflicts.push({
+        primaryId, primaryAccountId, primaryExternalId: primary.external_id, primaryName: `${primary.first_name || ''} ${primary.last_name || ''}`.trim(), primaryBalance: primaryRead.balance,
+        secondaryId: rep.id, secondaryAccountId: loserId, secondaryExternalId: rep.external_id, secondaryName: `${rep.first_name || ''} ${rep.last_name || ''}`.trim(), secondaryBalance: secondaryRead.balance,
+      });
+    }
+  }
+  return conflicts;
+}
+
 // After a merge (services/duplicates.js's mergeApplicants) where MORE THAN
 // ONE member already held its own real disccardpromos account — i.e. two
 // profiles were each approved and funded before anyone noticed they were
@@ -441,8 +498,53 @@ export async function creditGapToMatchLedger(orgId, applicant, discountId) {
 //    live, still pointed at) and is reported, rather than half-merging.
 // If the primary itself has no account, the earliest-created member's
 // becomes the group's account and the rest are closed onto it.
-export async function consolidateProviderAccounts(orgId, primaryId) {
-  const members = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND (id = ? OR merge_group_id = ?) ORDER BY (id = ?) DESC, created_at ASC`).all(orgId, primaryId, primaryId, primaryId);
+//
+// resolutions (optional): { [loserAccountId]: 'transfer' | 'keep_primary' |
+// 'use_secondary' } — an admin's explicit choice from checkAccountConflicts'
+// modal, for a loser account that turned out to hold real money alongside
+// the primary's own. Any loser NOT in this map (the overwhelming majority
+// — most merges have at most one funded account at all) gets 'transfer',
+// which is exactly this function's original, unconditional behavior:
+// nothing changes for that case.
+//   - 'transfer': unchanged from before — mergeApplicantRowsInto (called
+//     before this ever runs) has already repointed the loser's own
+//     shul_allocations onto the primary, so the group's combined ledger
+//     total ALREADY equals the sum of both sides; only what was already
+//     spent on the closed account needs excluding (as always).
+//   - 'keep_primary': the loser's ENTIRE contribution (not just what was
+//     already spent) is written off — none of it should count toward the
+//     group's future funding target, since the admin explicitly chose not
+//     to move it.
+//   - 'use_secondary': overrides the group's combined target to be exactly
+//     the loser's own live balance, ignoring the primary's own natural
+//     contribution — done as a permanent merged_spend_adjustment delta
+//     (not a one-time push) so it survives every later recomputation
+//     (runProviderEnforce, a future approval, ...) instead of quietly
+//     being overwritten back to the natural sum on the next sync. The
+//     SAME disccardpromos account keeps surviving either way (swapping
+//     which real customer id is "the" account would mean re-anchoring the
+//     whole group's identity, far more invasive for the same outcome) —
+//     what changes is only the dollar figure that ends up on it.
+//
+// preMergeMembers (required in practice): the group's full applicant rows
+// (each optionally carrying a `_cardIds` array of that member's own card
+// ids) as they stood immediately BEFORE mergeApplicants ran. This is not
+// optional dressing — mergeApplicants always collapses every non-primary
+// member to a single surviving row first (services/duplicates.js's
+// mergeApplicantRowsInto DELETEs the loser rows and repoints their cards
+// onto the primary) before this function is ever called, so a query of the
+// applicants/cards tables run from in here would find no trace of which
+// disccardpromos account a loser had, or which cards were originally
+// theirs — every loser-scoped write below would silently affect zero rows.
+// The one caller (the merge route) captures this snapshot right before
+// calling mergeApplicants, while the data still exists. Falls back to a
+// fresh (now known-unreliable post-collapse) DB query only if ever called
+// without it, so this stays a usable general utility rather than crashing.
+export async function consolidateProviderAccounts(orgId, primaryId, resolutions = {}, preMergeMembers = null) {
+  const usingSnapshot = !!(preMergeMembers && preMergeMembers.length);
+  const members = usingSnapshot
+    ? preMergeMembers
+    : db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND (id = ? OR merge_group_id = ?) ORDER BY (id = ?) DESC, created_at ASC`).all(orgId, primaryId, primaryId, primaryId);
   const primary = members.find(m => m.id === primaryId);
   if (!primary) return { closed: 0, errors: ['Primary not found'] };
   const withAccount = members.filter(m => m.provider_account_id);
@@ -467,16 +569,94 @@ export async function consolidateProviderAccounts(orgId, primaryId) {
           await giftcard.updateCustomer(rep.season_id, loserAccountId, { isActive: false, externalId: live.external_id || rep.external_id });
         }
       }
+      const action = resolutions[loserAccountId] || 'transfer';
+      // merged_spend_adjustment (db.js) ALWAYS gets exactly what was really
+      // spent, regardless of which resolution the admin picked — "was money
+      // spent on this account" is a fact, not a decision, and this column
+      // also subtracts from `spent` (see applicantBalance.js), so it must
+      // never carry anything but genuine spend history or it'll wrongly
+      // deflate the survivor's own unrelated real purchases.
       details.push({
         accountId: loserAccountId, memberName: `${rep.first_name || ''} ${rep.last_name || ''}`.trim(), shulName: shulName(rep.shul_id),
-        externalId: rep.external_id, foundOnProvider: found, committed: Math.round(committed * 100) / 100, alreadySpent: spentOnLoser, unspentMoved: unspent,
+        externalId: rep.external_id, foundOnProvider: found, committed: Math.round(committed * 100) / 100, alreadySpent: spentOnLoser,
+        unspentMoved: action === 'keep_primary' ? 0 : unspent, resolution: action,
       });
-      // Attribute the closed account's spend to its own members (first one
-      // carries it — the group SUM is what matters, see applicantBalance.js).
-      db.prepare(`UPDATE applicants SET merged_spend_adjustment = merged_spend_adjustment + ? WHERE id = ?`).run(spentOnLoser, rep.id);
+      // Attribute the write-off to the SURVIVING primary row, not the
+      // loser's own id (`rep.id`) — when called with a preMergeMembers
+      // snapshot (the real, only call site), `rep.id` no longer exists in
+      // the applicants table by the time this runs (mergeApplicantRowsInto
+      // already deleted it), so a write targeting it would silently affect
+      // zero rows and the adjustment would just be lost. The group SUM is
+      // what getApplicantBalances actually reads (see applicantBalance.js),
+      // and post-collapse the group has exactly one live row — primaryId —
+      // so that's the only id this can safely land on.
+      db.prepare(`UPDATE applicants SET merged_spend_adjustment = merged_spend_adjustment + ? WHERE id = ?`).run(spentOnLoser, primaryId);
+      // merged_funding_adjustment (db.js) is where every resolution-specific
+      // FUNDING correction goes — `loaded` only, never `spent` (none of this
+      // is spend history). A loser's own approval-time card_amount is never
+      // migrated anywhere by mergeApplicantRowsInto (only shul_allocations
+      // rows get repointed onto the primary — it's a raw column on a row
+      // that's about to be DELETED), so it simply vanishes from the local
+      // ledger unless credited back here. Only relevant in snapshot mode: on
+      // the legacy non-snapshot fallback path (called before any collapse),
+      // the loser's own card_amount is still its own row in the same merge
+      // group and already correctly counted — crediting it again would be
+      // wrong, so this is 0 there and every branch below is a no-op.
+      const loserCardAmount = usingSnapshot
+        ? loserMembers.reduce((s, m) => s + (m.approval_status === 'approved' ? (m.card_amount || 0) : 0), 0)
+        : 0;
+      let fundingAdjustment = 0;
+      if (action === 'keep_primary') {
+        // Cancel out whatever the local ledger actually still holds for
+        // this loser — `committed` minus whatever portion was never locally
+        // reflected in the first place (loserCardAmount): there's nothing
+        // to "abandon" for money the group's own ledger never counted as
+        // available to begin with.
+        fundingAdjustment = -Math.max(0, Math.round((committed - loserCardAmount) * 100) / 100);
+      } else if (loserCardAmount) {
+        // 'transfer' (and, provisionally, 'use_secondary' below — its own
+        // override corrects for this either way): mergeApplicantRowsInto
+        // already repointed any Give-action money (shul_allocations) onto
+        // the primary, so only the card_amount portion is missing — credit
+        // it back, net of nothing (spend is excluded separately above).
+        fundingAdjustment = Math.round(loserCardAmount * 100) / 100;
+      }
+      if (fundingAdjustment) db.prepare(`UPDATE applicants SET merged_funding_adjustment = merged_funding_adjustment + ? WHERE id = ?`).run(fundingAdjustment, primaryId);
+      if (action === 'use_secondary') {
+        // Override the group's combined future target to be exactly this
+        // loser's own live balance (`unspent`, read above) instead of the
+        // natural primary+loser sum — see this function's header comment
+        // for why this is a permanent ledger adjustment, not a one-time
+        // push. Read the group's ledger AFTER the spend/funding adjustments
+        // above already landed (better-sqlite3 statements run synchronously)
+        // so the delta accounts for everything already true of the group at
+        // this exact point, then corrects the rest in one more funding-only
+        // adjustment (never touching `spent`, unlike the pre-fix version of
+        // this override).
+        // merged_funding_adjustment is added to `loaded` (see
+        // applicantBalance.js), so — unlike the old merged_spend_adjustment
+        // version of this same override, which was SUBTRACTED — the delta
+        // needed here is (target - current), not (current - target).
+        const naturalLoaded = getApplicantBalances(orgId, [primaryId]).get(primaryId)?.loaded ?? 0;
+        const extraAdjustment = Math.round((unspent - naturalLoaded) * 100) / 100;
+        if (extraAdjustment !== 0) db.prepare(`UPDATE applicants SET merged_funding_adjustment = merged_funding_adjustment + ? WHERE id = ?`).run(extraAdjustment, primaryId);
+      }
       db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id IN (${loserMembers.map(() => '?').join(',')})`).run(keepAccount, ...loserMembers.map(m => m.id));
-      db.prepare(`UPDATE cards SET status = 'deactivated', deactivated_at = datetime('now') WHERE applicant_id IN (${loserMembers.map(() => '?').join(',')}) AND status != 'deactivated'`).run(...loserMembers.map(m => m.id));
-      closed++; movedUnspent += unspent;
+      // Same "loser row is already gone" problem as the merged_spend_adjustment
+      // write above, one level deeper: mergeApplicantRowsInto also already
+      // repointed every card's own applicant_id onto the primary, so by now
+      // "WHERE applicant_id IN (loser ids)" matches nothing (or, worse, if it
+      // ever DID match, it'd really be matching the primary's own cards,
+      // since that's who those ids now belong to). With a preMergeMembers
+      // snapshot, each member's own card ids were captured as `_cardIds`
+      // before any of that happened — deactivate by explicit id instead.
+      const cardIds = usingSnapshot ? loserMembers.flatMap(m => m._cardIds || []) : null;
+      if (usingSnapshot) {
+        if (cardIds.length) db.prepare(`UPDATE cards SET status = 'deactivated', deactivated_at = datetime('now') WHERE id IN (${cardIds.map(() => '?').join(',')}) AND status != 'deactivated'`).run(...cardIds);
+      } else {
+        db.prepare(`UPDATE cards SET status = 'deactivated', deactivated_at = datetime('now') WHERE applicant_id IN (${loserMembers.map(() => '?').join(',')}) AND status != 'deactivated'`).run(...loserMembers.map(m => m.id));
+      }
+      closed++; movedUnspent += (action === 'keep_primary' ? 0 : unspent);
     } catch (e) {
       errors.push(`Account ${loserAccountId}: ${e.message}`);
     }
