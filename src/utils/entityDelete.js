@@ -117,6 +117,17 @@ export function hardDeleteApplicant(applicant) {
   // constraint the way the NOT NULL ones above do — but left as a dangling
   // reference to a since-deleted row otherwise, which is just as wrong.
   db.prepare('UPDATE applicants SET carried_from_applicant_id = NULL WHERE carried_from_applicant_id = ?').run(applicant.id);
+  // Same gap again for applicant_shuls (db.js's mergeApplicantRowsInto) —
+  // a merged applicant's extra shul memberships live here, keyed by a NOT
+  // NULL FK on applicant_id. Deleting a merge survivor (the common case,
+  // since only the survivor row exists after a merge — see
+  // mergeApplicantRowsInto) threw an unhandled FOREIGN KEY constraint
+  // error instead of a real delete, for exactly the same reason the two
+  // gaps above did before they were closed. Deleting the whole merged
+  // identity correctly takes every shul's access to it with it — there's
+  // no partial-delete concept here, same as everything else this cascade
+  // removes.
+  db.prepare('DELETE FROM applicant_shuls WHERE applicant_id = ?').run(applicant.id);
   deletePolymorphicRefs('applicant', applicant.id);
   db.prepare('DELETE FROM applicants WHERE id = ?').run(applicant.id);
 }
@@ -241,6 +252,7 @@ export function captureApplicantSnapshot(applicant) {
     notes: db.prepare('SELECT * FROM applicant_notes WHERE applicant_id = ?').all(applicant.id),
     shulAllocations: db.prepare('SELECT * FROM shul_allocations WHERE applicant_id = ?').all(applicant.id),
     cardReconciliationFlags: db.prepare('SELECT * FROM card_reconciliation_flags WHERE applicant_id = ?').all(applicant.id),
+    applicantShuls: db.prepare('SELECT * FROM applicant_shuls WHERE applicant_id = ?').all(applicant.id),
     duplicateOfApplicantIds: db.prepare('SELECT id FROM applicants WHERE duplicate_of_applicant_id = ?').all(applicant.id).map(r => r.id),
     carriedFromApplicantIds: db.prepare('SELECT id FROM applicants WHERE carried_from_applicant_id = ?').all(applicant.id).map(r => r.id),
     ...capturePolymorphicRefs('applicant', applicant.id),
@@ -257,6 +269,7 @@ export function restoreApplicantSnapshot(snap) {
   // captured for it at the time.
   (snap.shulAllocations || []).forEach(r => insertIfMissing('shul_allocations', r));
   (snap.cardReconciliationFlags || []).forEach(r => insertIfMissing('card_reconciliation_flags', r));
+  (snap.applicantShuls || []).forEach(r => insertIfMissing('applicant_shuls', r));
   snap.duplicateOfApplicantIds.forEach(id => db.prepare('UPDATE applicants SET duplicate_of_applicant_id = ? WHERE id = ?').run(snap.row.id, id));
   (snap.carriedFromApplicantIds || []).forEach(id => db.prepare('UPDATE applicants SET carried_from_applicant_id = ? WHERE id = ? AND carried_from_applicant_id IS NULL').run(snap.row.id, id));
   restorePolymorphicRefs('applicant', snap);
