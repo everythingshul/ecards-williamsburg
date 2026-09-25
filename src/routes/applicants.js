@@ -125,6 +125,13 @@ export function maskForShul(records, role, orgId) {
   // Organization > Shul Portal) — defaults to visible, same as before the
   // toggle existed, unless explicitly turned off.
   const cardVisible = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_card_amount_visible'`).get(orgId)?.value !== '0';
+  // Spending progress bar — a SEPARATE toggle from cardVisible above, off by
+  // default, so a shul can see a purely visual "how much of the card has
+  // been spent" bar even when cardVisible is off and the real dollar
+  // figures stay hidden. Only ever a derived 0-100 percent is exposed below
+  // (spend_percent); the raw loaded/spent this is computed from is deleted
+  // regardless of this toggle's state, per cardVisible's own logic.
+  const spendProgressVisible = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_spend_progress_visible'`).get(orgId)?.value === '1';
   // Cache season lookups across a whole list-page mask pass rather than
   // re-querying per row.
   const seasonReqCache = new Map();
@@ -137,6 +144,12 @@ export function maskForShul(records, role, orgId) {
   };
   const mask = (r) => {
     const rec = { ...r, approval_status: r.approval_status === 'rejected' ? 'pending' : r.approval_status, duplicate_status: null, duplicate_of_applicant_id: null, is_paused: 0 };
+    // Derived from the same raw loaded/spent as the dollar figures below,
+    // but computed BEFORE those get deleted, and only ever exposes a 0-100
+    // percent — never a dollar amount — so it's independent of cardVisible.
+    if (spendProgressVisible) {
+      rec.spend_percent = r.loaded > 0 ? Math.max(0, Math.min(100, Math.round((r.spent / r.loaded) * 100))) : 0;
+    }
     // loaded/spent/remaining (the REAL gift-card balance, see
     // services/applicantBalance.js) are the same category of $ info as
     // card_amount — gated behind the same toggle, or turning card amounts
@@ -426,7 +439,17 @@ router.get('/:id', (req, res) => {
   // top-level key, not part of the `applicant` object maskForShul runs on,
   // so it needs its own check here rather than relying on that masking.
   const cardAmountVisible = !isAdminViewer ? db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_card_amount_visible'`).get(req.user.org_id)?.value !== '0' : true;
-  const balance = (isAdminViewer || cardAmountVisible) ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 }) : null;
+  // Same spend-progress toggle as maskForShul's list-route version above —
+  // independent of cardAmountVisible, since it only ever exposes a derived
+  // 0-100 percent, never a dollar figure.
+  const spendProgressVisible = !isAdminViewer ? db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_spend_progress_visible'`).get(req.user.org_id)?.value === '1' : false;
+  const realBalance = (isAdminViewer || cardAmountVisible || spendProgressVisible)
+    ? (getApplicantBalances(req.user.org_id, [applicant.id]).get(applicant.id) || { loaded: 0, spent: 0, remaining: 0 })
+    : null;
+  const balance = (isAdminViewer || cardAmountVisible) ? realBalance : null;
+  const spendPercent = (spendProgressVisible && realBalance)
+    ? (realBalance.loaded > 0 ? Math.max(0, Math.min(100, Math.round((realBalance.spent / realBalance.loaded) * 100))) : 0)
+    : null;
   // Transactions tab (admin-only) — real money moved, by which shul, and
   // every store purchase — both merge-group aware via cardApplicantIds
   // above, same reasoning as cards/balance: this is genuinely "the whole
@@ -469,7 +492,7 @@ router.get('/:id', (req, res) => {
   // longer has a row of its own to appear there at all. Admin-only, same
   // as mergeGroup.
   const mergeShuls = req.user.role === 'shul' ? [] : attachMergeShuls(req.user.org_id, [applicant])[0]?.mergeShuls || [];
-  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, mergeShuls, requiresShulContribution, balance, allocations, cardTransactions });
+  res.json({ applicant: maskForShul(redact(applicant, req.permission.hidden_fields), req.user.role, req.user.org_id), notes, cards, flags, mergeGroup, mergeShuls, requiresShulContribution, balance, spendPercent, allocations, cardTransactions });
 });
 
 // Who edited this record and when — a shul viewing their own applicant

@@ -107,6 +107,10 @@ renderShell('/admin/settings', `
       <p class="small-muted">When off, the "Card $" column and field are hidden from the shul portal (list and applicant detail) but remain fully visible to admins.</p>
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulCardAmountVisible()">Save</button>
       <div class="divider"></div>
+      <div class="checkbox-row"><input type="checkbox" id="shul-spend-progress-visible"><label style="margin:0">Shuls can see a spending progress bar on their own applicants</label></div>
+      <p class="small-muted">Shows a green progress bar (no dollar amounts, ever) for how much of the card has been spent — works independently of the card-amount toggle above, so a shul can see this visual even when the exact figures are hidden. Off by default.</p>
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveShulSpendProgressVisible()">Save</button>
+      <div class="divider"></div>
       <h4 style="margin-bottom:4px">Shul Portal Banners</h4>
       <p class="small-muted">Each shul portal page can show its own banner at the top — different text (or none at all) per page. Supports rich text and right-to-left text (use the RTL button in the toolbar).</p>
       <div id="shul-banners-list"></div>
@@ -500,6 +504,14 @@ async function loadShulCardAmountVisible() {
 window.saveShulCardAmountVisible = async () => {
   try { await api('/settings', { method: 'PUT', body: { shul_card_amount_visible: qs('#shul-card-amount-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
+async function loadShulSpendProgressVisible() {
+  const { settings } = await api('/settings');
+  // Off by default, unlike the card-amount toggle above.
+  qs('#shul-spend-progress-visible').checked = settings.shul_spend_progress_visible === '1';
+}
+window.saveShulSpendProgressVisible = async () => {
+  try { await api('/settings', { method: 'PUT', body: { shul_spend_progress_visible: qs('#shul-spend-progress-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
+};
 async function loadSolaEnabledDefault() {
   const [{ settings }, status] = await Promise.all([api('/settings'), api('/shul-payments/config')]);
   qs('#sola-enabled-default').checked = settings.sola_payments_enabled_default !== '0';
@@ -691,7 +703,7 @@ async function loadStoreLinks() {
     </tbody></table>`;
   } catch (err) { qs('#store-links-list').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
 }
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulSpendProgressVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks();
 </script>
 </body>
 </html>

@@ -300,6 +300,15 @@ function fmtMoney(n) {
 function fmtDate(d) { if (!d) return ''; return new Date(d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z')).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
 function fmtDateTime(d) { if (!d) return ''; return new Date(d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z')).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
 function badge(text, cls) { return `<span class="badge badge-${esc(cls || text)}">${esc((text || '').replace(/_/g, ' '))}</span>`; }
+// Shul portal's numberless "how much of the card has been spent" bar (see
+// theme.css's .spend-bar-*) — deliberately renders no text of any kind, just
+// a green fill, per the Settings > Shul Portal toggle this is gated behind
+// server-side (routes/applicants.js only ever sends spend_percent/spendPercent
+// when that setting is on; this helper just draws whatever percent it's given).
+function spendBarHtml(percent) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  return `<div class="spend-bar-track"><div class="spend-bar-fill" style="width:${pct}%"></div></div>`;
+}
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return Array.from(document.querySelectorAll(sel)); }
 
