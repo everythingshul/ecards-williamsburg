@@ -125,6 +125,10 @@ export function maskForShul(records, role, orgId) {
   // Organization > Shul Portal) — defaults to visible, same as before the
   // toggle existed, unless explicitly turned off.
   const cardVisible = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_card_amount_visible'`).get(orgId)?.value !== '0';
+  // Whether a card is currently ACTIVE — Yes/No only, never a count, never
+  // an amount. Off by default (unlike cardVisible above). Settings > Shul
+  // Portal, right below the card-amount toggle.
+  const cardStatusVisible = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'shul_card_status_visible'`).get(orgId)?.value === '1';
   // Spending progress bar — a SEPARATE toggle from cardVisible above, off by
   // default, so a shul can see a purely visual "how much of the card has
   // been spent" bar even when cardVisible is off and the real dollar
@@ -150,6 +154,10 @@ export function maskForShul(records, role, orgId) {
     if (spendProgressVisible) {
       rec.spend_percent = r.loaded > 0 ? Math.max(0, Math.min(100, Math.round((r.spent / r.loaded) * 100))) : 0;
     }
+    // Yes/No only — never how many. The raw count is always deleted below,
+    // regardless of this toggle's state, so it can never leak either way.
+    if (cardStatusVisible) rec.has_active_card = (r.active_card_count || 0) > 0;
+    delete rec.active_card_count;
     // loaded/spent/remaining (the REAL gift-card balance, see
     // services/applicantBalance.js) are the same category of $ info as
     // card_amount — gated behind the same toggle, or turning card amounts
@@ -269,7 +277,17 @@ router.get('/', (req, res) => {
   // the approval-time intended amount, never updated after Add Funds/spend,
   // so the shul had no way to see the real current figure at all).
   const balances = getApplicantBalances(req.user.org_id, rows.map(r => r.id));
-  const withBalance = rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }) }));
+  // How many of this applicant's own cards are currently 'activated' — raw
+  // count, computed for every row regardless of role (cheap, same pattern
+  // as balances above). maskForShul below is what actually decides whether
+  // a shul-role viewer ever sees anything derived from it (Settings > Shul
+  // Portal "card status visible" toggle) and always deletes this raw count
+  // itself, so a shul can never learn "how many," only yes/no.
+  const activeCardCountRows = rows.length
+    ? db.prepare(`SELECT applicant_id, COUNT(*) c FROM cards WHERE applicant_id IN (${rows.map(() => '?').join(',')}) AND status = 'activated' GROUP BY applicant_id`).all(...rows.map(r => r.id))
+    : [];
+  const activeCardCounts = new Map(activeCardCountRows.map(r => [r.applicant_id, r.c]));
+  const withBalance = rows.map(r => ({ ...r, ...(balances.get(r.id) || { loaded: 0, spent: 0, remaining: 0 }), active_card_count: activeCardCounts.get(r.id) || 0 }));
   // A merged applicant is one row now (see db.js's mergeApplicantRowsInto —
   // 2026-09), so there's nothing left to collapse across sibling rows; this
   // just attaches the admin-only `mergeShuls` pill list (own shul_id plus
@@ -431,6 +449,10 @@ router.get('/:id', (req, res) => {
   // all), so their query stays exactly as narrowly scoped as before.
   const cardApplicantIds = isAdminViewer ? getMergeGroupIds(req.user.org_id, [applicant.id]) : [applicant.id];
   const cards = db.prepare(`SELECT * FROM cards WHERE applicant_id IN (${cardApplicantIds.map(() => '?').join(',')}) ORDER BY created_at DESC`).all(...cardApplicantIds);
+  // Raw fact maskForShul (below, via the final res.json's applicant field)
+  // derives has_active_card from and then always deletes — see its own
+  // comment for why this is Yes/No only, never a count.
+  applicant.active_card_count = cards.filter(c => c.status === 'activated').length;
   // Sent to a shul-portal viewer too (see the identical change on GET /'s
   // list route above) — card_amount alone never reflected the real current
   // total once Add Funds/spend happened after approval. Gated behind the

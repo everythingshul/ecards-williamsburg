@@ -30,8 +30,8 @@ renderShell('/shul-portal/dashboard', `
   <div id="draft-banner"></div>
   <div class="toolbar"><input id="f-search" placeholder="Search name…"></div>
   <div class="card" style="padding:0;overflow-x:auto">
-    <table><thead><tr><th></th><th>ID</th><th>Name</th><th>Marital</th><th>Contact</th><th>Children</th><th>Home Yom Tov</th><th>Status</th><th>Card Total</th><th>Spending</th></tr></thead>
-    <tbody id="tbody"><tr><td colspan="10" class="empty-state">Loading…</td></tr></tbody></table>
+    <table><thead><tr><th></th><th>ID</th><th>Name</th><th>Marital</th><th>Contact</th><th>Children</th><th>Home Yom Tov</th><th>Status</th><th>Card Total</th><th>Active Card</th><th>Spending</th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="11" class="empty-state">Loading…</td></tr></tbody></table>
   </div>
 `);
 
@@ -131,8 +131,9 @@ async function load() {
         <td><strong>${esc(a.first_name)} ${esc(a.last_name)}</strong>${a.is_paused?' '+badge('paused','paused'):''}</td>
         <td>${esc(a.marital_status||'')}</td><td>${contactLine(a)}</td><td>${a.num_children??0}</td>
         <td>${a.home_for_yomtov?'Yes':'No'}</td><td>${badge(a.approval_status,a.approval_status)}</td><td>${a.remaining!=null?fmtMoney(a.remaining):(a.card_amount!=null?fmtMoney(a.card_amount):'')}</td>
+        <td>${a.has_active_card!=null?(a.has_active_card?'Yes':'No'):''}</td>
         <td>${a.spend_percent!=null?spendBarHtml(a.spend_percent):''}</td>
-      </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No applicants submitted yet.</td></tr>';
+      </tr>`).join('') : '<tr><td colspan="11" class="empty-state">No applicants submitted yet.</td></tr>';
   } catch (err) { toast(err.message, true); }
 }
 window.toggleReenrollSelect = (id, checked) => {
@@ -287,6 +288,7 @@ function openApplicantReadOnly(a, spendPercent) {
     <p><strong>Comments</strong><br>${esc(a.comments||'')||'<span class="small-muted">None</span>'}</p>
     ${'card_amount' in a ? `<div class="divider"></div><p><strong>Approved Card Amount</strong><br>${a.card_amount!=null?fmtMoney(a.card_amount):'Not yet set'}</p>
       ${a.remaining!=null ? `<p><strong>Current Total on Card</strong><br>${fmtMoney(a.remaining)}${a.spent>0?` <span class="small-muted">(${fmtMoney(a.spent)} spent so far)</span>`:''}</p>` : ''}` : ''}
+    ${'has_active_card' in a ? `<div class="divider"></div><p><strong>Active Card</strong><br>${a.has_active_card?'Yes':'No'}</p>` : ''}
     ${spendPercent!=null ? `<div class="divider"></div><p style="margin-bottom:6px"><strong>Spending</strong></p>${spendBarHtml(spendPercent)}` : ''}
     ${a.requiresShulContribution ? `<div class="divider"></div><p><strong>Amount Your Shul Gave This Family</strong><br>${a.shul_contribution_amount!=null?fmtMoney(a.shul_contribution_amount):'Not entered'}</p>` : ''}
     <p class="small-muted">This applicant has been approved and is locked; contact your admin for any other changes. Phone numbers can still be updated below.</p>
