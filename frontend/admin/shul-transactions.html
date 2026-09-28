@@ -665,14 +665,7 @@ async function loadAllocations() {
       <td><button class="btn btn-outline btn-sm" onclick="undoAllocation('${a.id}')">Undo</button></td>
     </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No allocations match these filters.</td></tr>';
 }
-window.undoAllocation = async (id) => {
-  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
-  try {
-    const { reversal } = await api(`/shul-payments/allocations/${id}/reverse`, { method: 'POST' });
-    toast(...reversalToastMessage(reversal, 'Reversed'));
-    loadAllocations();
-  } catch (err) { toast(err.message, true); }
-};
+window.undoAllocation = (id) => openAllocationUndoModal(id, { onDone: loadAllocations });
 async function loadApplicantsForShul(shulId) {
   const sel = qs('#al-applicant');
   if (!shulId) { sel.innerHTML = '<option value="">Select a shul first…</option>'; return; }

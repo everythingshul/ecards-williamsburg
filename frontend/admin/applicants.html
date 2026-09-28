@@ -667,14 +667,7 @@ window.copyRawProviderJson = () => { navigator.clipboard.writeText(lastRawProvid
 // Transactions page, just reachable from the person's own profile too. If
 // some of the money has already been spent, only what's left comes back;
 // the rest is written off, never re-added to the shul's balance.
-window.undoApplicantAllocation = async (allocationId, applicantId) => {
-  if (!confirm('Undo this allocation? This pulls the money back off the applicant\'s card and restores the shul\'s balance. If some of it has already been spent, only what\'s left comes back — the rest is written off, not restored to the shul\'s balance.')) return;
-  try {
-    const { reversal } = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST' });
-    toast(...reversalToastMessage(reversal, 'Undone'));
-    openApplicant(applicantId);
-  } catch (err) { toast(err.message, true); }
-};
+window.undoApplicantAllocation = (allocationId, applicantId) => openAllocationUndoModal(allocationId, { onDone: () => openApplicant(applicantId) });
 
 function openApplicantForm() {
   const body = `

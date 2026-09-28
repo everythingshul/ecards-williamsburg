@@ -220,9 +220,73 @@ function trackPageview() {
 // later in every allocations list next to that reversal row, so the toast
 // and the permanent record never disagree. A clean reversal (nothing
 // written off, no sync issue) has no note at all — just the plain verb.
-function reversalToastMessage(reversal, verb) {
-  if (!reversal?.reversal_note) return [verb, false];
-  return [`${verb} — ${reversal.reversal_note}`, true];
+// Shared "live preview, then confirm" flow for undoing a single
+// shul_allocation — every "Undo" button on it (Logs, the applicant
+// profile, the shul profile's own Allocations tab, Shul Transactions'
+// Allocations tab) used to be a blind confirm() that reversed immediately
+// and only reported what happened afterward. This always live-checks
+// disccardpromos and shows the real, current retrievable amount — plus an
+// editable shul/org split, same as the Undo Payment review — BEFORE
+// anything happens; POST /shul-payments/allocations/:id/reverse itself is
+// two-step (no `confirm` = pure preview, mutates nothing; `confirm: true` =
+// actually reverses), so the number shown here is guaranteed to be exactly
+// what the confirm step re-checks and uses.
+async function openAllocationUndoModal(allocationId, { onDone } = {}) {
+  let preview;
+  try {
+    preview = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: {} });
+  } catch (err) { toast(err.message, true); return; }
+  const retrievable = preview.retrievable ?? 0;
+  const body = `
+    <p class="small-muted">"Currently left in the account" below is a live disccardpromos read taken just now — confirming re-checks it again at the moment the reversal actually happens.</p>
+    <div class="card">
+      <strong>${esc(preview.applicant_name || 'Unknown applicant')}</strong>${preview.shul_name ? ` <span class="small-muted">— ${esc(preview.shul_name)}</span>` : ''}
+      <div class="small-muted">Originally given ${fmtMoney(preview.total_amount)} (${fmtMoney(preview.base_amount)} from the shul + ${fmtMoney(preview.match_amount)} matched)</div>
+      <div style="margin:6px 0"><strong>Currently left in the account: ${fmtMoney(retrievable)}</strong></div>
+      <div class="grid-2">
+        <div><label style="margin-top:0">Back to the shul</label>
+          <input type="number" step="0.01" min="0" max="${retrievable}" value="${retrievable}" id="au-shul" data-max="${retrievable}"></div>
+        <div><label style="margin-top:0">Written off / returned to org (matched funds)</label>
+          <input type="number" step="0.01" min="0" value="0" id="au-org"></div>
+      </div>
+    </div>`;
+  const footer = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary btn-sm" onclick="confirmAllocationUndo('${allocationId}')">Confirm &amp; Undo</button>`;
+  window._allocationUndoContext = { applicantName: preview.applicant_name, onDone };
+  openModal('Review Before Undoing This Allocation', body, footer);
+}
+window.confirmAllocationUndo = async (allocationId) => {
+  const shulInput = qs('#au-shul');
+  const shulAmount = +shulInput.value || 0;
+  const orgAmount = +qs('#au-org').value || 0;
+  const max = +shulInput.dataset.max;
+  if (shulAmount < 0 || orgAmount < 0) return toast('Amounts can\'t be negative', true);
+  if (shulAmount + orgAmount > max + 0.01) return toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true);
+  const ctx = window._allocationUndoContext || {};
+  try {
+    const r = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: { confirm: true, shulAmount, orgWriteoffAmount: orgAmount } });
+    closeModal();
+    if (ctx.onDone) ctx.onDone();
+    showAllocationUndoOutcome(r.reversal, ctx.applicantName);
+  } catch (err) { toast(err.message, true); }
+};
+// Real-numbers outcome shown after the confirm above — what actually
+// happened, not just a toast: the live figure that was retrievable, what
+// landed in the shul's balance vs. got written off, and whether the
+// disccardpromos write itself succeeded.
+function showAllocationUndoOutcome(reversal, applicantName) {
+  const creditedToShul = -(reversal.base_amount || 0), writtenOff = -(reversal.match_amount || 0);
+  const body = `<div class="card">
+      <strong>${esc(applicantName || 'Unknown applicant')}</strong>
+      <table style="margin-top:6px">
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Retrievable (live-checked)</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(reversal.retrievable)}</strong></td></tr>
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Credited back to the shul</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(creditedToShul)}</strong></td></tr>
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Written off (org matched funds)</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(writtenOff)}</strong></td></tr>
+      </table>
+      <p class="small-muted" style="margin:6px 0 0">${reversal.giftcard_status === 'ok' ? 'disccardpromos updated successfully.'
+        : `disccardpromos was NOT updated yet (${esc(reversal.giftcard_error || 'unknown error')}) — it will retry automatically; the shul's balance above is already correct.`}</p>
+    </div>`;
+  openModal('Allocation Undone — Outcome', body, `<button class="btn btn-primary btn-sm" onclick="closeModal()">Close</button>`);
 }
 
 function toast(msg, isError = false) {

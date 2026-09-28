@@ -636,10 +636,35 @@ router.post('/allocate', requirePermission('shul_payments', 'can_edit'), async (
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Two-step, same shape as the payment-level DELETE /:id above: called with
+// no `confirm` (the every-single-allocation "Undo" button on Logs, the
+// applicant profile, the shul profile's Allocations tab, and Shul
+// Transactions' own Allocations tab all now go through this one flow) it's
+// a pure, live disccardpromos-checked PREVIEW — mutates nothing. Called
+// again with `confirm: true` (and the admin's optional shulAmount/
+// orgWriteoffAmount split from that same preview) it actually reverses.
+// Splitting it this way — instead of always reversing immediately, the way
+// this endpoint used to — is what lets every one of those four buttons show
+// the real, live "how much is actually left in the account" number BEFORE
+// anything happens, not just report it after the fact.
 router.post('/allocations/:id/reverse', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const { confirm, shulAmount, orgWriteoffAmount } = req.body || {};
+  if (!confirm) {
+    const alloc = db.prepare(`SELECT sa.*, s.name_en as shul_name, a.first_name, a.last_name FROM shul_allocations sa
+      LEFT JOIN shuls s ON s.id = sa.shul_id LEFT JOIN applicants a ON a.id = sa.applicant_id
+      WHERE sa.id = ? AND sa.org_id = ?`).get(req.params.id, req.user.org_id);
+    if (!alloc) return res.status(404).json({ error: 'Not found' });
+    try {
+      const { retrievable } = await computeRetrievable(req.user.org_id, req.params.id);
+      return res.json({
+        preview: true, id: alloc.id, applicant_name: `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim(), shul_name: alloc.shul_name,
+        total_amount: alloc.total_amount, base_amount: alloc.base_amount, match_amount: alloc.match_amount, retrievable,
+      });
+    } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
   try {
-    const row = await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip });
+    const row = await reverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip, shulAmount, orgWriteoffAmount });
     res.json({ ok: true, reversal: row });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
