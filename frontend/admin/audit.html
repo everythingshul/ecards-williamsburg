@@ -104,7 +104,7 @@ renderShell('/admin/audit', `
 `);
 
 const ENTITY_LABELS = { shul: 'shul', applicant: 'applicant', store: 'store', season: 'season', task: 'task', user: 'user', card: 'card', shul_allocation: 'allocation' };
-const ACTION_VERBS = { create: 'Created', update: 'Updated', delete: 'Deleted', approve: 'Approved', reject: 'Rejected', undo: 'Reversed a change to', login: 'Signed in', esign: 'Signed', send_contract: 'Sent a contract to', retract_signature: 'Retracted a signature on', resolve_duplicate: 'Resolved a duplicate flag on', impersonate: 'Entered the portal as' };
+const ACTION_VERBS = { create: 'Created', update: 'Updated', delete: 'Deleted', approve: 'Approved', reject: 'Rejected', undo: 'Reversed a change to', 'soft-undo': 'Soft-undid (skipped disccardpromos) a change to', login: 'Signed in', esign: 'Signed', send_contract: 'Sent a contract to', retract_signature: 'Retracted a signature on', resolve_duplicate: 'Resolved a duplicate flag on', impersonate: 'Entered the portal as' };
 // Mass actions (bulk buttons + spreadsheet imports) log one audit_log row
 // per click/upload instead of one per affected record — entity_id is null,
 // and the record ids/names/counts live in after_json instead of a normal
@@ -153,6 +153,7 @@ function headline(a) {
     const shul = a.allocationShulName ? esc(a.allocationShulName) : 'A shul';
     const applicant = a.allocationApplicantName ? esc(a.allocationApplicantName) : 'an applicant';
     if (a.action === 'undo') return `${shul} — allocation to ${applicant} reversed (${fmtMoney(Math.abs(snap.base_amount || 0))})`;
+    if (a.action === 'soft-undo') return `${shul} — allocation to ${applicant} soft-undone (${fmtMoney(Math.abs(snap.base_amount || 0))}, disccardpromos not touched)`;
     const match = snap.match_amount ? ` (+${fmtMoney(snap.match_amount)} match)` : '';
     return `${shul} gave ${fmtMoney(snap.base_amount || 0)} to ${applicant}${match}${snap.is_admin_override ? ' — admin override' : ''}`;
   }

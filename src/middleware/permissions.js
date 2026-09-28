@@ -31,7 +31,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // mechanism portal_impersonation still uses below); moved out entirely so
 // there's no Users & Permissions toggle that could ever hand a full
 // cross-entity activity feed with undo power to an org_admin/staff member.
-export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'portal_impersonation'];
+export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'shul_payment_soft_undo', 'portal_impersonation'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource.
@@ -48,6 +48,13 @@ const RESOURCE_DEFAULT_OVERRIDES = {
   // portal_impersonation: it silently rewrites which shul's balance real
   // money counts toward, so org_admin/staff don't get it for free.
   shul_payment_transfer: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
+  // "Soft Undo" (see services/matching.js's softReverseAllocation) —
+  // reverses an allocation locally without ever writing to disccardpromos.
+  // Same explicit-grant-only posture: it can leave this app's ledger and
+  // disccardpromos' real state permanently out of sync if misused (the
+  // required note + disccard-id fields are the safeguard, not a substitute
+  // for gating who can even reach the button).
+  shul_payment_soft_undo: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
 };
 
 // One user's can_view/can_edit/can_export/scope for every resource above —

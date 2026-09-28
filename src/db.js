@@ -1134,6 +1134,22 @@ safeAlter(`ALTER TABLE shul_allocations ADD COLUMN reversal_note TEXT`);
 // $300 match stays written off per board decision 2026-09-24").
 safeAlter(`ALTER TABLE shul_allocations ADD COLUMN admin_reversal_note TEXT`);
 
+// "Soft Undo" (services/matching.js's softReverseAllocation, gated behind
+// its own explicit-grant permission — shul_payment_soft_undo, see
+// middleware/permissions.js) — same local bookkeeping as a normal Undo
+// (shul balance restored, applicant's ledger reduced) but deliberately
+// NEVER writes to disccardpromos, for when the real account is already
+// known-inactive/handled directly on disccardpromos' own dashboard and a
+// second write from this app would be redundant or wrong. is_soft_undo
+// marks a reversal row as having taken this path (so giftcard_status='ok'
+// there means "correctly skipped on purpose," not "verified synced," and
+// the UI can label it accordingly); soft_undo_disccard_id is the admin's
+// own typed record of which disccardpromos account they confirmed was
+// inactive — required at the time (see routes/shulPayments.js's
+// POST /:id/soft-undo), kept here for the permanent audit trail.
+safeAlter(`ALTER TABLE shul_allocations ADD COLUMN is_soft_undo INTEGER NOT NULL DEFAULT 0`);
+safeAlter(`ALTER TABLE shul_allocations ADD COLUMN soft_undo_disccard_id TEXT`);
+
 // One-time, idempotent repair of card_transactions rows synced before the
 // disccardpromos transaction shape was confirmed (see services/cardSync.js
 // and STORE-TRANSACTIONS-INSTRUCTIONS.md §6): a raw numeric id bound into

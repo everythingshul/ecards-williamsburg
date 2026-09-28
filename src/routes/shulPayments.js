@@ -3,7 +3,7 @@ import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { pendingBalance, approvedBalance, shulBalances } from '../services/shulBalance.js';
-import { createAllocation, reverseAllocation, shulDisplayMatch, computeRetrievable } from '../services/matching.js';
+import { createAllocation, reverseAllocation, softReverseAllocation, shulDisplayMatch, computeRetrievable } from '../services/matching.js';
 import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
@@ -801,22 +801,104 @@ router.delete('/:id', requirePermission('shul_payments', 'can_edit'), async (req
   }
 
   const failures = [];
+  // Real, per-allocation outcome — what reverseAllocation ACTUALLY did
+  // (live-checked retrievable, what landed in the shul's balance vs. got
+  // written off, and whether the disccardpromos write itself succeeded),
+  // not just a bare "undone" count — so the admin sees real numbers after
+  // confirming, the same live-checked figures the preview showed, not a
+  // guess about what happened.
+  const results = [];
   for (const alloc of activeAllocations) {
     const applicant_name = `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim();
     const resolution = resolutions?.[alloc.id];
     try {
-      await reverseAllocation({
+      const reversal = await reverseAllocation({
         orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip,
         shulAmount: resolution?.shulAmount, orgWriteoffAmount: resolution?.orgWriteoffAmount, adminReversalNote: resolution?.note,
+      });
+      results.push({
+        id: alloc.id, applicant_id: alloc.applicant_id, applicant_name,
+        retrievable: reversal.retrievable, creditedToShul: -reversal.base_amount, writtenOff: -reversal.match_amount,
+        totalPulled: -reversal.total_amount, giftcardStatus: reversal.giftcard_status, giftcardError: reversal.giftcard_error,
       });
     }
     catch (e) { failures.push({ id: alloc.id, applicant_name, error: e.message }); }
   }
   if (failures.length) {
-    return res.status(500).json({ error: 'Some distributions could not be undone, so the payment was not deleted. Any that did succeed stay undone — retry to finish the rest.', failures });
+    return res.status(500).json({ error: 'Some distributions could not be undone, so the payment was not deleted. Any that did succeed stay undone — retry to finish the rest.', failures, results });
   }
   deleteRow();
-  res.json({ ok: true, undone: activeAllocations.length });
+  res.json({ ok: true, undone: activeAllocations.length, results });
+});
+
+// "Soft Undo" — same review-and-split flow as the DELETE confirm branch
+// above (resolutions: { [allocationId]: { shulAmount, orgWriteoffAmount } },
+// from the SAME preview the admin already saw via the 409 above), but
+// routes every reversal through softReverseAllocation instead of
+// reverseAllocation — the shul's local balance is restored the same way,
+// disccardpromos is never written to. Gated by its own explicit-grant
+// permission (shul_payment_soft_undo), never the general shul_payments
+// edit, since it's real money-adjacent power that can leave this app's
+// ledger and disccardpromos permanently out of sync if misused — note and
+// disccardId are both required every time as the audit trail for why.
+router.post('/:id/soft-undo', requirePermission('shul_payment_soft_undo', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const payment = db.prepare('SELECT * FROM shul_payments WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+  if (payment.method === 'sola_card' || payment.method === 'sola_refund') {
+    return res.status(400).json({ error: 'A card transaction can\'t be deleted — it charged/refunded a real card. Use Refund instead to reverse it (full or partial).' });
+  }
+  if (payment.method === 'stripe_card') {
+    return res.status(400).json({ error: 'A legacy Stripe card payment can\'t be deleted — it charged a real card. Use Pay Shul to record any refund that happened directly through Stripe.' });
+  }
+  const { note, disccardId, resolutions } = req.body || {};
+  if (!note || !note.trim()) return res.status(400).json({ error: 'A note explaining why this is being soft-undone is required.' });
+  if (!/^\d{5,}$/.test(String(disccardId || ''))) return res.status(400).json({ error: 'The disccardpromos ID of the inactive account is required — digits only, at least 5 digits.' });
+
+  const deleteRow = () => {
+    logAudit(req.user.org_id, req.user.id, 'delete', 'shul_payment', payment.id, payment, null, req.ip);
+    db.prepare('DELETE FROM shul_payments WHERE id = ?').run(payment.id);
+  };
+
+  if (payment.status !== 'approved') { deleteRow(); return res.json({ ok: true, undone: 0, results: [] }); }
+
+  // Same shortfall gate as DELETE /:id above — deleting this payment only
+  // needs any allocation touched at all if the shul's OTHER approved
+  // payments can no longer cover what's already been given out.
+  const paidExcludingThis = db.prepare(`SELECT COALESCE(SUM(net_amount),0) t FROM shul_payments WHERE shul_id = ? AND status = 'approved' AND id != ?`).get(payment.shul_id, payment.id).t;
+  const given = db.prepare(`SELECT COALESCE(SUM(base_amount),0) t FROM shul_allocations WHERE shul_id = ?`).get(payment.shul_id).t;
+  const balanceAfterRemoval = Math.round((paidExcludingThis - given) * 100) / 100;
+  if (balanceAfterRemoval >= -0.005) { deleteRow(); return res.json({ ok: true, undone: 0, results: [] }); }
+
+  const activeAllocations = db.prepare(`SELECT sa.*, a.first_name, a.last_name FROM shul_allocations sa
+    LEFT JOIN applicants a ON a.id = sa.applicant_id
+    WHERE sa.shul_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL`).all(payment.shul_id);
+
+  if (!activeAllocations.length) { deleteRow(); return res.json({ ok: true, undone: 0, results: [] }); }
+
+  const failures = [];
+  const results = [];
+  for (const alloc of activeAllocations) {
+    const applicant_name = `${alloc.first_name || ''} ${alloc.last_name || ''}`.trim();
+    const resolution = resolutions?.[alloc.id];
+    try {
+      const reversal = await softReverseAllocation({
+        orgId: req.user.org_id, userId: req.user.id, allocationId: alloc.id, ip: req.ip,
+        shulAmount: resolution?.shulAmount, orgWriteoffAmount: resolution?.orgWriteoffAmount, note, disccardId,
+      });
+      results.push({
+        id: alloc.id, applicant_id: alloc.applicant_id, applicant_name,
+        retrievable: reversal.retrievable, creditedToShul: -reversal.base_amount, writtenOff: -reversal.match_amount,
+        totalPulled: -reversal.total_amount, giftcardStatus: reversal.giftcard_status, giftcardError: reversal.giftcard_error,
+      });
+    }
+    catch (e) { failures.push({ id: alloc.id, applicant_name, error: e.message }); }
+  }
+  if (failures.length) {
+    return res.status(500).json({ error: 'Some distributions could not be soft-undone, so the payment was not deleted. Any that did succeed stay undone — retry to finish the rest.', failures, results });
+  }
+  deleteRow();
+  res.json({ ok: true, undone: activeAllocations.length, results });
 });
 
 router.get('/method-requests', (req, res) => {

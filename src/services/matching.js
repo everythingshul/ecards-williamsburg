@@ -448,9 +448,14 @@ export async function computeRetrievable(orgId, allocationId) {
 // exceed what was actually confirmed retrievable — enforced here
 // server-side regardless of what the client sent, same as the "never more
 // than what's in the account" rule the UI itself also enforces.
-export async function reverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, adminReversalNote }) {
-  const { original, applicant, fundingAnchor, fundingExternalId, discountId, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
-
+// Shared by reverseAllocation and softReverseAllocation below — the pure
+// money math (how much of the live-retrievable amount goes to the shul vs.
+// gets written off, and how that splits into base_amount/match_amount for
+// the reversal row) is identical either way; only what happens with
+// disccardpromos afterward differs between the two callers. Kept as one
+// function so the two paths can never quietly drift apart on the actual
+// dollar arithmetic.
+function resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount) {
   const hasOverride = shulAmount != null || orgWriteoffAmount != null;
   let creditToShul = retrievable, writeoffAmount = 0;
   if (hasOverride) {
@@ -481,6 +486,13 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip, shulA
     reversalMatch = Math.round(totalPulled * matchRatio * 100) / 100;
     reversalBase = Math.round((totalPulled - reversalMatch) * 100) / 100;
   }
+  return { creditToShul, writeoffAmount, totalPulled, reversalBase, reversalMatch };
+}
+
+export async function reverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, adminReversalNote }) {
+  const { original, applicant, fundingAnchor, fundingExternalId, discountId, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
+  const hasOverride = shulAmount != null || orgWriteoffAmount != null;
+  const { totalPulled, reversalBase, reversalMatch } = resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount);
 
   // FIXED (2026-09) — same lost-update race as createAllocation above (see
   // its comment for the full mechanism): this row used to get INSERTed only
@@ -556,5 +568,48 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip, shulA
 
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
   logAudit(orgId, userId, 'undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall }, ip);
+  return { ...reversalRow, shortfall, neverLoaded, retrievable };
+}
+
+// "Soft Undo" — same local bookkeeping as reverseAllocation above (the
+// shul's balance is restored for whatever's live-confirmed retrievable,
+// minus any write-off split the admin enters, exactly the same math via
+// resolveReversalSplit) but NEVER writes to disccardpromos, for when the
+// admin already knows — from disccardpromos' own dashboard, outside this
+// app — that the real account is inactive/handled and a second write from
+// here would be redundant or land on a dead account. Gated behind its own
+// explicit-grant permission (shul_payment_soft_undo, see
+// middleware/permissions.js) since it deliberately lets this app's local
+// ledger and disccardpromos' real state diverge — real money-adjacent
+// power that shouldn't be handed out by default. Still does the SAME live
+// read as a normal Undo (computeRetrievable), so "how much is actually
+// left" is still a real, current number, not a guess — "shouldn't make a
+// change in disccard" means no WRITE, not no read.
+//
+// note/disccardId are both REQUIRED (validated in
+// routes/shulPayments.js's POST /:id/soft-undo, not re-validated here —
+// this function trusts its one caller, same as reverseAllocation trusts
+// its callers on shulAmount/orgWriteoffAmount's shape) — permanently
+// recorded on the reversal row (admin_reversal_note, soft_undo_disccard_id)
+// as the audit trail for why disccardpromos was deliberately left alone.
+export async function softReverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, note, disccardId }) {
+  const { original, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
+  const { totalPulled, reversalBase, reversalMatch } = resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount);
+
+  const id = uuid();
+  const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
+  const finalNote = `${reversalNote} (Soft Undo — disccardpromos account ${disccardId} confirmed inactive/handled outside this app; no write was sent.)`;
+  // giftcard_status is a distinct value from 'failed' on purpose — the
+  // automatic retry sweep (services/providerAccount.js's runProviderEnforce)
+  // re-attempts every 'failed' row's disccard write on its own; using
+  // 'failed' here would silently undo the whole point of Soft Undo the
+  // next time that sweep ran.
+  db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note, admin_reversal_note, is_soft_undo, soft_undo_disccard_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -totalPulled, original.match_rate_used, original.is_admin_override, userId, 'skipped_soft_undo', null, original.id, finalNote, note, 1, disccardId);
+  db.prepare('UPDATE shul_allocations SET reversed_at = datetime(\'now\'), reversed_by = ? WHERE id = ?').run(userId, original.id);
+
+  const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
+  logAudit(orgId, userId, 'soft-undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall, disccardId, note }, ip);
   return { ...reversalRow, shortfall, neverLoaded, retrievable };
 }

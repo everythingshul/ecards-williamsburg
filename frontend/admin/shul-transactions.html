@@ -459,18 +459,32 @@ async function openUndoReviewModal(paymentId, data) {
     </div>`;
   }).join('');
 
+  const canSoftUndo = Auth.can('shul_payment_soft_undo', 'can_edit');
   const body = `<p>${esc(data.error)}</p>
+    <p class="small-muted">"Currently left in the account" below is a live disccardpromos read taken just now, not a cached or guessed figure — confirming re-checks it again at the moment each distribution is actually reversed.</p>
     ${shulPayments.length ? `<h4 style="margin-bottom:6px">Recent transactions for ${esc(shulName)}</h4>
     <table style="margin-bottom:16px"><thead><tr><th>Date</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead>
     <tbody>${rows}</tbody></table>` : ''}
     <h4 style="margin-bottom:6px">Outstanding distributions to review</h4>
     <p class="small-muted">Never more than what's actually left in each account. Anything not returned to the shul and not written off to the org stays exactly as it is — untouched.</p>
-    ${allocRows}`;
+    ${allocRows}
+    ${canSoftUndo ? `<div class="divider"></div>
+      <h4 style="margin-bottom:6px">Soft Undo (skips disccardpromos)</h4>
+      <p class="small-muted">Restores the shul's balance the same way as above, but never writes anything to disccardpromos — use only when the real account there is already confirmed inactive/handled outside this app. Both fields are required.</p>
+      <label style="margin-top:0">Note (reason for undoing)</label>
+      <input type="text" id="su-note" placeholder="e.g. account already deactivated directly on disccardpromos by admin on 2026-09-28">
+      <label style="margin-top:10px">Disccardpromos ID of the inactive account</label>
+      <input type="text" id="su-disccard-id" inputmode="numeric" placeholder="digits only, at least 5 digits">` : ''}`;
   const footer = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+    ${canSoftUndo ? `<button class="btn btn-outline btn-sm" onclick="confirmSoftUndo('${paymentId}')">Soft Undo &amp; Delete Payment</button>` : ''}
     <button class="btn btn-primary btn-sm" onclick="confirmUndoReview('${paymentId}')">Confirm &amp; Delete Payment</button>`;
   openModal('Review Before Deleting This Payment', body, footer, { wide: true });
 }
-window.confirmUndoReview = async (paymentId) => {
+// Shared by confirmUndoReview and confirmSoftUndo — gathers and validates
+// the per-allocation shul/org split from whatever's currently in the modal.
+// Returns null (after toasting the specific problem) on any validation
+// failure, so both callers can just `if (!resolutions) return;`.
+function collectUndoResolutions() {
   const resolutions = {};
   for (const card of document.querySelectorAll('#ec-modal [data-alloc-id]')) {
     const allocId = card.dataset.allocId;
@@ -480,15 +494,55 @@ window.confirmUndoReview = async (paymentId) => {
     const orgAmount = +card.querySelector('.ra-org').value || 0;
     const note = card.querySelector('.ra-note').value.trim();
     const max = +shulInput.dataset.max;
-    if (shulAmount < 0 || orgAmount < 0) return toast('Amounts can\'t be negative', true);
-    if (shulAmount + orgAmount > max + 0.01) return toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true);
+    if (shulAmount < 0 || orgAmount < 0) { toast('Amounts can\'t be negative', true); return null; }
+    if (shulAmount + orgAmount > max + 0.01) { toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true); return null; }
     resolutions[allocId] = { shulAmount, orgWriteoffAmount: orgAmount, note: note || undefined };
   }
+  return resolutions;
+}
+// Real-numbers outcome modal shown after EITHER confirm path succeeds —
+// what actually happened, not just a toast, per allocation: the live
+// figure that was retrievable, what actually landed in the shul's balance
+// vs. got written off, and (hard Undo only) whether the disccardpromos
+// write itself succeeded.
+function showUndoOutcome(title, results, { soft = false } = {}) {
+  const rows = (results || []).map(r => `<div class="card" style="margin-bottom:8px">
+      <strong>${esc(r.applicant_name || 'Unknown applicant')}</strong>
+      <table style="margin-top:6px">
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Retrievable (live-checked)</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(r.retrievable)}</strong></td></tr>
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Credited back to the shul</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(r.creditedToShul)}</strong></td></tr>
+        <tr><td class="small-muted" style="padding:2px 10px 2px 0">Written off (org matched funds)</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(r.writtenOff)}</strong></td></tr>
+      </table>
+      <p class="small-muted" style="margin:6px 0 0">${soft
+        ? 'Soft Undo — nothing was sent to disccardpromos for this distribution.'
+        : (r.giftcardStatus === 'ok' ? 'disccardpromos updated successfully.'
+          : `disccardpromos was NOT updated yet (${esc(r.giftcardError || 'unknown error')}) — it will retry automatically; the shul's balance above is already correct.`)}</p>
+    </div>`).join('');
+  const body = results?.length ? rows : '<p class="small-muted">Nothing needed to be reversed.</p>';
+  openModal(title, body, `<button class="btn btn-primary btn-sm" onclick="closeModal()">Close</button>`, { wide: true });
+}
+window.confirmUndoReview = async (paymentId) => {
+  const resolutions = collectUndoResolutions();
+  if (!resolutions) return;
   try {
-    await api(`/shul-payments/${paymentId}`, { method: 'DELETE', body: { resolutions } });
-    toast('Distributions resolved and payment deleted');
+    const r = await api(`/shul-payments/${paymentId}`, { method: 'DELETE', body: { resolutions } });
     closeModal();
     loadPayments();
+    showUndoOutcome('Payment Deleted — Outcome', r.results);
+  } catch (err) { toast(err.message, true); }
+};
+window.confirmSoftUndo = async (paymentId) => {
+  const note = qs('#su-note')?.value.trim();
+  const disccardId = qs('#su-disccard-id')?.value.trim();
+  if (!note) return toast('A note explaining why this is being undone is required', true);
+  if (!/^\d{5,}$/.test(disccardId || '')) return toast('Disccardpromos ID must be digits only, at least 5 digits', true);
+  const resolutions = collectUndoResolutions();
+  if (!resolutions) return;
+  try {
+    const r = await api(`/shul-payments/${paymentId}/soft-undo`, { method: 'POST', body: { note, disccardId, resolutions } });
+    closeModal();
+    loadPayments();
+    showUndoOutcome('Payment Soft-Undone — Outcome', r.results, { soft: true });
   } catch (err) { toast(err.message, true); }
 };
 window.submitManualPayment = async () => {
