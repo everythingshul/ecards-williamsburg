@@ -669,6 +669,25 @@ router.post('/allocations/:id/reverse', requirePermission('shul_payments', 'can_
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Soft Undo for a single allocation — same one-step shape as the hard
+// reverse's confirm branch above (the preview the admin already saw came
+// from POST /allocations/:id/reverse with no `confirm`, same live retrievable
+// number either path uses), but routes through softReverseAllocation instead
+// of reverseAllocation: the shul's local balance is restored the same way,
+// disccardpromos is never written to. Gated by its own explicit-grant
+// permission (shul_payment_soft_undo), never the general shul_payments edit.
+// note and disccardId are both required every time as the audit trail for why.
+router.post('/allocations/:id/soft-undo', requirePermission('shul_payment_soft_undo', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const { note, disccardId, shulAmount, orgWriteoffAmount } = req.body || {};
+  if (!note || !note.trim()) return res.status(400).json({ error: 'A note explaining why this is being soft-undone is required.' });
+  if (!/^\d{5,}$/.test(String(disccardId || ''))) return res.status(400).json({ error: 'The disccardpromos ID of the inactive account is required — digits only, at least 5 digits.' });
+  try {
+    const row = await softReverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip, shulAmount, orgWriteoffAmount, note, disccardId });
+    res.json({ ok: true, reversal: row });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Deletes a shul_payments row outright (not an equal-and-opposite reversal
 // like allocations get — this is correcting a data-entry mistake, not
 // undoing a real event). A pending/rejected entry never funded anything

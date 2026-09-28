@@ -237,6 +237,7 @@ async function openAllocationUndoModal(allocationId, { onDone } = {}) {
     preview = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: {} });
   } catch (err) { toast(err.message, true); return; }
   const retrievable = preview.retrievable ?? 0;
+  const canSoftUndo = Auth.can('shul_payment_soft_undo', 'can_edit');
   const body = `
     <p class="small-muted">"Currently left in the account" below is a live disccardpromos read taken just now — confirming re-checks it again at the moment the reversal actually happens.</p>
     <div class="card">
@@ -249,32 +250,62 @@ async function openAllocationUndoModal(allocationId, { onDone } = {}) {
         <div><label style="margin-top:0">Written off / returned to org (matched funds)</label>
           <input type="number" step="0.01" min="0" value="0" id="au-org"></div>
       </div>
-    </div>`;
+    </div>
+    ${canSoftUndo ? `<div class="divider"></div>
+      <h4 style="margin-bottom:6px">Soft Undo (skips disccardpromos)</h4>
+      <p class="small-muted">Restores the shul's balance the same way as above, but never writes anything to disccardpromos — use only when the real account there is already confirmed inactive/handled outside this app. Both fields are required.</p>
+      <label style="margin-top:0">Note (reason for undoing)</label>
+      <input type="text" id="au-su-note" placeholder="e.g. account already deactivated directly on disccardpromos by admin on 2026-09-28">
+      <label style="margin-top:10px">Disccardpromos ID of the inactive account</label>
+      <input type="text" id="au-su-disccard-id" inputmode="numeric" placeholder="digits only, at least 5 digits">` : ''}`;
   const footer = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+    ${canSoftUndo ? `<button class="btn btn-outline btn-sm" onclick="confirmAllocationSoftUndo('${allocationId}')">Soft Undo</button>` : ''}
     <button class="btn btn-primary btn-sm" onclick="confirmAllocationUndo('${allocationId}')">Confirm &amp; Undo</button>`;
   window._allocationUndoContext = { applicantName: preview.applicant_name, onDone };
   openModal('Review Before Undoing This Allocation', body, footer);
 }
-window.confirmAllocationUndo = async (allocationId) => {
+// Shared by confirmAllocationUndo and confirmAllocationSoftUndo — the
+// shul/org split fields are identical in both branches of the modal above.
+function collectAllocationUndoSplit() {
   const shulInput = qs('#au-shul');
   const shulAmount = +shulInput.value || 0;
   const orgAmount = +qs('#au-org').value || 0;
   const max = +shulInput.dataset.max;
-  if (shulAmount < 0 || orgAmount < 0) return toast('Amounts can\'t be negative', true);
-  if (shulAmount + orgAmount > max + 0.01) return toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true);
+  if (shulAmount < 0 || orgAmount < 0) { toast('Amounts can\'t be negative', true); return null; }
+  if (shulAmount + orgAmount > max + 0.01) { toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true); return null; }
+  return { shulAmount, orgAmount };
+}
+window.confirmAllocationUndo = async (allocationId) => {
+  const split = collectAllocationUndoSplit();
+  if (!split) return;
   const ctx = window._allocationUndoContext || {};
   try {
-    const r = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: { confirm: true, shulAmount, orgWriteoffAmount: orgAmount } });
+    const r = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: { confirm: true, shulAmount: split.shulAmount, orgWriteoffAmount: split.orgAmount } });
     closeModal();
     if (ctx.onDone) ctx.onDone();
     showAllocationUndoOutcome(r.reversal, ctx.applicantName);
   } catch (err) { toast(err.message, true); }
 };
-// Real-numbers outcome shown after the confirm above — what actually
+window.confirmAllocationSoftUndo = async (allocationId) => {
+  const note = qs('#au-su-note')?.value.trim();
+  const disccardId = qs('#au-su-disccard-id')?.value.trim();
+  if (!note) return toast('A note explaining why this is being undone is required', true);
+  if (!/^\d{5,}$/.test(disccardId || '')) return toast('Disccardpromos ID must be digits only, at least 5 digits', true);
+  const split = collectAllocationUndoSplit();
+  if (!split) return;
+  const ctx = window._allocationUndoContext || {};
+  try {
+    const r = await api(`/shul-payments/allocations/${allocationId}/soft-undo`, { method: 'POST', body: { note, disccardId, shulAmount: split.shulAmount, orgWriteoffAmount: split.orgAmount } });
+    closeModal();
+    if (ctx.onDone) ctx.onDone();
+    showAllocationUndoOutcome(r.reversal, ctx.applicantName, { soft: true });
+  } catch (err) { toast(err.message, true); }
+};
+// Real-numbers outcome shown after either confirm above — what actually
 // happened, not just a toast: the live figure that was retrievable, what
-// landed in the shul's balance vs. got written off, and whether the
-// disccardpromos write itself succeeded.
-function showAllocationUndoOutcome(reversal, applicantName) {
+// landed in the shul's balance vs. got written off, and (hard Undo only)
+// whether the disccardpromos write itself succeeded.
+function showAllocationUndoOutcome(reversal, applicantName, { soft = false } = {}) {
   const creditedToShul = -(reversal.base_amount || 0), writtenOff = -(reversal.match_amount || 0);
   const body = `<div class="card">
       <strong>${esc(applicantName || 'Unknown applicant')}</strong>
@@ -283,10 +314,12 @@ function showAllocationUndoOutcome(reversal, applicantName) {
         <tr><td class="small-muted" style="padding:2px 10px 2px 0">Credited back to the shul</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(creditedToShul)}</strong></td></tr>
         <tr><td class="small-muted" style="padding:2px 10px 2px 0">Written off (org matched funds)</td><td style="text-align:right;padding:2px 0"><strong>${fmtMoney(writtenOff)}</strong></td></tr>
       </table>
-      <p class="small-muted" style="margin:6px 0 0">${reversal.giftcard_status === 'ok' ? 'disccardpromos updated successfully.'
-        : `disccardpromos was NOT updated yet (${esc(reversal.giftcard_error || 'unknown error')}) — it will retry automatically; the shul's balance above is already correct.`}</p>
+      <p class="small-muted" style="margin:6px 0 0">${soft
+        ? 'Soft Undo — nothing was sent to disccardpromos for this distribution.'
+        : (reversal.giftcard_status === 'ok' ? 'disccardpromos updated successfully.'
+          : `disccardpromos was NOT updated yet (${esc(reversal.giftcard_error || 'unknown error')}) — it will retry automatically; the shul's balance above is already correct.`)}</p>
     </div>`;
-  openModal('Allocation Undone — Outcome', body, `<button class="btn btn-primary btn-sm" onclick="closeModal()">Close</button>`);
+  openModal(soft ? 'Allocation Soft-Undone — Outcome' : 'Allocation Undone — Outcome', body, `<button class="btn btn-primary btn-sm" onclick="closeModal()">Close</button>`);
 }
 
 function toast(msg, isError = false) {
