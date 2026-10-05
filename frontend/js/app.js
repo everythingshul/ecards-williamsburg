@@ -237,6 +237,7 @@ async function openAllocationUndoModal(allocationId, { onDone } = {}) {
     preview = await api(`/shul-payments/allocations/${allocationId}/reverse`, { method: 'POST', body: {} });
   } catch (err) { toast(err.message, true); return; }
   const retrievable = preview.retrievable ?? 0;
+  const totalGiven = preview.total_amount ?? 0;
   const canSoftUndo = Auth.can('shul_payment_soft_undo', 'can_edit');
   const body = `
     <p class="small-muted">"Currently left in the account" below is a live disccardpromos read taken just now — confirming re-checks it again at the moment the reversal actually happens.</p>
@@ -246,14 +247,14 @@ async function openAllocationUndoModal(allocationId, { onDone } = {}) {
       <div style="margin:6px 0"><strong>Currently left in the account: ${fmtMoney(retrievable)}</strong></div>
       <div class="grid-2">
         <div><label style="margin-top:0">Back to the shul</label>
-          <input type="number" step="0.01" min="0" max="${retrievable}" value="${retrievable}" id="au-shul" data-max="${retrievable}"></div>
+          <input type="number" step="0.01" min="0" max="${totalGiven}" value="${retrievable}" id="au-shul" data-max="${retrievable}" data-total-max="${totalGiven}"></div>
         <div><label style="margin-top:0">Written off / returned to org (matched funds)</label>
           <input type="number" step="0.01" min="0" value="0" id="au-org"></div>
       </div>
     </div>
     ${canSoftUndo ? `<div class="divider"></div>
       <h4 style="margin-bottom:6px">Soft Undo (skips disccardpromos)</h4>
-      <p class="small-muted">Restores the shul's balance the same way as above, but never writes anything to disccardpromos — use only when the real account there is already confirmed inactive/handled outside this app. Both fields are required.</p>
+      <p class="small-muted">Restores the shul's balance the same way as above, but never writes anything to disccardpromos — use only when the real account there is already confirmed inactive/handled outside this app. Since disccardpromos isn't being trusted here, Soft Undo can return up to the full original amount given (${fmtMoney(totalGiven)}), not just what the live read above shows. Both fields are required.</p>
       <label style="margin-top:0">Note (reason for undoing)</label>
       <input type="text" id="au-su-note" placeholder="e.g. account already deactivated directly on disccardpromos by admin on 2026-09-28">
       <label style="margin-top:10px">Disccardpromos ID of the inactive account</label>
@@ -266,17 +267,21 @@ async function openAllocationUndoModal(allocationId, { onDone } = {}) {
 }
 // Shared by confirmAllocationUndo and confirmAllocationSoftUndo — the
 // shul/org split fields are identical in both branches of the modal above.
-function collectAllocationUndoSplit() {
+// `cap` differs between them: a hard Undo can never exceed what's actually,
+// currently retrievable (data-max); Soft Undo — which never touches
+// disccardpromos at all — can go up to the full original amount given
+// (data-total-max), since the whole reason to Soft Undo is that the live
+// retrievable figure is already known not to be trustworthy.
+function collectAllocationUndoSplit(cap) {
   const shulInput = qs('#au-shul');
   const shulAmount = +shulInput.value || 0;
   const orgAmount = +qs('#au-org').value || 0;
-  const max = +shulInput.dataset.max;
   if (shulAmount < 0 || orgAmount < 0) { toast('Amounts can\'t be negative', true); return null; }
-  if (shulAmount + orgAmount > max + 0.01) { toast(`Can't return more than what's left in the account (${fmtMoney(max)})`, true); return null; }
+  if (shulAmount + orgAmount > cap + 0.01) { toast(`Can't return more than $${cap.toFixed(2)}`, true); return null; }
   return { shulAmount, orgAmount };
 }
 window.confirmAllocationUndo = async (allocationId) => {
-  const split = collectAllocationUndoSplit();
+  const split = collectAllocationUndoSplit(+qs('#au-shul').dataset.max);
   if (!split) return;
   const ctx = window._allocationUndoContext || {};
   try {
@@ -291,7 +296,7 @@ window.confirmAllocationSoftUndo = async (allocationId) => {
   const disccardId = qs('#au-su-disccard-id')?.value.trim();
   if (!note) return toast('A note explaining why this is being undone is required', true);
   if (!/^\d{5,}$/.test(disccardId || '')) return toast('Disccardpromos ID must be digits only, at least 5 digits', true);
-  const split = collectAllocationUndoSplit();
+  const split = collectAllocationUndoSplit(+qs('#au-shul').dataset.totalMax);
   if (!split) return;
   const ctx = window._allocationUndoContext || {};
   try {

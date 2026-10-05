@@ -455,14 +455,28 @@ export async function computeRetrievable(orgId, allocationId) {
 // disccardpromos afterward differs between the two callers. Kept as one
 // function so the two paths can never quietly drift apart on the actual
 // dollar arithmetic.
-function resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount) {
+//
+// cap (optional, defaults to `retrievable`): the real ceiling an admin's
+// override split can never exceed. A normal (hard) Undo really is pulling
+// money off the live card, so it can never exceed what's actually,
+// currently retrievable there — reverseAllocation always uses the default.
+// Soft Undo is different: by definition the admin already knows the live
+// disccardpromos balance is stale/wrong (the real account is confirmed
+// inactive/handled outside this app), so capping it at that same
+// potentially-wrong `retrievable` figure would make Soft Undo unable to do
+// the one thing it exists for — restoring the FULL original amount when
+// disccardpromos itself can no longer be trusted. softReverseAllocation
+// passes `original.total_amount` instead: the admin can never credit back
+// more than was ever actually given in the first place, but isn't blocked
+// by a live read they've already said not to trust.
+function resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount, cap = retrievable) {
   const hasOverride = shulAmount != null || orgWriteoffAmount != null;
   let creditToShul = retrievable, writeoffAmount = 0;
   if (hasOverride) {
     creditToShul = Math.max(0, Math.round((Number(shulAmount) || 0) * 100) / 100);
     writeoffAmount = Math.max(0, Math.round((Number(orgWriteoffAmount) || 0) * 100) / 100);
-    if (creditToShul + writeoffAmount > retrievable + 0.01) {
-      throw new Error(`Can't return more than what's actually in the account — $${retrievable.toFixed(2)} is retrievable right now, but $${(creditToShul + writeoffAmount).toFixed(2)} was requested (back to the shul + written off to the org).`);
+    if (creditToShul + writeoffAmount > cap + 0.01) {
+      throw new Error(`Can't return more than $${cap.toFixed(2)} — $${(creditToShul + writeoffAmount).toFixed(2)} was requested (back to the shul + written off to the org).`);
     }
   }
   // The TOTAL pulled off the card — both the shul's portion and the
@@ -594,7 +608,10 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip, shulA
 // as the audit trail for why disccardpromos was deliberately left alone.
 export async function softReverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, note, disccardId }) {
   const { original, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
-  const { totalPulled, reversalBase, reversalMatch } = resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount);
+  // Capped at the ORIGINAL total given, not the live (and, for a Soft Undo,
+  // already-known-untrustworthy) `retrievable` read — see resolveReversalSplit's
+  // own comment on `cap`.
+  const { totalPulled, reversalBase, reversalMatch } = resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount, original.total_amount);
 
   const id = uuid();
   const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
@@ -612,4 +629,63 @@ export async function softReverseAllocation({ orgId, userId, allocationId, ip, s
   const reversalRow = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(id);
   logAudit(orgId, userId, 'soft-undo', 'shul_allocation', original.id, original, { ...reversalRow, shortfall, disccardId, note }, ip);
   return { ...reversalRow, shortfall, neverLoaded, retrievable };
+}
+
+// Undoes a reversal (hard OR soft) — restores a previously-reversed give
+// back to active, the "Redo" counterpart to reverseAllocation/
+// softReverseAllocation above, for when an admin reversed something by
+// mistake (or a Soft Undo's disccardpromos account turned out NOT to be
+// inactive after all). Deliberately NOT implemented as "reverse the
+// reversal row through the normal Undo flow" — computeRetrievable already
+// refuses to operate on a reversal row at all (see its own comment: doing
+// so on a NEGATIVE total_amount produced garbage the one other time this
+// was tried), and conceptually this isn't "how much is still retrievable
+// from the card" at all, it's "put back what was taken out."
+//
+// Simpler and exactly symmetric instead: delete the one reversal row (it
+// existed solely to cancel the original out — see reverseAllocation's own
+// "never a delete" comment, which is about GIVES, not about a correction
+// entry being itself corrected) and clear reversed_at/reversed_by on the
+// original so it's active again. The disccardpromos push then needs no
+// separate math of its own: exactly like createAllocation/reverseAllocation,
+// it just re-reads this app's own ledger (which, the moment the row above
+// is gone, already reflects the original being active again) and pushes
+// that absolute total — correct whether the reversal being undone ever
+// actually wrote to disccardpromos or not (a soft-undone one never did).
+export async function restoreAllocation({ orgId, userId, allocationId, ip }) {
+  const original = db.prepare('SELECT * FROM shul_allocations WHERE id = ? AND org_id = ?').get(allocationId, orgId);
+  if (!original) throw new Error('Allocation not found');
+  if (original.reversal_of) throw new Error("This is a reversal record, not a give — restore the original allocation instead.");
+  if (!original.reversed_at) throw new Error('This allocation has not been reversed — there is nothing to restore.');
+  const reversalRow = db.prepare(`SELECT * FROM shul_allocations WHERE reversal_of = ? ORDER BY created_at DESC LIMIT 1`).get(original.id);
+  if (!reversalRow) throw new Error("Couldn't find the reversal entry for this allocation.");
+
+  const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(original.applicant_id);
+  const fundingAnchor = applicant ? resolveFundingAnchor(applicant) : null;
+  const fundingExternalId = fundingAnchor?.external_id;
+  const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
+
+  db.prepare('DELETE FROM shul_allocations WHERE id = ?').run(reversalRow.id);
+  db.prepare("UPDATE shul_allocations SET reversed_at = NULL, reversed_by = NULL WHERE id = ?").run(original.id);
+
+  let giftcardStatus = 'ok', giftcardError = null;
+  if (discountId && fundingAnchor?.provider_account_id) {
+    const existing = getApplicantBalances(orgId, [applicant.id]).get(applicant.id) || { loaded: 0 };
+    const newTotal = Math.max(0, existing.loaded);
+    try {
+      await giftcard.setPackageAmountAbsolute(original.season_id, { customerId: fundingAnchor.provider_account_id, externalId: fundingExternalId, totalAmount: newTotal, discountId });
+    } catch (e) {
+      giftcardStatus = 'failed';
+      giftcardError = e.message;
+      console.error('[matching] restoreAllocation disccardpromos write failed (local restore still proceeds):', e.message);
+      scheduleProviderEnforceSoon(orgId, `restore fund-write failed for allocation ${original.id}`);
+    }
+  } else {
+    giftcardStatus = discountId ? 'ok' : 'failed';
+    giftcardError = discountId ? null : 'No disccardpromos Package/Discount ID configured (Settings > Organization > Gift Card Loading).';
+  }
+
+  const restored = db.prepare('SELECT * FROM shul_allocations WHERE id = ?').get(original.id);
+  logAudit(orgId, userId, 'restore', 'shul_allocation', original.id, { ...original, reversal: reversalRow }, restored, ip);
+  return { ...restored, giftcard_status: giftcardStatus, giftcard_error: giftcardError };
 }

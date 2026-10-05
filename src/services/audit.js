@@ -152,6 +152,11 @@ export function getRecentActions(orgId, hours = 48) {
     // to..." entry the undo created.
     redoable: !!r.undone_at && !!r.undo_entry_id && !consumedIds.has(r.undo_entry_id),
     allocationReversible: r.entity_type === 'shul_allocation' && r.action === 'create' && !reversedAllocationIds.has(r.entity_id),
+    // The "Redo" counterpart — a give that HAS been reversed shows a Redo
+    // button on this same 'create' row instead of nothing, so an admin
+    // doesn't have to go find the separate "Reversed a change to..." entry
+    // just to bring a mistaken reversal back.
+    allocationRestorable: r.entity_type === 'shul_allocation' && r.action === 'create' && reversedAllocationIds.has(r.entity_id),
     ...(r.entity_type === 'shul_allocation' ? {
       allocationShulName: shulNames[(r.after || r.before)?.shul_id] || '',
       allocationApplicantName: applicantNames[(r.after || r.before)?.applicant_id] || '',

@@ -3,7 +3,7 @@ import { db, uuid, DEFAULT_ORG_ID } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { pendingBalance, approvedBalance, shulBalances } from '../services/shulBalance.js';
-import { createAllocation, reverseAllocation, softReverseAllocation, shulDisplayMatch, computeRetrievable } from '../services/matching.js';
+import { createAllocation, reverseAllocation, softReverseAllocation, restoreAllocation, shulDisplayMatch, computeRetrievable } from '../services/matching.js';
 import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
@@ -685,6 +685,20 @@ router.post('/allocations/:id/soft-undo', requirePermission('shul_payment_soft_u
   try {
     const row = await softReverseAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip, shulAmount, orgWriteoffAmount, note, disccardId });
     res.json({ ok: true, reversal: row });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// "Redo" for a reversed allocation (hard or soft) — the Logs page's way to
+// bring a give back after it was reversed by mistake. Same base permission
+// as reversing in the first place (not the soft-undo special grant — this
+// isn't inherently riskier than undoing was). See restoreAllocation's own
+// comment for why this is a plain delete-the-reversal-row operation rather
+// than running back through the normal live-retrievable Undo machinery.
+router.post('/allocations/:id/restore', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  try {
+    const row = await restoreAllocation({ orgId: req.user.org_id, userId: req.user.id, allocationId: req.params.id, ip: req.ip });
+    res.json({ ok: true, allocation: row });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
