@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js"></script>
+<script src="/js/app.js?v=20261005"></script>
 <script>
 Auth.requireRole('super_admin');
 // Hardcoded super_admin-only, not a permissions check — 'audit' isn't a
@@ -246,6 +246,7 @@ async function load() {
         ${a.undoable ? `<button class="btn btn-sm btn-outline" onclick="undoAction('${a.id}', false, '${a.action}')">Undo</button>` : ''}
         ${a.redoable ? `<button class="btn btn-sm btn-outline" onclick="undoAction('${a.undo_entry_id}', true)">Redo</button>` : ''}
         ${a.allocationReversible ? `<button class="btn btn-sm btn-outline" onclick="reverseShulAllocation('${a.entity_id}')">Undo</button>` : ''}
+        ${a.allocationRestorable ? `<button class="btn btn-sm btn-outline" onclick="restoreShulAllocation('${a.entity_id}')">Redo</button>` : ''}
       </div>
     </div>`;
   }).join('') : '<p class="small-muted">No actions in this window.</p>';
@@ -272,6 +273,15 @@ window.undoAction = async (id, isRedo, action) => {
 // Shuls > Payments tab; this just gives the Actions tab a button to the
 // same endpoint instead of duplicating that logic.
 window.reverseShulAllocation = (allocationId) => openAllocationUndoModal(allocationId, { onDone: load });
+// The "Redo" counterpart — brings a reversed give back to active (see
+// services/matching.js's restoreAllocation for why this is a plain
+// delete-the-reversal-row operation rather than reusing the live-retrievable
+// Undo machinery, which doesn't apply here at all).
+window.restoreShulAllocation = async (allocationId) => {
+  if (!confirm('Redo this allocation? This brings the give back as if it had never been reversed, and re-syncs disccardpromos to match.')) return;
+  try { await api(`/shul-payments/allocations/${allocationId}/restore`, { method: 'POST' }); toast('Restored'); load(); }
+  catch (err) { toast(err.message, true); }
+};
 qs('#f-hours').addEventListener('change', load);
 load();
 
