@@ -110,7 +110,13 @@ export function getRecentActions(orgId, hours = 48) {
   // has already been reversed since — live-checked here (never cached, same
   // rule as every other money figure in this app) rather than trusted from
   // the audit row's own after_json, which is a point-in-time snapshot.
-  const allocationIds = [...new Set(rows.filter(r => r.entity_type === 'shul_allocation' && r.action === 'create').map(r => r.entity_id).filter(Boolean))];
+  // Every action, not just 'create': an 'undo'/'soft-undo' row shares its
+  // entity_id with the 'create' row it reversed (see
+  // reverseAllocation/softReverseAllocation's own logAudit calls), and the
+  // two can land in different time windows (an old give reversed just now),
+  // so restricting this to 'create' rows could miss an entity_id whose
+  // 'create' row fell outside the current filter.
+  const allocationIds = [...new Set(rows.filter(r => r.entity_type === 'shul_allocation').map(r => r.entity_id).filter(Boolean))];
   const reversedAllocationIds = new Set();
   if (allocationIds.length) {
     const placeholders = allocationIds.map(() => '?').join(',');
@@ -153,10 +159,12 @@ export function getRecentActions(orgId, hours = 48) {
     redoable: !!r.undone_at && !!r.undo_entry_id && !consumedIds.has(r.undo_entry_id),
     allocationReversible: r.entity_type === 'shul_allocation' && r.action === 'create' && !reversedAllocationIds.has(r.entity_id),
     // The "Redo" counterpart — a give that HAS been reversed shows a Redo
-    // button on this same 'create' row instead of nothing, so an admin
-    // doesn't have to go find the separate "Reversed a change to..." entry
-    // just to bring a mistaken reversal back.
-    allocationRestorable: r.entity_type === 'shul_allocation' && r.action === 'create' && reversedAllocationIds.has(r.entity_id),
+    // button both on the original 'create' row AND on the 'undo'/
+    // 'soft-undo' row the reversal itself created (same entity_id — see
+    // reverseAllocation/softReverseAllocation's own logAudit calls), since
+    // an admin looking at "reversed ($X)" is just as likely to click there
+    // as to scroll to find the original "gave $X" entry.
+    allocationRestorable: r.entity_type === 'shul_allocation' && ['create', 'undo', 'soft-undo'].includes(r.action) && reversedAllocationIds.has(r.entity_id),
     ...(r.entity_type === 'shul_allocation' ? {
       allocationShulName: shulNames[(r.after || r.before)?.shul_id] || '',
       allocationApplicantName: applicantNames[(r.after || r.before)?.applicant_id] || '',
