@@ -1516,5 +1516,108 @@ db.exec(`CREATE TABLE IF NOT EXISTS impersonation_tokens (
   created_at TEXT DEFAULT (datetime('now'))
 )`);
 
+// ===================== Store Billing (redone) =====================
+// A full redo of the old bare-bones "submit a bill" flow: admin-defined
+// billing periods with a mass, editable email to approved stores, a
+// one-time payment-info form gated behind email verification, invoice
+// submission gated behind a fresh-per-login verification, and a
+// pending/completed/rejected review lifecycle with an offline-payment
+// record (store_bill_submissions already existed for the old flow — kept
+// and extended rather than replaced, so nothing already submitted is lost).
+
+// One "please submit your invoice" request — the admin-typed subject/body
+// (with {{storeName}}/{{startDate}}/{{endDate}}/{{portalUrl}} placeholders)
+// is saved per period rather than reused from a fixed system template,
+// since the whole point is that it's edited fresh each time it's issued.
+db.exec(`CREATE TABLE IF NOT EXISTS billing_periods (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  email_subject TEXT NOT NULL,
+  email_body TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+
+// Which stores actually got a given period's email — lets the store portal
+// show "please submit for Aug 1 - Aug 31" and lets admin see who was asked
+// but hasn't submitted yet. One row per store per period.
+db.exec(`CREATE TABLE IF NOT EXISTS billing_period_invites (
+  id TEXT PRIMARY KEY,
+  billing_period_id TEXT NOT NULL REFERENCES billing_periods(id),
+  store_id TEXT NOT NULL REFERENCES stores(id),
+  email_status TEXT DEFAULT 'sent', -- sent | failed | dry_run
+  sent_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_billing_period_invites_store ON billing_period_invites(store_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_billing_period_invites_period ON billing_period_invites(billing_period_id)`);
+
+// A store's banking details for receiving reimbursement payments — filled
+// out once, behind email verification, before their first invoice can be
+// submitted at all (see routes/storeBilling.js). account_number/
+// routing_number are stored in full (an admin sending the actual offline
+// ACH/wire payment needs them) but the API only ever hands the full number
+// back to the owning store's own portal for editing; everywhere else
+// (admin views) only the last 4 digits are exposed.
+db.exec(`CREATE TABLE IF NOT EXISTS store_payment_info (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  store_id TEXT NOT NULL UNIQUE REFERENCES stores(id),
+  bank_name TEXT NOT NULL,
+  name_on_account TEXT NOT NULL,
+  address TEXT, city TEXT, state TEXT, zip TEXT, place_id TEXT,
+  contact_name TEXT NOT NULL,
+  contact_cell TEXT NOT NULL,
+  account_number TEXT NOT NULL,
+  routing_number TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+)`);
+
+// Email-verification codes gating two sensitive store-portal actions:
+// 'payment_info' (every time the banking form is saved — no standing
+// "already verified," since editing bank details is sensitive every
+// time) and 'invoice_submit' (once per LOGIN — session_iat is the JWT's
+// own `iat` claim, so a consumed row for the current session_iat is
+// enough to let every invoice in that same login through without asking
+// again, but a fresh login gets a new iat and has to re-verify). used_at
+// marks a consumed code as spent for the one action it unlocked, so a
+// payment_info code can't be replayed for a second save.
+db.exec(`CREATE TABLE IF NOT EXISTS billing_verification_codes (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  store_id TEXT NOT NULL REFERENCES stores(id),
+  purpose TEXT NOT NULL, -- payment_info | invoice_submit
+  code TEXT NOT NULL,
+  email TEXT NOT NULL,
+  session_iat INTEGER,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  used_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_billing_verification_codes_store ON billing_verification_codes(store_id, purpose)`);
+
+// Extending the pre-existing store_bill_submissions (the old flow's single
+// table) rather than replacing it — nothing already submitted is lost, and
+// the old submitted/reviewed/paid statuses are migrated below into the new
+// three-state pending/completed/rejected model this redo uses.
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN billing_period_id TEXT REFERENCES billing_periods(id)`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN period_confirmed INTEGER DEFAULT 0`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN rejection_reason TEXT`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_amount REAL`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_bank_name TEXT`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_account_last4 TEXT`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_sent_date TEXT`);
+// Two separate notes an admin can leave when recording a payment:
+// payment_note goes out in the "payment sent" email to the store (so it's
+// admin-written but store-visible — e.g. "this covers two periods"); the
+// pre-existing admin_notes column (from the old bill-submissions flow) is
+// reused here as the internal-only counterpart, never sent anywhere.
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_note TEXT`);
+db.prepare(`UPDATE store_bill_submissions SET status = 'pending' WHERE status IN ('submitted', 'reviewed')`).run();
+db.prepare(`UPDATE store_bill_submissions SET status = 'completed' WHERE status = 'paid'`).run();
+
 export const DEFAULT_ORG_ID = defaultOrgId;
 export function uuid() { return randomUUID(); }

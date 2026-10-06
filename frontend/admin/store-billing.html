@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Billing · Kupes Hair Williamsburg</title>
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
+<style>
+  .sb-store-picker { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 8px; }
+  .sb-store-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
+  .sb-store-row:hover { background: var(--brand-panel-2); }
+  .sb-store-row input { width: auto; }
+  .sb-pay-pill { display: inline-flex; align-items: center; gap: 8px; background: var(--brand-panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+</style>
+</head>
+<body>
+<script src="/js/app.js?v=20261005"></script>
+<script src="/js/usbanks.js?v=20261005"></script>
+<script>
+Auth.requireAdmin();
+if (!Auth.can('store_billing')) { location.href = '/admin/dashboard'; }
+const canEdit = Auth.can('store_billing', 'can_edit');
+
+renderShell('/admin/store-billing', `
+  <h2>Store Billing</h2>
+  <div class="tabs" id="sb-tabs">
+    <button class="active" data-t="invoices">Invoices</button>
+    <button data-t="periods">Billing Periods</button>
+  </div>
+
+  <div id="panel-invoices">
+    <div class="toolbar" style="margin-bottom:10px">
+      <select id="sb-status-filter" onchange="loadInvoices()">
+        <option value="pending">Pending</option>
+        <option value="completed">Completed</option>
+        <option value="rejected">Rejected</option>
+        <option value="">All</option>
+      </select>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr><th>Store</th><th>Period</th><th>Amount</th><th>Submitted</th><th>Attachment</th><th>Status</th><th></th></tr></thead>
+      <tbody id="tbody-invoices"><tr><td colspan="7" class="empty-state">Loading&hellip;</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div id="panel-periods" style="display:none">
+    <div class="flex-between"><p class="small-muted" style="margin:0">A billing period is a "please submit your invoice" request sent to the stores you choose.</p>
+      ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="openIssueBillingModal()">+ Issue Billing Email</button>` : ''}</div>
+    <div class="card" style="padding:0;overflow-x:auto;margin-top:10px">
+      <table><thead><tr><th>Period</th><th>Invited</th><th>Submitted</th><th>Created</th><th></th></tr></thead>
+      <tbody id="tbody-periods"><tr><td colspan="5" class="empty-state">Loading&hellip;</td></tr></tbody></table>
+    </div>
+  </div>
+`);
+
+qsa('#sb-tabs button').forEach(b => b.addEventListener('click', () => {
+  qsa('#sb-tabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+  ['invoices', 'periods'].forEach(t => qs('#panel-' + t).style.display = t === b.dataset.t ? 'block' : 'none');
+  if (b.dataset.t === 'periods') loadPeriods(); else loadInvoices();
+}));
+
+async function loadInvoices() {
+  try {
+    const status = qs('#sb-status-filter').value;
+    const { bills } = await api(`/store-billing/invoices${status ? `?status=${status}` : ''}`);
+    qs('#tbody-invoices').innerHTML = bills.length ? bills.map(b => `<tr>
+        <td>${esc(b.store_name)}</td><td>${esc(b.period_label || '')}</td><td>${fmtMoney(b.amount)}</td><td>${fmtDateTime(b.submitted_at)}</td>
+        <td>${b.file_name ? `<a href="#" onclick="downloadStoreInvoiceFile('${b.id}');return false;">${esc(b.file_name)}</a>` : '<span class="small-muted">&mdash;</span>'}</td>
+        <td>${badge(b.status, b.status === 'completed' ? 'active' : b.status)}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="openStoreInvoiceModal('${b.id}', loadInvoices)">View</button></td>
+      </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No invoices here.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+
+// ===================== Billing Periods =====================
+
+async function loadPeriods() {
+  try {
+    const { periods } = await api('/store-billing/periods');
+    qs('#tbody-periods').innerHTML = periods.length ? periods.map(p => `<tr>
+        <td>${esc(p.label)}</td><td>${p.invited_count}</td><td>${p.submitted_count}</td><td>${fmtDate(p.created_at)}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="viewPeriod('${p.id}')">View</button></td>
+      </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No billing periods issued yet.</td></tr>';
+  } catch (err) { toast(err.message, true); }
+}
+
+window.viewPeriod = async (id) => {
+  try {
+    const { period, invited } = await api(`/store-billing/periods/${id}`);
+    const body = `
+      <p><strong>${esc(period.label)}</strong></p>
+      <table><thead><tr><th>Store</th><th>Email</th><th>Submitted?</th></tr></thead>
+      <tbody>${invited.map(i => `<tr><td>${esc(i.store_name)}</td><td>${badge(i.email_status, i.email_status === 'sent' ? 'active' : 'rejected')}</td><td>${i.submitted ? badge('yes', 'active') : badge('no', 'pending')}</td></tr>`).join('')}</tbody></table>
+    `;
+    openModal(`Billing Period — ${esc(period.label)}`, body, '', { wide: true });
+  } catch (err) { toast(err.message, true); }
+};
+
+// The composer always starts from the saved default (Settings > Auto
+// Emails' "Store Billing: Billing Period Request" entry, same generic
+// system-email-template mechanism every other automatic email in this app
+// uses) rather than a hardcoded constant — editing and saving that default
+// (here via "Save as Default", or directly in Settings) is what makes a
+// wording change stick for every future billing period instead of
+// resetting the next time this composer opens. Each individual send can
+// still be tweaked ad hoc without touching the saved default at all.
+window.openIssueBillingModal = async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  let subject = 'Please submit your invoice — {{period}}', bodyHtml = '';
+  try {
+    const { templates } = await api('/settings/email-templates');
+    const tmpl = templates.find(t => t.key === 'storeBillingRequest');
+    if (tmpl) { subject = tmpl.subject; bodyHtml = tmpl.body; }
+  } catch { /* fall back to the inline defaults above if Settings can't be reached */ }
+  const body = `
+    <div class="grid-2">
+      <div><label>Billing Period Start</label><input id="ib-start" type="date" value="${today}"></div>
+      <div><label>Billing Period End</label><input id="ib-end" type="date" value="${today}"></div>
+    </div>
+    <label>Email Subject</label><input id="ib-subject" value="${esc(subject)}">
+    <label>Email Body <span class="small-muted">(HTML; {{storeName}}, {{period}}, {{startDate}}, {{endDate}}, {{portalUrl}} are substituted per store)</span></label>
+    <textarea id="ib-body" rows="10">${esc(bodyHtml)}</textarea>
+    <p class="small-muted" style="margin-top:6px">Changes here apply to this send only. Use "Save as Default" to make them permanent for every future billing period.</p>
+  `;
+  openModal('Issue Billing Email', body, `
+    <button class="btn btn-outline btn-sm" onclick="saveBillingEmailDefault()">Save as Default</button>
+    <button class="btn btn-primary btn-sm" onclick="openStorePicker()">Next: Choose Stores</button>`, { wide: true });
+};
+
+window.saveBillingEmailDefault = async () => {
+  try {
+    await api('/settings/email-templates/storeBillingRequest', { method: 'PUT', body: { subject: qs('#ib-subject').value, body: qs('#ib-body').value } });
+    toast('Saved as the default billing email — every future "Issue Billing Email" will start from this.');
+  } catch (err) { toast(err.message, true); }
+};
+
+window.openStorePicker = async () => {
+  const start = qs('#ib-start').value, end = qs('#ib-end').value, subject = qs('#ib-subject').value, bodyHtml = qs('#ib-body').value;
+  if (!start || !end) return toast('Start and end date are required', true);
+  if (!subject || !bodyHtml) return toast('Subject and body are required', true);
+  try {
+    const { stores } = await api('/stores?setup_status=active');
+    const body = `
+      <p class="small-muted">Only approved stores are listed. Select who should get this request.</p>
+      <div style="margin-bottom:8px"><input id="sp-search" placeholder="Search stores&hellip;" oninput="filterStorePicker()">
+        <label class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="sp-all" onchange="toggleAllStores(this.checked)"><span>Select All</span></label>
+      </div>
+      <div class="sb-store-picker" id="sp-list">${stores.map(s => `<div class="sb-store-row" data-name="${esc(s.name.toLowerCase())}"><input type="checkbox" class="sp-store" value="${s.id}"><span>${esc(s.name)}</span></div>`).join('') || '<p class="small-muted">No approved stores found.</p>'}</div>
+    `;
+    openModal('Choose Stores', body, `<button class="btn btn-primary btn-sm" onclick="sendBillingEmail('${esc(start)}','${esc(end)}')">Send</button>`, { wide: true });
+    window._ibSubject = subject; window._ibBody = bodyHtml;
+  } catch (err) { toast(err.message, true); }
+};
+window.filterStorePicker = () => {
+  const q = qs('#sp-search').value.toLowerCase();
+  qsa('.sb-store-row').forEach(r => r.style.display = r.dataset.name.includes(q) ? '' : 'none');
+};
+window.toggleAllStores = (checked) => {
+  qsa('.sp-store').forEach(cb => { if (cb.closest('.sb-store-row').style.display !== 'none') cb.checked = checked; });
+};
+
+window.sendBillingEmail = async (start, end) => {
+  const storeIds = qsa('.sp-store:checked').map(cb => cb.value);
+  if (!storeIds.length) return toast('Select at least one store', true);
+  try {
+    const r = await api('/store-billing/periods', { method: 'POST', body: { start_date: start, end_date: end, email_subject: window._ibSubject, email_body: window._ibBody, store_ids: storeIds } });
+    toast(`Sent to ${r.sent} store(s)${r.failed ? `, ${r.failed} failed` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}`);
+    closeModal();
+    loadPeriods();
+  } catch (err) { toast(err.message, true); }
+};
+
+loadInvoices();
+</script>
+</body>
+</html>

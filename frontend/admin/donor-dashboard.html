@@ -293,7 +293,7 @@ async function loadDonorDashboard() {
   qs('#kpi-row').innerHTML = [
     kpiCard('Total Applicants', applicants.total, 'var(--viz-1)', EXEC_ICONS.people),
     kpiCard('Approved Applicants', applicants.approved, 'var(--viz-good)', EXEC_ICONS.check),
-    kpiCard('Cards Activated', cards.activated, 'var(--viz-3)', EXEC_ICONS.card),
+    kpiCard('Activated Accounts', `${cards.activatedAccounts}/${applicants.approved}`, 'var(--viz-3)', EXEC_ICONS.card),
     kpiCard('Open Duplicate Flags', duplicatesOpen, duplicatesOpen > 0 ? 'var(--viz-critical)' : 'var(--viz-muted)', EXEC_ICONS.flag),
   ].join('');
 

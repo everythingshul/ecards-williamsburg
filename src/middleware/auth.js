@@ -41,6 +41,12 @@ export function auth(req, res, next) {
   if ((user.token_version || 0) !== (decoded.tokenVersion || 0)) return res.status(401).json({ error: 'Session expired, please log in again' });
   if (user.is_paused) return res.status(423).json({ error: 'Account is paused pending duplicate resolution. Contact the administrator.', code: 'ACCOUNT_PAUSED' });
   req.user = user;
+  // The JWT's own `iat` (seconds since epoch, set automatically by jwt.sign)
+  // doubles as a stable "this login" marker — same token, same iat, on every
+  // request until the next login issues a fresh one. Store Billing's invoice
+  // submission uses this to require a fresh verification code once per
+  // login rather than on every single submission (see routes/storeBilling.js).
+  req.tokenIat = decoded.iat;
   next();
 }
 

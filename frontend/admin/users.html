@@ -16,9 +16,9 @@ Auth.requireAdmin();
 // every resource that can be gated at all gets a row here. Recent Actions
 // ('audit') is deliberately absent — it's hardcoded to super_admin only
 // (routes/audit.js), never a grantable permission, so no row for it here.
-const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','shul_payments','shul_payment_transfer','shul_payment_soft_undo','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','portal_impersonation'];
+const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','store_billing','shul_payments','shul_payment_transfer','shul_payment_soft_undo','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','portal_impersonation'];
 const RESOURCE_LABELS = {
-  dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores',
+  dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores', store_billing: 'Store Billing',
   shul_payments: 'Shul Transactions & Allocations',
   seasons: 'Seasons', forms: 'Form Builder', tasks: 'Tasks', emails: 'Email Center', sms: 'SMS Center',
   updates: 'Updates', documents: 'E-Signatures', site_content: 'Site Content', contract_settings: 'Documents',

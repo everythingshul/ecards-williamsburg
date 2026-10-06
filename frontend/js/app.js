@@ -480,6 +480,7 @@ const NAV_ITEMS = [
   { href: '/admin/cards', label: 'Cards & Transactions', icon: '&#9670;', resource: 'cards' },
   { href: '/admin/shul-transactions', label: 'Shul Transactions', icon: '&#9670;', resource: 'shul_payments' },
   { href: '/admin/stores', label: 'Stores', icon: '&#9670;', resource: 'stores' },
+  { href: '/admin/store-billing', label: 'Store Billing', icon: '&#9670;', resource: 'store_billing' },
   { href: '/admin/tasks', label: 'Tasks', icon: '&#9670;', resource: 'tasks' },
   { href: '/admin/emails', label: 'Email Center', icon: '&#9670;', resource: 'emails' },
   { href: '/admin/sms', label: 'SMS Center', icon: '&#9670;', resource: 'sms' },
@@ -1315,6 +1316,138 @@ async function loadHistoryTab(entityType, entityId, containerId) {
     }).join('') : '<p class="small-muted">No history yet.</p>';
   } catch (err) { container.innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
 }
+
+// ===================== Store Billing: shared invoice-review modal =====================
+// Used by both the admin Store Billing page (frontend/admin/store-billing.html)
+// and a store's own profile Billing tab (frontend/admin/stores.html) — same
+// reasoning as loadDocumentsTab/loadHistoryTab above: once a second page
+// needed the identical "review this invoice" modal, it moved here instead of
+// being copy-pasted. onDone is called after any action that changes the
+// invoice (reject/delete/mark paid) so the calling page can refresh whatever
+// list it's showing — stashed on window rather than threaded through every
+// inline onclick string, since the sub-action functions below are called
+// from markup built fresh each time this opens.
+window.openStoreInvoiceModal = async (id, onDone) => {
+  window.__storeInvoiceOnDone = onDone;
+  try {
+    const { bill, paymentInfo } = await api(`/store-billing/invoices/${id}`);
+    const isTopAdmin = ['super_admin', 'org_admin'].includes(Auth.user()?.role);
+    const canEdit = Auth.can('store_billing', 'can_edit');
+    const payBlock = paymentInfo ? `
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--brand-panel-2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px">
+        ${typeof renderBankLogo === 'function' ? renderBankLogo(paymentInfo.bank_name, 26) : ''}
+        <span><strong>${esc(paymentInfo.bank_name)}</strong> &middot; acct &hellip;${esc(paymentInfo.account_last4)} &middot; routing &hellip;${esc(paymentInfo.routing_last4)}</span>
+        ${isTopAdmin ? `<button class="btn btn-outline btn-sm" style="margin-left:auto" onclick="revealStorePaymentInfo('${bill.store_id}')">Reveal Full Numbers</button>` : ''}
+      </div>
+      <p class="small-muted" style="margin-top:6px">On file for: ${esc(paymentInfo.name_on_account)} &middot; ${esc(paymentInfo.contact_name)}, ${esc(paymentInfo.contact_cell)}</p>
+    ` : `<p class="small-muted" style="color:var(--danger)">This store has no payment information on file.</p>`;
+    const body = `
+      <div class="grid-2">
+        <div><strong>Store</strong><br>${esc(bill.store_name)}</div>
+        <div><strong>Status</strong><br>${badge(bill.status, bill.status === 'completed' ? 'active' : bill.status)}</div>
+      </div>
+      <div class="grid-2" style="margin-top:10px">
+        <div><strong>Period</strong><br>${esc(bill.period || 'N/A')}</div>
+        <div><strong>Amount</strong><br>${fmtMoney(bill.amount)}</div>
+      </div>
+      <p style="margin-top:10px"><strong>Submitted</strong><br>${fmtDateTime(bill.submitted_at)}</p>
+      ${bill.description ? `<p><strong>Description</strong><br>${esc(bill.description)}</p>` : ''}
+      <p>${bill.file_name ? `<a href="#" onclick="downloadStoreInvoiceFile('${bill.id}');return false;">&#128206; ${esc(bill.file_name)}</a>` : '<span class="small-muted">No attachment</span>'}</p>
+      <div class="divider"></div>
+      ${payBlock}
+      ${bill.status === 'rejected' && bill.rejection_reason ? `<div class="divider"></div><p><strong>Rejection Reason</strong><br>${esc(bill.rejection_reason)}</p>` : ''}
+      ${bill.status === 'completed' ? `<div class="divider"></div><p><strong>Payment Sent</strong><br>${fmtMoney(bill.payment_amount)} to ${esc(bill.payment_bank_name)} &hellip;${esc(bill.payment_account_last4)} on ${fmtDate(bill.payment_sent_date)}</p>
+        ${bill.payment_note ? `<p class="small-muted"><strong>Note sent to store:</strong> ${esc(bill.payment_note)}</p>` : ''}` : ''}
+      ${bill.admin_notes ? `<div class="divider"></div><p><strong>Internal Note</strong><br>${esc(bill.admin_notes)}</p>` : ''}
+      <div id="invoice-reveal-result"></div>
+    `;
+    const footer = `
+      ${canEdit && bill.status === 'pending' ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="rejectStoreInvoice('${bill.id}')">Reject</button>
+      <button class="btn btn-primary btn-sm" onclick="openStoreCompletePayment('${bill.id}', ${bill.amount}, '${(bill.period || '').replace(/'/g, "\\'")}')">Mark Payment Sent</button>` : ''}
+      ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="editStoreInvoiceNote('${bill.id}', '${(bill.admin_notes || '').replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">${bill.admin_notes ? 'Edit' : 'Add'} Internal Note</button>` : ''}
+      ${isTopAdmin ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStoreInvoice('${bill.id}')">Delete</button>` : ''}
+    `;
+    // title is raw text, not pre-escaped — openModal() escapes it itself;
+    // escaping here too used to double-escape any apostrophe/ampersand in a
+    // store name (e.g. "Tuli's Hardware" rendered as the literal text
+    // "Tuli&#39;s Hardware" instead of an apostrophe).
+    openModal(`Invoice — ${bill.store_name}`, body, footer, { wide: true });
+  } catch (err) { toast(err.message, true); }
+};
+
+window.revealStorePaymentInfo = async (storeId) => {
+  try {
+    const { paymentInfo } = await api(`/store-billing/stores/${storeId}/payment-info/reveal`);
+    const el = qs('#invoice-reveal-result');
+    if (el) el.innerHTML = `<div class="divider"></div><p class="small-muted">Full account number: <code>${esc(paymentInfo.account_number)}</code> &middot; Full routing number: <code>${esc(paymentInfo.routing_number)}</code></p><p class="small-muted">${esc(paymentInfo.address)}, ${esc(paymentInfo.city)}, ${esc(paymentInfo.state)} ${esc(paymentInfo.zip)}</p>`;
+  } catch (err) { toast(err.message, true); }
+};
+
+window.rejectStoreInvoice = (id) => {
+  const body = `<label>Reason <span class="small-muted">(shown to the store)</span></label><textarea id="rej-reason" rows="3"></textarea>`;
+  openModal('Reject Invoice', body, `<button class="btn btn-primary btn-sm" onclick="confirmRejectStoreInvoice('${id}')">Reject</button>`);
+};
+window.confirmRejectStoreInvoice = async (id) => {
+  try {
+    await api(`/store-billing/invoices/${id}/reject`, { method: 'POST', body: { reason: qs('#rej-reason').value } });
+    toast('Invoice rejected');
+    closeModal();
+    window.__storeInvoiceOnDone?.();
+  } catch (err) { toast(err.message, true); }
+};
+
+window.openStoreCompletePayment = (id, amount, period) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const body = `
+    <p class="small-muted">Record the offline payment you already sent &mdash; this only logs it here and emails the store; it doesn't move any money itself.</p>
+    <label>Amount Sent</label><input id="cp-amount" type="number" step="0.01" value="${amount}">
+    <label>Date Sent</label><input id="cp-date" type="date" value="${today}">
+    <label>Note to Store <span class="small-muted">(optional — included in the email they get)</span></label><textarea id="cp-public-note" rows="2"></textarea>
+    <label>Internal Note <span class="small-muted">(optional — never shown to the store)</span></label><textarea id="cp-internal-note" rows="2"></textarea>
+  `;
+  openModal(`Mark Payment Sent — ${period || ''}`, body, `<button class="btn btn-primary btn-sm" onclick="confirmStoreCompletePayment('${id}')">Confirm Sent</button>`);
+};
+window.confirmStoreCompletePayment = async (id) => {
+  try {
+    await api(`/store-billing/invoices/${id}/complete`, { method: 'POST', body: {
+      payment_amount: +qs('#cp-amount').value, payment_date: qs('#cp-date').value,
+      payment_note: qs('#cp-public-note').value, admin_notes: qs('#cp-internal-note').value,
+    } });
+    toast('Marked completed');
+    closeModal();
+    window.__storeInvoiceOnDone?.();
+  } catch (err) { toast(err.message, true); }
+};
+
+window.deleteStoreInvoice = async (id) => {
+  if (!confirm('Permanently delete this invoice? This cannot be undone.')) return;
+  try {
+    await api(`/store-billing/invoices/${id}`, { method: 'DELETE' });
+    toast('Invoice deleted');
+    closeModal();
+    window.__storeInvoiceOnDone?.();
+  } catch (err) { toast(err.message, true); }
+};
+
+window.downloadStoreInvoiceFile = async (id) => {
+  try { await downloadAuthed(`/store-billing/invoices/${id}/file`, 'invoice'); } catch (err) { toast(err.message, true); }
+};
+
+// Settable any time, regardless of status — unlike the payment-sent note
+// (tied to an email that's already gone out once completed), this is
+// purely internal and reopening the invoice modal afterward re-fetches it
+// so the updated note shows immediately.
+window.editStoreInvoiceNote = (id, currentNote) => {
+  const body = `<label>Internal Note <span class="small-muted">(never shown to the store)</span></label><textarea id="ein-note" rows="4">${esc(currentNote || '')}</textarea>`;
+  openModal('Internal Note', body, `<button class="btn btn-primary btn-sm" onclick="confirmEditStoreInvoiceNote('${id}')">Save</button>`);
+};
+window.confirmEditStoreInvoiceNote = async (id) => {
+  try {
+    await api(`/store-billing/invoices/${id}/notes`, { method: 'POST', body: { admin_notes: qs('#ein-note').value } });
+    toast('Note saved');
+    openStoreInvoiceModal(id, window.__storeInvoiceOnDone);
+  } catch (err) { toast(err.message, true); }
+};
 
 // Shared SMS+Email history/quick-send tab for applicant & shul detail modals.
 // entityType is 'applicant' or 'shul' — the route prefix is just that plus 's'.
