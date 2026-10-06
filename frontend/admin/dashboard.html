@@ -132,8 +132,8 @@ async function loadStats() {
       kpiCard('Pending Applicants', stats.applicants.pending, 'var(--viz-warning)', EXEC_ICONS.people),
       kpiCard('Approved Applicants', stats.applicants.approved, 'var(--viz-good)', EXEC_ICONS.people));
     if (stats.cards) tiles.push(
-      kpiCard('Cards Issued', stats.cards.total, 'var(--viz-2)', EXEC_ICONS.card),
-      kpiCard('Cards Activated', stats.cards.activated, 'var(--viz-3)', EXEC_ICONS.card));
+      kpiCard('Cards Activated', stats.cards.activated, 'var(--viz-3)', EXEC_ICONS.card),
+      kpiCard('Total Loaded Accounts Active', `${stats.cards.activatedAccounts}/${stats.applicants?.approved ?? '—'}`, 'var(--viz-good)', EXEC_ICONS.card));
     // Total Loaded/Spent/Remaining — the org-wide ledger figures (see
     // services/applicantBalance.js's orgFundsSummary), not stats.cards'
     // own totalLoaded (a narrower, cards-only sum that used to collide

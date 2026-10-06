@@ -249,6 +249,23 @@ export const SYSTEM_EMAIL_TEMPLATES = {
       </div>
       <p style="color:#8a7c63;font-size:13px">This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.</p>`,
   },
+  // The "please submit your invoice" billing-period request — this entry is
+  // only ever read as a DEFAULT to prefill the Issue Billing Email composer
+  // (frontend/admin/store-billing.html); it's never substituted/sent
+  // directly the way other system templates are, since the admin can still
+  // edit it per-period before sending. Editing/saving it here (Settings >
+  // Auto Emails, or the composer's own "Save as Default" button, which
+  // calls the same PUT /settings/email-templates/storeBillingRequest) is
+  // what makes a wording change permanent instead of resetting on the next
+  // billing period.
+  storeBillingRequest: {
+    label: 'Store Billing: Billing Period Request (default text)', vars: ['storeName', 'period', 'startDate', 'endDate', 'portalUrl'],
+    subject: 'Please submit your invoice — {{period}}',
+    body: `<p>Shalom,</p>
+      <p>Please submit your invoice for the billing period <strong>{{period}}</strong> through your store portal.</p>
+      <p style="text-align:center;margin:28px 0;"><a href="{{portalUrl}}" style="background:#c9a76a;color:#241a15;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">Submit Your Invoice</a></p>
+      <p>If the button doesn't work, copy this link: {{portalUrl}}</p>`,
+  },
   storeInvoiceSubmitted: {
     label: 'Store Billing: Invoice Received (copy for store)', vars: ['storeName', 'amount', 'period', 'submittedAt'],
     subject: 'Invoice received — {{period}}',
@@ -271,7 +288,12 @@ export const SYSTEM_EMAIL_TEMPLATES = {
       <p><a href="{{invoiceUrl}}">View in the admin portal</a></p>`,
   },
   storeInvoicePaymentSent: {
-    label: 'Store Billing: Payment Sent', vars: ['storeName', 'amount', 'bankName', 'last4', 'period'],
+    // noteBlock is pre-built HTML (empty string, or a <p>, supplied by the
+    // caller) rather than a plain var — substitute() only does flat
+    // {{var}} replacement, no conditionals, so an optional block has to
+    // already be the right HTML (or blank) before it gets here. See
+    // routes/storeBilling.js's POST /invoices/:id/complete.
+    label: 'Store Billing: Payment Sent', vars: ['storeName', 'amount', 'bankName', 'last4', 'period', 'noteBlock'],
     subject: 'Payment sent — {{period}}',
     body: `<p>Shalom {{storeName}},</p>
       <p>Your payment has been sent.</p>
@@ -280,7 +302,8 @@ export const SYSTEM_EMAIL_TEMPLATES = {
         <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Sent To</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{bankName}} (&hellip;{{last4}})</td></tr>
         <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Billing Period</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{period}}</td></tr>
       </table>
-      <p>It may take up to <strong>4 business days</strong> to show up in your account.</p>`,
+      <p>It may take up to <strong>4 business days</strong> to show up in your account.</p>
+      {{noteBlock}}`,
   },
 };
 
@@ -303,7 +326,7 @@ function fieldLabelFallback(key) {
 // This table is built from raw shul/store submission data (address,
 // comments, names, ...) — escape it before dropping it into an HTML email
 // body, since an applicant could type anything into a free-text field.
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 export function renderSignupDetails(row) {

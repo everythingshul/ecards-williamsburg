@@ -85,9 +85,21 @@ router.get('/stats', (req, res) => {
     };
   }
   if (cardPerm.can_view && !hidden.has('cards_stats')) {
+    // "Total Loaded Accounts Active" is accounts (distinct applicants), not
+    // cards, and its denominator is approved APPLICANTS (stats.applicants.
+    // approved above) — not a count of card rows. An applicant with two
+    // cards, only one of them active, still counts once; an approved
+    // applicant with zero cards at all counts toward the denominator but
+    // not the numerator. Deliberately NOT conditioned on cards.amount > 0
+    // (a card can be genuinely active with no money loaded yet) — that was
+    // the earlier version of this metric and undercounted real active
+    // accounts against what the admin sees on disccardpromos directly.
+    const seasonClauseA = seasonId ? ' AND a.season_id = ?' : '';
     stats.cards = {
       total: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ?${seasonClause}`).get(orgId, ...seasonParams).c,
       activated: db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status='activated'${seasonClause}`).get(orgId, ...seasonParams).c,
+      activatedAccounts: db.prepare(`SELECT COUNT(DISTINCT a.id) c FROM applicants a JOIN cards c ON c.applicant_id = a.id
+        WHERE a.org_id = ? AND a.approval_status = 'approved' AND c.status = 'activated'${seasonClauseA}`).get(orgId, ...seasonParams).c,
     };
   }
   // Store spend is per-transaction, not per-season directly — scope it

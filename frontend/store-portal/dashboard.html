@@ -16,11 +16,17 @@ renderShell('/store-portal/dashboard', `
   <h2>Store Overview</h2>
   <div id="onboarding-banner"></div>
   <div class="card" id="wrap">Loading…</div>
+  <div class="card" style="padding:0;overflow-x:auto;margin-top:16px">
+    <div style="padding:16px 16px 0"><h3 style="margin:0">Recent Transactions</h3></div>
+    <table><thead><tr><th>Date</th><th>Type</th><th>Amount</th></tr></thead>
+    <tbody id="txn-list"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody></table>
+  </div>
+  <div class="paginator" id="txn-pager"></div>
 `);
 (async () => {
   const u = Auth.user();
   try {
-    const { store: s } = await api(`/stores/${u.store_id}`);
+    const { store: s, transactionTotals } = await api(`/stores/${u.store_id}`);
     if ((s.onboarding_step || 0) < 3) {
       qs('#onboarding-banner').innerHTML = `<div class="card" style="border-color:var(--warn);margin-bottom:16px">
         <div class="flex-between"><span>Your store setup isn't finished yet.</span><a class="btn btn-sm btn-primary" href="/store-portal/onboarding">Finish Setup</a></div></div>`;
@@ -28,12 +34,28 @@ renderShell('/store-portal/dashboard', `
     qs('#wrap').innerHTML = `
       <div class="stat-grid">
         <div class="stat-tile"><div class="num">${badge(s.setup_status, s.setup_status)}</div><div class="label">Setup Status</div></div>
+        <div class="stat-tile"><div class="num">${fmtMoney(transactionTotals.total_purchases)}</div><div class="label">Total Purchases</div></div>
       </div>
       <div class="divider"></div>
       <h3>Store Info</h3>
       <p>${esc(s.name)}<br>${esc(s.address||'')} ${esc(s.city||'')}, ${esc(s.state||'')}<br>${esc(s.phone||'')}</p>`;
   } catch (err) { qs('#wrap').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
+  loadTransactions();
 })();
+
+let txnPage = 1;
+async function loadTransactions(page = 1) {
+  txnPage = page;
+  const u = Auth.user();
+  try {
+    const { transactions, total } = await api(`/stores/${u.store_id}/transactions?page=${page}&pageSize=25`);
+    qs('#txn-list').innerHTML = transactions.length ? transactions.map(t => `<tr>
+        <td>${fmtDateTime(t.occurred_at)}</td><td>${badge(t.type, t.type)}</td><td>${fmtMoney(t.amount)}</td>
+      </tr>`).join('') : '<tr><td colspan="3" class="empty-state">No transactions yet.</td></tr>';
+    const pages = Math.max(1, Math.ceil(total / 25));
+    qs('#txn-pager').innerHTML = `<button class="btn btn-sm btn-outline" ${page<=1?'disabled':''} onclick="loadTransactions(${page-1})">Prev</button> Page ${page} of ${pages} <button class="btn btn-sm btn-outline" ${page>=pages?'disabled':''} onclick="loadTransactions(${page+1})">Next</button>`;
+  } catch (err) { toast(err.message, true); }
+}
 </script>
 </body>
 </html>

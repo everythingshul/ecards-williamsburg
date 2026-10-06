@@ -6,6 +6,7 @@
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/portal-theme.css">
 <style>
   .sb-store-picker { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 8px; }
   .sb-store-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
@@ -21,7 +22,6 @@
 Auth.requireAdmin();
 if (!Auth.can('store_billing')) { location.href = '/admin/dashboard'; }
 const canEdit = Auth.can('store_billing', 'can_edit');
-const isTopAdmin = ['super_admin', 'org_admin'].includes(Auth.user()?.role);
 
 renderShell('/admin/store-billing', `
   <h2>Store Billing</h2>
@@ -67,88 +67,12 @@ async function loadInvoices() {
     const { bills } = await api(`/store-billing/invoices${status ? `?status=${status}` : ''}`);
     qs('#tbody-invoices').innerHTML = bills.length ? bills.map(b => `<tr>
         <td>${esc(b.store_name)}</td><td>${esc(b.period_label || '')}</td><td>${fmtMoney(b.amount)}</td><td>${fmtDateTime(b.submitted_at)}</td>
-        <td>${b.file_name ? `<a href="#" onclick="downloadInvoiceFile('${b.id}');return false;">${esc(b.file_name)}</a>` : '<span class="small-muted">&mdash;</span>'}</td>
+        <td>${b.file_name ? `<a href="#" onclick="downloadStoreInvoiceFile('${b.id}');return false;">${esc(b.file_name)}</a>` : '<span class="small-muted">&mdash;</span>'}</td>
         <td>${badge(b.status, b.status === 'completed' ? 'active' : b.status)}</td>
-        <td><button class="btn btn-outline btn-sm" onclick="openInvoice('${b.id}')">View</button></td>
+        <td><button class="btn btn-outline btn-sm" onclick="openStoreInvoiceModal('${b.id}', loadInvoices)">View</button></td>
       </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No invoices here.</td></tr>';
   } catch (err) { toast(err.message, true); }
 }
-
-window.downloadInvoiceFile = async (id) => { try { await downloadAuthed(`/store-billing/invoices/${id}/file`, 'invoice'); } catch (err) { toast(err.message, true); } };
-
-window.openInvoice = async (id) => {
-  try {
-    const { bill, paymentInfo } = await api(`/store-billing/invoices/${id}`);
-    const payBlock = paymentInfo ? `
-      <div class="sb-pay-pill">
-        ${renderBankLogo ? renderBankLogo(paymentInfo.bank_name, 26) : ''}
-        <span><strong>${esc(paymentInfo.bank_name)}</strong> &middot; acct &hellip;${esc(paymentInfo.account_last4)} &middot; routing &hellip;${esc(paymentInfo.routing_last4)}</span>
-        ${isTopAdmin ? `<button class="btn btn-outline btn-sm" style="margin-left:auto" onclick="revealPaymentInfo('${bill.store_id}')">Reveal Full Numbers</button>` : ''}
-      </div>
-      <p class="small-muted" style="margin-top:6px">On file for: ${esc(paymentInfo.name_on_account)} &middot; ${esc(paymentInfo.contact_name)}, ${esc(paymentInfo.contact_cell)}</p>
-    ` : `<p class="small-muted" style="color:var(--danger)">This store has no payment information on file.</p>`;
-    const body = `
-      <div class="grid-2">
-        <div><strong>Store</strong><br>${esc(bill.store_name)}</div>
-        <div><strong>Status</strong><br>${badge(bill.status, bill.status === 'completed' ? 'active' : bill.status)}</div>
-      </div>
-      <div class="grid-2" style="margin-top:10px">
-        <div><strong>Period</strong><br>${esc(bill.period || 'N/A')}</div>
-        <div><strong>Amount</strong><br>${fmtMoney(bill.amount)}</div>
-      </div>
-      <p style="margin-top:10px"><strong>Submitted</strong><br>${fmtDateTime(bill.submitted_at)}</p>
-      ${bill.description ? `<p><strong>Description</strong><br>${esc(bill.description)}</p>` : ''}
-      <p>${bill.file_name ? `<a href="#" onclick="downloadInvoiceFile('${bill.id}');return false;">&#128206; ${esc(bill.file_name)}</a>` : '<span class="small-muted">No attachment</span>'}</p>
-      <div class="divider"></div>
-      ${payBlock}
-      ${bill.status === 'rejected' && bill.rejection_reason ? `<div class="divider"></div><p><strong>Rejection Reason</strong><br>${esc(bill.rejection_reason)}</p>` : ''}
-      ${bill.status === 'completed' ? `<div class="divider"></div><p><strong>Payment Sent</strong><br>${fmtMoney(bill.payment_amount)} to ${esc(bill.payment_bank_name)} &hellip;${esc(bill.payment_account_last4)} on ${fmtDate(bill.payment_sent_date)}</p>` : ''}
-      <div id="invoice-reveal-result"></div>
-    `;
-    const footer = canEdit && bill.status === 'pending' ? `
-      <button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="rejectInvoice('${bill.id}')">Reject</button>
-      <button class="btn btn-primary btn-sm" onclick="openCompletePayment('${bill.id}', ${bill.amount}, '${esc(bill.period || '').replace(/'/g, "\\'")}')">Mark Payment Sent</button>` : '';
-    openModal(`Invoice — ${esc(bill.store_name)}`, body, footer, { wide: true });
-  } catch (err) { toast(err.message, true); }
-};
-
-window.revealPaymentInfo = async (storeId) => {
-  try {
-    const { paymentInfo } = await api(`/store-billing/stores/${storeId}/payment-info/reveal`);
-    qs('#invoice-reveal-result').innerHTML = `<div class="divider"></div><p class="small-muted">Full account number: <code>${esc(paymentInfo.account_number)}</code> &middot; Full routing number: <code>${esc(paymentInfo.routing_number)}</code></p><p class="small-muted">${esc(paymentInfo.address)}, ${esc(paymentInfo.city)}, ${esc(paymentInfo.state)} ${esc(paymentInfo.zip)}</p>`;
-  } catch (err) { toast(err.message, true); }
-};
-
-window.rejectInvoice = (id) => {
-  const body = `<label>Reason <span class="small-muted">(shown to the store)</span></label><textarea id="rej-reason" rows="3"></textarea>`;
-  openModal('Reject Invoice', body, `<button class="btn btn-primary btn-sm" onclick="confirmReject('${id}')">Reject</button>`);
-};
-window.confirmReject = async (id) => {
-  try {
-    await api(`/store-billing/invoices/${id}/reject`, { method: 'POST', body: { reason: qs('#rej-reason').value } });
-    toast('Invoice rejected');
-    closeModal();
-    loadInvoices();
-  } catch (err) { toast(err.message, true); }
-};
-
-window.openCompletePayment = (id, amount, period) => {
-  const today = new Date().toISOString().slice(0, 10);
-  const body = `
-    <p class="small-muted">Record the offline payment you already sent &mdash; this only logs it here and emails the store; it doesn't move any money itself.</p>
-    <label>Amount Sent</label><input id="cp-amount" type="number" step="0.01" value="${amount}">
-    <label>Date Sent</label><input id="cp-date" type="date" value="${today}">
-  `;
-  openModal(`Mark Payment Sent — ${esc(period || '')}`, body, `<button class="btn btn-primary btn-sm" onclick="confirmCompletePayment('${id}')">Confirm Sent</button>`);
-};
-window.confirmCompletePayment = async (id) => {
-  try {
-    await api(`/store-billing/invoices/${id}/complete`, { method: 'POST', body: { payment_amount: +qs('#cp-amount').value, payment_date: qs('#cp-date').value } });
-    toast('Marked completed');
-    closeModal();
-    loadInvoices();
-  } catch (err) { toast(err.message, true); }
-};
 
 // ===================== Billing Periods =====================
 
@@ -174,24 +98,42 @@ window.viewPeriod = async (id) => {
   } catch (err) { toast(err.message, true); }
 };
 
-const DEFAULT_SUBJECT = 'Please submit your invoice — {{period}}';
-const DEFAULT_BODY = `<p>Shalom,</p>
-<p>Please submit your invoice for the billing period <strong>{{period}}</strong> through your store portal.</p>
-<p style="text-align:center;margin:28px 0;"><a href="{{portalUrl}}" style="background:#c9a76a;color:#241a15;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">Submit Your Invoice</a></p>
-<p>If the button doesn't work, copy this link: {{portalUrl}}</p>`;
-
-window.openIssueBillingModal = () => {
+// The composer always starts from the saved default (Settings > Auto
+// Emails' "Store Billing: Billing Period Request" entry, same generic
+// system-email-template mechanism every other automatic email in this app
+// uses) rather than a hardcoded constant — editing and saving that default
+// (here via "Save as Default", or directly in Settings) is what makes a
+// wording change stick for every future billing period instead of
+// resetting the next time this composer opens. Each individual send can
+// still be tweaked ad hoc without touching the saved default at all.
+window.openIssueBillingModal = async () => {
   const today = new Date().toISOString().slice(0, 10);
+  let subject = 'Please submit your invoice — {{period}}', bodyHtml = '';
+  try {
+    const { templates } = await api('/settings/email-templates');
+    const tmpl = templates.find(t => t.key === 'storeBillingRequest');
+    if (tmpl) { subject = tmpl.subject; bodyHtml = tmpl.body; }
+  } catch { /* fall back to the inline defaults above if Settings can't be reached */ }
   const body = `
     <div class="grid-2">
       <div><label>Billing Period Start</label><input id="ib-start" type="date" value="${today}"></div>
       <div><label>Billing Period End</label><input id="ib-end" type="date" value="${today}"></div>
     </div>
-    <label>Email Subject</label><input id="ib-subject" value="${esc(DEFAULT_SUBJECT)}">
+    <label>Email Subject</label><input id="ib-subject" value="${esc(subject)}">
     <label>Email Body <span class="small-muted">(HTML; {{storeName}}, {{period}}, {{startDate}}, {{endDate}}, {{portalUrl}} are substituted per store)</span></label>
-    <textarea id="ib-body" rows="10">${esc(DEFAULT_BODY)}</textarea>
+    <textarea id="ib-body" rows="10">${esc(bodyHtml)}</textarea>
+    <p class="small-muted" style="margin-top:6px">Changes here apply to this send only. Use "Save as Default" to make them permanent for every future billing period.</p>
   `;
-  openModal('Issue Billing Email', body, `<button class="btn btn-primary btn-sm" onclick="openStorePicker()">Next: Choose Stores</button>`, { wide: true });
+  openModal('Issue Billing Email', body, `
+    <button class="btn btn-outline btn-sm" onclick="saveBillingEmailDefault()">Save as Default</button>
+    <button class="btn btn-primary btn-sm" onclick="openStorePicker()">Next: Choose Stores</button>`, { wide: true });
+};
+
+window.saveBillingEmailDefault = async () => {
+  try {
+    await api('/settings/email-templates/storeBillingRequest', { method: 'PUT', body: { subject: qs('#ib-subject').value, body: qs('#ib-body').value } });
+    toast('Saved as the default billing email — every future "Issue Billing Email" will start from this.');
+  } catch (err) { toast(err.message, true); }
 };
 
 window.openStorePicker = async () => {

@@ -145,8 +145,13 @@ qs('#btn-mass-apply').addEventListener('click', async () => {
 
 async function openStore(id) {
   try {
+    // store_billing is a separate permission from stores — a staff user who
+    // can view this profile at all but wasn't granted store_billing
+    // shouldn't have the whole profile fail to open over it; the Billing
+    // tab just shows nothing for them instead (Auth.can gate below).
+    const canSeeBilling = Auth.can('store_billing');
     const [{ store: s, transactionTotals, latestAgreement, providerLinks = [] }, { bills: submittedBills }, { vendors: providerVendors = [] }] = await Promise.all([
-      api(`/stores/${id}`), api(`/stores/${id}/bill-submissions`), api('/stores/provider-vendors').catch(() => ({ vendors: [] })),
+      api(`/stores/${id}`), canSeeBilling ? api(`/store-billing/invoices?store_id=${id}`) : Promise.resolve({ bills: [] }), api('/stores/provider-vendors').catch(() => ({ vendors: [] })),
     ]);
     // At-a-glance signed/not-signed status, same info the Documents tab
     // shows per-row but surfaced right here so it doesn't require switching
@@ -205,17 +210,19 @@ async function openStore(id) {
         </div>
       </div>
       <div id="stab-billing" style="display:none">
-        <div class="flex-between"><h4 style="margin:0">Bills This Store Submitted</h4><button class="btn btn-sm btn-outline" onclick="openLogBillModal('${id}')">Log a Bill They Sent Us</button></div>
-        <p class="small-muted">We don't bill stores — they bill us (e.g. reimbursement for gift-card redemptions). Bills submitted through their portal appear here; use "Log a Bill" to record one that came in by email or paper.</p>
+        <div class="flex-between"><h4 style="margin:0">Bills &amp; Payments</h4>${canSeeBilling ? `<button class="btn btn-sm btn-outline" onclick="openLogBillModal('${id}')">Log a Bill They Sent Us</button>` : ''}</div>
+        <p class="small-muted">We don't bill stores — they bill us (e.g. reimbursement for gift-card redemptions). Invoices submitted through their portal appear here; use "Log a Bill" to record one that came in by email or paper.</p>
+        ${!canSeeBilling ? `<p class="small-muted">You don't have access to Store Billing.</p>` : `
         <div>${submittedBills.length ? submittedBills.map(b => `<div class="card" style="margin-bottom:10px">
-            <div class="flex-between"><strong>${fmtMoney(b.amount)}</strong>${badge(b.status, b.status === 'paid' ? 'active' : (b.status === 'reviewed' ? 'pending' : 'submitted'))}</div>
-            <p class="small-muted">${b.period ? `Period: ${esc(b.period)} · ` : ''}${esc(b.description||'')}</p>
-            ${b.file_name ? `<p class="small-muted"><a href="/api/stores/bill-submissions/${b.id}/file" target="_blank">${esc(b.file_name)}</a></p>` : ''}
+            <div class="flex-between"><strong>${fmtMoney(b.amount)}</strong>${badge(b.status, b.status === 'completed' ? 'active' : b.status)}</div>
+            <p class="small-muted">${b.period_label || b.period ? `Period: ${esc(b.period_label || b.period)} · ` : ''}${esc(b.description||'')}</p>
+            ${b.status === 'completed' ? `<p class="small-muted">Sent to ${esc(b.payment_bank_name||'')} &hellip;${esc(b.payment_account_last4||'')} on ${fmtDate(b.payment_sent_date)}</p>` : ''}
+            ${b.status === 'rejected' && b.rejection_reason ? `<p class="small-muted">${esc(b.rejection_reason)}</p>` : ''}
             <div style="display:flex;gap:6px">
-              <button class="btn btn-sm btn-outline" onclick="markBillReviewed('${id}','${b.id}')">Mark Reviewed</button>
-              <button class="btn btn-sm btn-outline" onclick="markBillPaid('${id}','${b.id}')">Mark Paid</button>
+              <button class="btn btn-sm btn-outline" onclick="openStoreInvoiceModal('${b.id}', () => openStore('${id}'))">View</button>
             </div>
           </div>`).join('') : '<p class="small-muted">No bills submitted yet.</p>'}</div>
+        `}
       </div>
       <div id="stab-documents" style="display:none">
         <div id="stab-documents-list"><p class="small-muted">Loading…</p></div>
@@ -310,8 +317,6 @@ window.deleteStore = async (id) => {
   if (!confirm('Permanently delete this store? This removes the store and its billing records completely and cannot be undone.')) return;
   try { await api(`/stores/${id}/permanent`, { method: 'DELETE' }); toast('Store deleted'); closeModal(); load(); } catch (err) { toast(err.message, true); }
 };
-window.markBillReviewed = async (storeId, billId) => { try { await api(`/stores/bill-submissions/${billId}`, { method: 'PUT', body: { status: 'reviewed' } }); toast('Marked reviewed'); closeModal(); openStore(storeId); } catch (err) { toast(err.message, true); } };
-window.markBillPaid = async (storeId, billId) => { try { await api(`/stores/bill-submissions/${billId}`, { method: 'PUT', body: { status: 'paid' } }); toast('Marked paid'); closeModal(); openStore(storeId); } catch (err) { toast(err.message, true); } };
 
 // Admin logging a bill that came in outside the store's own portal (email,
 // paper) — same store_bill_submissions row a store creates themselves via

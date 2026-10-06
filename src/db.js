@@ -1610,6 +1610,12 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_amount REAL`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_bank_name TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_account_last4 TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_sent_date TEXT`);
+// Two separate notes an admin can leave when recording a payment:
+// payment_note goes out in the "payment sent" email to the store (so it's
+// admin-written but store-visible — e.g. "this covers two periods"); the
+// pre-existing admin_notes column (from the old bill-submissions flow) is
+// reused here as the internal-only counterpart, never sent anywhere.
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_note TEXT`);
 db.prepare(`UPDATE store_bill_submissions SET status = 'pending' WHERE status IN ('submitted', 'reviewed')`).run();
 db.prepare(`UPDATE store_bill_submissions SET status = 'completed' WHERE status = 'paid'`).run();
 

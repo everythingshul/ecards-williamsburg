@@ -239,6 +239,24 @@ router.get('/:id', (req, res) => {
   res.json({ store: redact(store, req.permission.hidden_fields), transactionTotals, latestAgreement, providerLinks });
 });
 
+// A store's own transaction history — used by its portal Overview page, and
+// reusable from the admin store profile too. Deliberately leaner than
+// admin's own /cards/transactions/all (which a store role can't reach at
+// all — 'cards' isn't in PORTAL_ALLOWED_RESOURCES): no applicant name, no
+// card number, nothing that identifies WHO redeemed at this register —
+// only what the store itself needs to reconcile its own register totals
+// (date, type, amount).
+router.get('/:id/transactions', (req, res) => {
+  const store = db.prepare('SELECT id, org_id FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!store) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role === 'store' && store.id !== req.user.store_id) return res.status(403).json({ error: 'Not your store' });
+  const { page = 1, pageSize = 50 } = req.query;
+  const offset = (Math.max(1, +page) - 1) * +pageSize;
+  const total = db.prepare('SELECT COUNT(*) c FROM card_transactions WHERE store_id = ?').get(store.id).c;
+  const transactions = db.prepare(`SELECT id, type, amount, occurred_at FROM card_transactions WHERE store_id = ? ORDER BY occurred_at DESC LIMIT ? OFFSET ?`).all(store.id, +pageSize, offset);
+  res.json({ transactions, total, page: +page, pageSize: +pageSize });
+});
+
 // Links a disccardpromos vendor name to this store — every past and future
 // transaction reported under that exact name now counts toward this store's
 // totals (see storeMatch.js's resolveStoreId, which checks this table
@@ -766,11 +784,17 @@ router.get('/:id/bill-submissions', (req, res) => {
   res.json({ bills: db.prepare('SELECT * FROM store_bill_submissions WHERE store_id = ? ORDER BY submitted_at DESC').all(store.id) });
 });
 
+// Admin-only now — a store's own submissions go through routes/
+// storeBilling.js's POST /store-billing/my/invoices, which (per spec) only
+// allows submitting against an open billing period it was actually invited
+// to, behind email verification. This route stays for an admin logging a
+// bill that came in some other way (email, paper), which deliberately
+// skips both of those — an admin typing it in themselves is already the
+// trust boundary verification exists to establish.
 router.post('/:id/bill-submissions', billUpload.single('file'), (req, res) => {
   const store = db.prepare('SELECT * FROM stores WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!store) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role === 'store' && store.id !== req.user.store_id) return res.status(403).json({ error: 'Not your store' });
-  if (req.user.role !== 'store' && req.user.role !== 'super_admin' && req.user.role !== 'org_admin' && req.user.role !== 'staff') return res.status(403).json({ error: 'Not permitted' });
+  if (!['super_admin', 'org_admin', 'staff'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
   const { period, amount, description } = req.body || {};
   const amountNum = +amount;
   if (!amountNum || amountNum <= 0) return res.status(400).json({ error: 'A valid amount is required' });
@@ -782,8 +806,8 @@ router.post('/:id/bill-submissions', billUpload.single('file'), (req, res) => {
     writeFileSync(join(BILLS_DIR, safeName), req.file.buffer);
     filePath = safeName;
   }
-  db.prepare(`INSERT INTO store_bill_submissions (id, org_id, store_id, period, amount, description, file_path, file_name)
-    VALUES (?,?,?,?,?,?,?,?)`)
+  db.prepare(`INSERT INTO store_bill_submissions (id, org_id, store_id, period, amount, description, file_path, file_name, status)
+    VALUES (?,?,?,?,?,?,?,?,'pending')`)
     .run(id, req.user.org_id, store.id, period || '', amountNum, description || '', filePath, fileName);
   res.status(201).json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(id) });
 });

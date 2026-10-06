@@ -174,7 +174,7 @@ function viewPaymentForm() {
     </div>
     <div class="grid-2">
       <div><label>Contact Name</label><input id="pf-contact-name" value="${esc(pi?.contact_name || '')}"></div>
-      <div><label>Contact Cell</label><input id="pf-contact-cell" value="${esc(pi?.contact_cell || '')}"></div>
+      <div><label>Contact Cell</label><input id="pf-contact-cell" type="tel" inputmode="tel" placeholder="(555) 555-5555" value="${esc(pi?.contact_cell || '')}" oninput="this.value = this.value.replace(/[^0-9+\\-() ]/g, '')"></div>
     </div>
     <div class="grid-2">
       <div><label>Account Number ${pi ? `<span class="small-muted">(on file: &hellip;${esc(pi.account_last4)})</span>` : ''}</label><input id="pf-account" type="password" inputmode="numeric" autocomplete="off"></div>
@@ -192,18 +192,23 @@ function viewPaymentForm() {
 function viewMain() {
   const pending = (BW.status.periods || []).filter(p => !p.submitted);
   const pi = BW.status.paymentInfo;
+  // A store can only submit against a billing period it was actually
+  // invited to and hasn't already submitted for — see routes/
+  // storeBilling.js's POST /my/invoices. With none open, "Submit an
+  // Invoice" has nothing to submit against, so it's not offered at all
+  // rather than opening a form that can only fail server-side.
   return `
   <div class="flex-between"><h2 style="margin:0">Billing</h2>
     <div style="display:flex;gap:8px">
       <button class="btn btn-outline btn-sm" onclick="BW.editPaymentInfo()">Update Payment Info</button>
-      <button class="btn btn-primary btn-sm" onclick="BW.startSubmitInvoice()">Submit an Invoice</button>
+      ${pending.length ? `<button class="btn btn-primary btn-sm" onclick="BW.startSubmitInvoice()">Submit an Invoice</button>` : ''}
     </div>
   </div>
   <p class="small-muted">To bill us back &mdash; for example, reimbursement for gift-card redemptions you've already honored &mdash; submit an invoice below.</p>
   ${pending.length ? `<div class="bw-period-banner">
     <div>${pending.length === 1 ? `Please submit your invoice for <strong>${esc(pending[0].label)}</strong>.` : `You have <strong>${pending.length} billing periods</strong> awaiting your invoice.`}</div>
     <button class="btn btn-primary btn-sm" onclick="BW.startSubmitInvoice()">Submit Now</button>
-  </div>` : ''}
+  </div>` : `<div class="card" style="font-size:13px;padding:12px 16px;margin-bottom:14px;color:var(--text-muted)">No open billing period right now &mdash; you'll get an email when it's time to submit an invoice.</div>`}
   <div class="card" style="font-size:13px;padding:12px 16px;margin-bottom:14px">
     On file: ${renderBankLogo(pi.bank_name, 22)} <strong>${esc(pi.bank_name)}</strong> &middot; account ending <strong>${esc(pi.account_last4)}</strong>
   </div>
@@ -226,16 +231,16 @@ function rowForBill(b) {
 }
 
 function viewInvoiceForm() {
-  const periods = BW.status.periods || [];
-  const unsubmitted = periods.filter(p => !p.submitted);
-  const options = unsubmitted.length
-    ? unsubmitted.map(p => `<option value="${p.id}">${esc(p.label)}</option>`).join('')
-    : `<option value="">No open billing period &mdash; submitting ad-hoc</option>`;
+  // Always non-empty here — BW.startSubmitInvoice only ever navigates to
+  // this view when there's at least one open period (see the NO_OPEN_PERIOD
+  // guard there and server-side in POST /my/invoices).
+  const unsubmitted = (BW.status.periods || []).filter(p => !p.submitted);
+  const options = unsubmitted.map(p => `<option value="${p.id}">${esc(p.label)}</option>`).join('');
   return `
   <div class="card bw-card bw-wide">
     <h2 style="text-align:center">Submit an Invoice</h2>
     <div class="bw-tax-note">Please make your invoice out to <strong>${esc(BW.status.legalName || '(not yet set by admin)')}</strong>${BW.status.taxId ? ` &mdash; Tax ID <strong>${esc(BW.status.taxId)}</strong>` : ''}.</div>
-    ${unsubmitted.length ? `<label>Billing Period</label><select id="inv-period" onchange="BW.refreshPeriodLabel()">${options}</select>` : ''}
+    <label>Billing Period</label><select id="inv-period" onchange="BW.refreshPeriodLabel()">${options}</select>
     <label>Attachment <span class="req">*</span> <span class="small-muted">(image, PDF, Excel, or CSV)</span></label>
     <div class="bw-file-drop" id="inv-drop" onclick="qs('#inv-file').click()">
       <input id="inv-file" type="file" accept="image/*,application/pdf,.csv,.xls,.xlsx" onchange="BW.onFileChosen()">
@@ -378,6 +383,7 @@ BW.savePaymentInfo = async () => {
     routing_number: qs('#pf-routing').value.trim(),
   };
   if (!body.bank_name) { qs('#pf-error').textContent = 'Please select or enter your bank.'; return; }
+  if (body.contact_cell.replace(/\D/g, '').length < 10) { qs('#pf-error').textContent = 'Enter a valid phone number for Contact Cell (10 digits).'; return; }
   const btn = qs('#pf-save-btn');
   try {
     btn.disabled = true; btn.innerHTML = '<span class="bw-spinner"></span>Saving&hellip;';
@@ -396,6 +402,10 @@ BW.savePaymentInfo = async () => {
 BW.editPaymentInfo = () => BW.startVerify('payment_info');
 
 BW.startSubmitInvoice = () => {
+  // Defense in depth — the button that calls this is already hidden
+  // whenever there's no open period (see viewMain), but never trust that
+  // alone; the server enforces this too (NO_OPEN_PERIOD).
+  if (!(BW.status.periods || []).some(p => !p.submitted)) { toast('There is no open billing period to submit against right now.', true); return; }
   if (BW.status.invoiceVerifiedThisSession) { BW.view = 'invoice_form'; render(); }
   else BW.startVerify('invoice_submit');
 };

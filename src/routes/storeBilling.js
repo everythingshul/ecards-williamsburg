@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { join } from 'path';
-import { writeFileSync } from 'fs';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { db, uuid, DATA_DIR } from '../db.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { auth } from '../middleware/auth.js';
-import { sendMailChecked, renderSystemTemplate } from '../services/mail.js';
-import { normalizePhone } from '../utils/phone.js';
+import { sendMailChecked, renderSystemTemplate, escapeHtml } from '../services/mail.js';
+import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { logAudit } from '../services/audit.js';
 
 const router = Router();
@@ -123,6 +123,7 @@ router.post('/payment-info', (req, res) => {
   for (const f of required) {
     if (!String(b[f] || '').trim()) return res.status(400).json({ error: `${f.replace(/_/g, ' ')} is required` });
   }
+  if (!isValidPhone(b.contact_cell)) return res.status(400).json({ error: 'Enter a valid phone number for Contact Cell (10 digits).' });
   if (String(b.account_number).trim() !== String(b.account_number_confirm).trim()) return res.status(400).json({ error: 'Account numbers do not match.' });
   if (!/^\d{4,17}$/.test(b.account_number)) return res.status(400).json({ error: 'Enter a valid account number (digits only).' });
   if (!/^\d{9}$/.test(b.routing_number)) return res.status(400).json({ error: 'Routing number must be exactly 9 digits.' });
@@ -164,11 +165,17 @@ router.post('/my/invoices', invoiceUpload.single('file'), async (req, res) => {
   const amountNum = +b.amount;
   if (!amountNum || amountNum <= 0) return res.status(400).json({ error: 'A valid amount is required' });
   if (!['1', 'true', true].includes(b.period_confirmed)) return res.status(400).json({ error: 'Please confirm this invoice matches the billing period.' });
-  let billingPeriod = null;
-  if (b.billing_period_id) {
-    billingPeriod = db.prepare(`SELECT bp.* FROM billing_periods bp JOIN billing_period_invites bpi ON bpi.billing_period_id = bp.id WHERE bp.id = ? AND bpi.store_id = ?`).get(b.billing_period_id, req.user.store_id);
-    if (!billingPeriod) return res.status(400).json({ error: 'Billing period not found for this store.' });
-  }
+  // A store can only submit against a billing period it was actually
+  // invited to AND hasn't already submitted for — no more ad-hoc
+  // submissions with no period at all. Without an open period to submit
+  // against, the store portal's own "Submit an Invoice" button is hidden
+  // entirely (see store-portal/billing.html), but this is the real gate —
+  // never trust the client not to have shown the form anyway.
+  if (!b.billing_period_id) return res.status(400).json({ error: 'There is no open billing period for you to submit against right now.', code: 'NO_OPEN_PERIOD' });
+  const billingPeriod = db.prepare(`SELECT bp.* FROM billing_periods bp JOIN billing_period_invites bpi ON bpi.billing_period_id = bp.id WHERE bp.id = ? AND bpi.store_id = ?`).get(b.billing_period_id, req.user.store_id);
+  if (!billingPeriod) return res.status(400).json({ error: 'Billing period not found for this store.' });
+  const alreadySubmitted = db.prepare(`SELECT 1 FROM store_bill_submissions WHERE billing_period_id = ? AND store_id = ?`).get(billingPeriod.id, req.user.store_id);
+  if (alreadySubmitted) return res.status(400).json({ error: 'An invoice has already been submitted for this billing period.' });
   const id = uuid();
   let filePath = null, fileName = null;
   if (req.file) {
@@ -256,10 +263,11 @@ router.get('/periods/:id', requirePermission('store_billing'), (req, res) => {
 });
 
 router.get('/invoices', requirePermission('store_billing'), (req, res) => {
-  const { status } = req.query;
+  const { status, store_id } = req.query;
   let where = 'b.org_id = ?';
   const params = [req.user.org_id];
   if (status) { where += ' AND b.status = ?'; params.push(status); }
+  if (store_id) { where += ' AND b.store_id = ?'; params.push(store_id); }
   const bills = db.prepare(`SELECT b.*, s.name AS store_name, bp.start_date AS period_start, bp.end_date AS period_end
     FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id
     WHERE ${where} ORDER BY b.submitted_at DESC`).all(...params);
@@ -285,6 +293,21 @@ router.get('/stores/:storeId/payment-info/reveal', requirePermission('store_bill
   res.json({ paymentInfo: row });
 });
 
+// Internal note, settable independent of status/payment — unlike
+// payment_note (which only ever goes out with the one "payment sent"
+// email and would be misleading to edit after that email already sent),
+// admin_notes is purely for the admin's own record-keeping and makes
+// sense to add or update any time, including well after an invoice is
+// already marked completed or rejected.
+router.post('/invoices/:id/notes', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!bill) return res.status(404).json({ error: 'Not found' });
+  const { admin_notes } = req.body || {};
+  db.prepare(`UPDATE store_bill_submissions SET admin_notes = ? WHERE id = ?`).run(admin_notes || null, bill.id);
+  logAudit(req.user.org_id, req.user.id, 'update_invoice_note', 'store', bill.store_id, { admin_notes: bill.admin_notes }, { admin_notes }, req.ip);
+  res.json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(bill.id) });
+});
+
 router.post('/invoices/:id/reject', requirePermission('store_billing', 'can_edit'), (req, res) => {
   const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
   if (!bill) return res.status(404).json({ error: 'Not found' });
@@ -301,18 +324,24 @@ router.post('/invoices/:id/complete', requirePermission('store_billing', 'can_ed
   if (bill.status === 'completed') return res.status(400).json({ error: 'Already marked completed.' });
   const paymentInfo = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(bill.store_id);
   if (!paymentInfo) return res.status(400).json({ error: 'This store has no payment information on file.' });
-  const { payment_amount, payment_date } = req.body || {};
+  const { payment_amount, payment_date, payment_note, admin_notes } = req.body || {};
   const amountNum = +payment_amount;
   if (!amountNum || amountNum <= 0) return res.status(400).json({ error: 'A valid payment amount is required' });
   if (!payment_date) return res.status(400).json({ error: 'A payment date is required' });
   const last4 = (paymentInfo.account_number || '').slice(-4);
-  db.prepare(`UPDATE store_bill_submissions SET status = 'completed', payment_amount = ?, payment_bank_name = ?, payment_account_last4 = ?, payment_sent_date = ?, reviewed_at = datetime('now') WHERE id = ?`)
-    .run(amountNum, paymentInfo.bank_name, last4, payment_date, bill.id);
+  db.prepare(`UPDATE store_bill_submissions SET status = 'completed', payment_amount = ?, payment_bank_name = ?, payment_account_last4 = ?, payment_sent_date = ?,
+      payment_note = ?, admin_notes = ?, reviewed_at = datetime('now') WHERE id = ?`)
+    .run(amountNum, paymentInfo.bank_name, last4, payment_date, payment_note || null, admin_notes || null, bill.id);
   const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(bill.store_id);
   const storeUser = store?.portal_user_id ? db.prepare('SELECT email FROM users WHERE id = ?').get(store.portal_user_id) : null;
   if (storeUser?.email) {
     const amountFmt = '$' + amountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const tmpl = renderSystemTemplate(req.user.org_id, 'storeInvoicePaymentSent', { storeName: bill.store_name, amount: amountFmt, bankName: paymentInfo.bank_name, last4, period: bill.period || 'N/A' });
+    // payment_note is admin-written but store-visible (it goes out in this
+    // email) — escaped since it's free text, same as every other
+    // user-typed field dropped into an email body elsewhere in this app.
+    // admin_notes never leaves this response/the admin UI.
+    const noteBlock = payment_note ? `<p style="color:#8a7c63;font-size:13.5px">${escapeHtml(payment_note).replace(/\n/g, '<br>')}</p>` : '';
+    const tmpl = renderSystemTemplate(req.user.org_id, 'storeInvoicePaymentSent', { storeName: bill.store_name, amount: amountFmt, bankName: paymentInfo.bank_name, last4, period: bill.period || 'N/A', noteBlock });
     await sendMailChecked(req.user.org_id, storeUser.email, tmpl.subject, tmpl.body, { replyTo: tmpl.replyTo, relatedEntityType: 'store', relatedEntityId: bill.store_id, sentBy: req.user.id });
   }
   logAudit(req.user.org_id, req.user.id, 'complete_invoice_payment', 'store', bill.store_id, { status: bill.status }, { status: 'completed', payment_amount: amountNum, payment_date }, req.ip);
@@ -324,6 +353,22 @@ router.get('/invoices/:id/file', requirePermission('store_billing'), (req, res) 
   if (!row) return res.status(404).json({ error: 'Not found' });
   if (!row.file_path) return res.status(404).json({ error: 'No file attached' });
   res.download(join(BILLS_DIR, row.file_path), row.file_name || 'invoice');
+});
+
+// Same tighter roster as deleting any other record outright elsewhere in
+// this app (applicant/store "Delete Permanently") — removing a financial
+// record, not just changing its status, is a step above ordinary editing.
+router.delete('/invoices/:id', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  if (!['super_admin', 'org_admin'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
+  const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!bill) return res.status(404).json({ error: 'Not found' });
+  if (bill.file_path) {
+    const filePath = join(BILLS_DIR, bill.file_path);
+    if (existsSync(filePath)) { try { unlinkSync(filePath); } catch (e) { console.error('[storeBilling] failed to delete invoice attachment file:', e.message); } }
+  }
+  db.prepare('DELETE FROM store_bill_submissions WHERE id = ?').run(bill.id);
+  logAudit(req.user.org_id, req.user.id, 'delete_invoice', 'store', bill.store_id, { amount: bill.amount, status: bill.status, period: bill.period }, null, req.ip);
+  res.json({ ok: true });
 });
 
 export default router;
