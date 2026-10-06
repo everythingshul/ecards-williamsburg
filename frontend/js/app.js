@@ -480,6 +480,7 @@ const NAV_ITEMS = [
   { href: '/admin/cards', label: 'Cards & Transactions', icon: '&#9670;', resource: 'cards' },
   { href: '/admin/shul-transactions', label: 'Shul Transactions', icon: '&#9670;', resource: 'shul_payments' },
   { href: '/admin/stores', label: 'Stores', icon: '&#9670;', resource: 'stores' },
+  { href: '/admin/store-billing', label: 'Store Billing', icon: '&#9670;', resource: 'store_billing' },
   { href: '/admin/tasks', label: 'Tasks', icon: '&#9670;', resource: 'tasks' },
   { href: '/admin/emails', label: 'Email Center', icon: '&#9670;', resource: 'emails' },
   { href: '/admin/sms', label: 'SMS Center', icon: '&#9670;', resource: 'sms' },

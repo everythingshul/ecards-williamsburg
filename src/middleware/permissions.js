@@ -31,7 +31,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // mechanism portal_impersonation still uses below); moved out entirely so
 // there's no Users & Permissions toggle that could ever hand a full
 // cross-entity activity feed with undo power to an org_admin/staff member.
-export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'shul_payment_soft_undo', 'portal_impersonation'];
+export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'store_billing', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'shul_payment_soft_undo', 'portal_impersonation'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource.

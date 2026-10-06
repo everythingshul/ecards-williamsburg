@@ -95,6 +95,17 @@ renderShell('/admin/settings', `
       <div id="store-links-list" style="margin-top:10px">Loading…</div>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>Store Billing</h3>
+      <p class="small-muted">Shown to stores on their billing page as who to make their invoice out to, and where an "invoice received" notification routes to. Manage billing periods and invoices from the <a href="/admin/store-billing">Store Billing</a> page.</p>
+      <div class="grid-2">
+        <div><label>Legal Name to Bill</label><input id="sb-legal-name" placeholder="e.g. Kupat Ha'ir Inc."></div>
+        <div><label>Tax ID (EIN)</label><input id="sb-tax-id" placeholder="e.g. 12-3456789"></div>
+      </div>
+      <label>Route Invoice Notifications To <span class="small-muted">(comma-separated, blank to disable)</span></label>
+      <input id="sb-notify-email" placeholder="billing@example.com">
+      <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveStoreBillingSettings()">Save</button>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>Application Restrictions</h3>
       <label>Allowed Zip Codes <span class="small-muted">(comma-separated, leave blank to accept any zip code)</span></label>
       <textarea id="org-allowed_zips" rows="3" placeholder="e.g. 11201, 11211, 11213"></textarea>
@@ -516,6 +527,22 @@ async function loadShulCardStatusVisible() {
 window.saveShulCardStatusVisible = async () => {
   try { await api('/settings', { method: 'PUT', body: { shul_card_status_visible: qs('#shul-card-status-visible').checked ? '1' : '0' } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
+async function loadStoreBillingSettings() {
+  const { settings } = await api('/settings');
+  qs('#sb-legal-name').value = settings.store_billing_legal_name || '';
+  qs('#sb-tax-id').value = settings.store_billing_tax_id || '';
+  qs('#sb-notify-email').value = settings.store_billing_notify_email || '';
+}
+window.saveStoreBillingSettings = async () => {
+  try {
+    await api('/settings', { method: 'PUT', body: {
+      store_billing_legal_name: qs('#sb-legal-name').value.trim(),
+      store_billing_tax_id: qs('#sb-tax-id').value.trim(),
+      store_billing_notify_email: qs('#sb-notify-email').value.trim(),
+    } });
+    toast('Saved');
+  } catch (err) { toast(err.message, true); }
+};
 async function loadShulSpendProgressVisible() {
   const { settings } = await api('/settings');
   // Off by default, unlike the card-amount toggle above.
@@ -715,7 +742,7 @@ async function loadStoreLinks() {
     </tbody></table>`;
   } catch (err) { qs('#store-links-list').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
 }
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulCardStatusVisible(); loadShulSpendProgressVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulCardStatusVisible(); loadShulSpendProgressVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks(); loadStoreBillingSettings();
 </script>
 </body>
 </html>

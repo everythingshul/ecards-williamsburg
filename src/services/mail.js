@@ -235,6 +235,53 @@ export const SYSTEM_EMAIL_TEMPLATES = {
     subject: 'Payment method request from {{shulName}}',
     body: `<p><strong>{{shulName}}</strong> requested a different payment method: <strong>{{requestedMethod}}</strong>.</p>{{message}}<p>Please follow up with them directly.</p>`,
   },
+  // Store Billing verification code — shared by both gates (payment-info
+  // setup/edits, and the once-per-login check before submitting an
+  // invoice); purposeText is computed server-side per call, not a raw var
+  // the admin edits, so the override still makes sense regardless of which
+  // gate triggered it.
+  billingVerificationCode: {
+    label: 'Store Billing: Verification Code', vars: ['code', 'purposeText'],
+    subject: 'Your verification code: {{code}}',
+    body: `<p>Shalom,</p><p>Use this code to {{purposeText}}:</p>
+      <div style="text-align:center;margin:28px 0;">
+        <div style="display:inline-block;background:#f7f2e8;border:2px solid #c9a76a;border-radius:10px;padding:18px 32px;font-size:32px;font-weight:700;letter-spacing:8px;color:#241a15;font-family:Georgia,serif;">{{code}}</div>
+      </div>
+      <p style="color:#8a7c63;font-size:13px">This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.</p>`,
+  },
+  storeInvoiceSubmitted: {
+    label: 'Store Billing: Invoice Received (copy for store)', vars: ['storeName', 'amount', 'period', 'submittedAt'],
+    subject: 'Invoice received — {{period}}',
+    body: `<p>Shalom {{storeName}},</p>
+      <p>We've received your invoice. Here's a summary:</p>
+      <table style="width:100%;border-collapse:collapse;margin:18px 0">
+        <tr><td style="padding:6px 0;color:#8a7c63">Billing Period</td><td style="padding:6px 0;text-align:right;font-weight:600">{{period}}</td></tr>
+        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Amount</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{amount}}</td></tr>
+        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Submitted</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{submittedAt}}</td></tr>
+      </table>
+      <p>We'll review it and follow up once your payment is on its way.</p>`,
+  },
+  // Internal notice — see Settings > Store Billing's "Route Invoice
+  // Notifications To" (store_billing_notify_email). No-op if that's blank.
+  storeInvoiceReceivedNotice: {
+    label: 'Internal Notice: Store Invoice Received', vars: ['storeName', 'amount', 'period', 'invoiceUrl'],
+    subject: 'Invoice received: {{storeName}}',
+    body: `<p>A new invoice was just submitted.</p>
+      <p><strong>Store:</strong> {{storeName}}<br><strong>Period:</strong> {{period}}<br><strong>Amount:</strong> {{amount}}</p>
+      <p><a href="{{invoiceUrl}}">View in the admin portal</a></p>`,
+  },
+  storeInvoicePaymentSent: {
+    label: 'Store Billing: Payment Sent', vars: ['storeName', 'amount', 'bankName', 'last4', 'period'],
+    subject: 'Payment sent — {{period}}',
+    body: `<p>Shalom {{storeName}},</p>
+      <p>Your payment has been sent.</p>
+      <table style="width:100%;border-collapse:collapse;margin:18px 0">
+        <tr><td style="padding:6px 0;color:#8a7c63">Amount</td><td style="padding:6px 0;text-align:right;font-weight:600">{{amount}}</td></tr>
+        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Sent To</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{bankName}} (&hellip;{{last4}})</td></tr>
+        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Billing Period</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{period}}</td></tr>
+      </table>
+      <p>It may take up to <strong>4 business days</strong> to show up in your account.</p>`,
+  },
 };
 
 // Renders every field the shul/store just submitted as a plain label/value
