@@ -764,7 +764,24 @@ CREATE INDEX IF NOT EXISTS idx_applicants_status ON applicants(approval_status);
 CREATE INDEX IF NOT EXISTS idx_applicants_season ON applicants(season_id);
 CREATE INDEX IF NOT EXISTS idx_cards_applicant ON cards(applicant_id);
 CREATE INDEX IF NOT EXISTS idx_txn_card ON card_transactions(card_id);
+-- card_transactions is queried by store_id (never indexed until now) in
+-- half a dozen places — stores.js's own profile/portal totals and the new
+-- GET /:id/transactions, donorDashboard.js's per-store correlated
+-- subqueries (one SCAN per store, every Donor's Dashboard load), cards.js's
+-- admin transaction list. EXPLAIN QUERY PLAN confirmed every one of these
+-- was a full SCAN card_transactions (plus a separate sort step for the
+-- paginated/ordered ones) before this index — on a table that only ever
+-- grows (every disccardpromos-synced transaction, forever), this is the
+-- single most likely cause of the whole site slowing down over time.
+CREATE INDEX IF NOT EXISTS idx_txn_store ON card_transactions(store_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+-- The Logs page's getRecentActions (services/audit.js) filters
+-- WHERE org_id = ? AND created_at >= ... ORDER BY created_at DESC — exactly
+-- the shape idx_audit_entity (entity_type, entity_id) does nothing for.
+-- audit_log never prunes old rows (full history, by design), so this was a
+-- full table SCAN (confirmed via EXPLAIN QUERY PLAN) that got slower every
+-- single day this app has been running, on a page likely opened often.
+CREATE INDEX IF NOT EXISTS idx_audit_log_org_created ON audit_log(org_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_shul_payments_shul ON shul_payments(shul_id);
 CREATE INDEX IF NOT EXISTS idx_shul_payments_season ON shul_payments(season_id);
