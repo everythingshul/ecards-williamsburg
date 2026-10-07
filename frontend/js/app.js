@@ -1800,7 +1800,8 @@ function initSignaturePad(canvasId) {
   resize();
   let drawing = false, hasDrawn = false;
   const pos = (e) => { const r = canvas.getBoundingClientRect(); const p = e.touches ? e.touches[0] : e; return { x: p.clientX - r.left, y: p.clientY - r.top }; };
-  const start = (e) => { drawing = true; hasDrawn = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
+  // The canvas is display:none until "Draw" is picked, so the init-time resize measured 0x0 — size it on first use instead.
+  const start = (e) => { if (!canvas.width || !canvas.height) resize(); drawing = true; hasDrawn = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
   const move = (e) => { if (!drawing) return; const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); };
   const end = () => drawing = false;
   canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', move); window.addEventListener('mouseup', end);
