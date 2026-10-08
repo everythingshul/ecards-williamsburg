@@ -21,7 +21,7 @@ window.US_BANKS = [
   'Signature Bank', 'Apple Bank for Savings', 'Dime Community Bank', 'Ridgewood Savings Bank',
   'Emigrant Bank', 'Flushing Bank', 'Berkshire Bank', 'New York Community Bank', 'Esquire Bank',
   'Israel Discount Bank of New York', 'Bank Leumi USA', 'Bank Hapoalim', 'Mizrahi Tefahot Bank',
-  'Amalgamated Bank', 'Northwest Bank', 'Chemung Canal Trust', 'NBT Bank', 'Tompkins Trust',
+  'Amalgamated Bank', 'Metropolitan Bank', 'Northwest Bank', 'Chemung Canal Trust', 'NBT Bank', 'Tompkins Trust',
   'Sterling National Bank', 'Customers Bank', 'First Horizon Bank', 'Synovus Bank',
   'South State Bank', 'BankUnited', 'City National Bank', 'EverBank', 'Umpqua Bank',
   'Old National Bank', 'First Interstate Bank', 'Glacier Bank', 'WaFd Bank', 'Hancock Whitney Bank',

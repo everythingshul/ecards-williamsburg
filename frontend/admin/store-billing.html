@@ -38,6 +38,7 @@ renderShell('/admin/store-billing', `
         <option value="rejected">Rejected</option>
         <option value="">All</option>
       </select>
+      ${['super_admin', 'org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-sm btn-outline" style="margin-left:auto" title="Every store with its full bank account and routing numbers — treat the file as confidential" onclick="downloadAuthed('/store-billing/stores/payment-info/export', 'store-bank-details.xlsx')">Download Store Bank Details (Excel)</button>` : ''}
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Store</th><th>Period</th><th>Amount</th><th>Submitted</th><th>Attachment</th><th>Status</th><th></th></tr></thead>

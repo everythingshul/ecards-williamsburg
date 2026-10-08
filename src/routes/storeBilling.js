@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { join } from 'path';
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs';
 import { db, uuid, DATA_DIR } from '../db.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { auth } from '../middleware/auth.js';
 import { sendMailChecked, renderSystemTemplate, escapeHtml } from '../services/mail.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { logAudit } from '../services/audit.js';
+import { sendXlsx } from '../services/xlsx.js';
 
 const router = Router();
 const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -17,6 +18,28 @@ const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSi
 const BILLS_DIR = join(DATA_DIR, 'store-bills');
 
 router.use(auth);
+
+// Bank picker list for the store portal's Payment Information form. The
+// built-in list is read out of frontend/js/usbanks.js so there's exactly one
+// copy of it; an admin can replace it from Settings > Organization > Store
+// Billing > Bank List (stored as a JSON array under 'store_billing_banks';
+// empty/malformed = built-in). "Other / Not Listed" is always forced to the
+// end since it's what unlocks the free-text bank-name field on the form.
+const OTHER_BANK = 'Other / Not Listed';
+const DEFAULT_BANKS = (() => {
+  try {
+    const src = readFileSync(new URL('../../frontend/js/usbanks.js', import.meta.url), 'utf8');
+    return new Function('return ' + src.match(/window\.US_BANKS\s*=\s*(\[[\s\S]*?\]);/)[1])();
+  } catch (e) { console.error('[store-billing] could not read usbanks.js:', e.message); return []; }
+})();
+function getBanks(orgId) {
+  let list = null;
+  try { const v = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'store_billing_banks'`).get(orgId)?.value; if (v) list = JSON.parse(v); } catch {}
+  if (!Array.isArray(list) || !list.length) list = DEFAULT_BANKS;
+  const clean = [...new Set(list.map(b => String(b).trim()).filter(b => b && b !== OTHER_BANK))];
+  return [...clean, OTHER_BANK];
+}
+router.get('/banks', (req, res) => res.json({ banks: getBanks(req.user.org_id) }));
 
 function periodLabel(startDate, endDate) {
   const fmt = (d) => { try { return new Date(d + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }); } catch { return d; } };
@@ -285,6 +308,29 @@ router.get('/invoices/:id', requirePermission('store_billing'), (req, res) => {
 // about to send a real payment, same tighter super_admin/org_admin-only
 // gate applicants.js's "View Live Disccardpromos Data" uses for a similarly
 // sensitive reveal, plus an audit row recording who looked.
+// Every store (anything not inactive) with its payment info IN FULL — bank,
+// name on account, full account + routing numbers — plus the store's own
+// contacts. Stores with nothing on file are included with blank bank columns
+// and sorted last, so the sheet doubles as a "who still hasn't set up
+// payment" list. Same gate as the per-store reveal below, and audited.
+router.get('/stores/payment-info/export', requirePermission('store_billing'), (req, res) => {
+  if (!['super_admin', 'org_admin'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
+  const rows = db.prepare(`SELECT s.name, s.setup_status, s.address, s.city, s.state, s.zip, s.phone,
+      s.owner_name, s.owner_phone, s.owner_email, s.manager_name, s.manager_phone, s.manager_email, u.email AS login_email,
+      pi.bank_name, pi.name_on_account, pi.address AS bank_address, pi.city AS bank_city, pi.state AS bank_state, pi.zip AS bank_zip,
+      pi.contact_name, pi.contact_cell, pi.account_number, pi.routing_number, pi.updated_at AS payment_info_updated_at
+    FROM stores s LEFT JOIN store_payment_info pi ON pi.store_id = s.id LEFT JOIN users u ON u.id = s.portal_user_id
+    WHERE s.org_id = ? AND s.setup_status != 'inactive' ORDER BY (pi.id IS NULL), s.name`).all(req.user.org_id);
+  logAudit(req.user.org_id, req.user.id, 'export_payment_info', 'store', null, null, { stores: rows.length, with_payment_info: rows.filter(r => r.account_number).length }, req.ip);
+  const out = rows.map(r => ({
+    'Store': r.name, 'Setup Status': r.setup_status, 'Address': r.address, 'City': r.city, 'State': r.state, 'Zip': r.zip, 'Store Phone': r.phone,
+    'Owner': r.owner_name, 'Owner Phone': r.owner_phone, 'Owner Email': r.owner_email, 'Manager': r.manager_name, 'Manager Phone': r.manager_phone, 'Manager Email': r.manager_email, 'Portal Login': r.login_email,
+    'Bank': r.bank_name, 'Name on Account': r.name_on_account, 'Bank Address': [r.bank_address, r.bank_city, r.bank_state, r.bank_zip].filter(Boolean).join(', '),
+    'Billing Contact': r.contact_name, 'Billing Contact Cell': r.contact_cell, 'Account Number': r.account_number, 'Routing Number': r.routing_number, 'Payment Info Updated': r.payment_info_updated_at,
+  }));
+  sendXlsx(res, `store-bank-details-${new Date().toISOString().slice(0, 10)}.xlsx`, out);
+});
+
 router.get('/stores/:storeId/payment-info/reveal', requirePermission('store_billing'), (req, res) => {
   if (!['super_admin', 'org_admin'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
   const row = db.prepare('SELECT pi.* FROM store_payment_info pi JOIN stores s ON s.id = pi.store_id WHERE pi.store_id = ? AND s.org_id = ?').get(req.params.storeId, req.user.org_id);
