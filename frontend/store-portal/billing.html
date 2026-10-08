@@ -76,6 +76,7 @@ function paint(html) {
 
 async function refreshStatus() {
   BW.status = await api('/store-billing/my/status');
+  if (!BW.banks) { try { BW.banks = (await api('/store-billing/banks')).banks; } catch { BW.banks = window.US_BANKS; } }
 }
 
 async function boot() {
@@ -340,7 +341,7 @@ BW.confirmCode = async () => {
 
 BW.filterBanks = (q) => {
   const dropdown = qs('#bank-dropdown');
-  const matches = US_BANKS.filter(b => b.toLowerCase().includes((q || '').toLowerCase())).slice(0, 40);
+  const matches = (BW.banks || window.US_BANKS).filter(b => b.toLowerCase().includes((q || '').toLowerCase())).slice(0, 40);
   dropdown.innerHTML = matches.map(b => `<div class="bank-item" onclick="BW.pickBank('${b.replace(/'/g, "\\'")}')">${renderBankLogo(b, 28)}<span>${esc(b)}</span></div>`).join('') || '<div class="bank-item" style="cursor:default">No matches</div>';
   dropdown.style.display = 'block';
 };

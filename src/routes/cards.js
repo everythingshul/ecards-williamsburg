@@ -19,9 +19,9 @@ router.get('/', (req, res) => {
   if (status) { where += ' AND c.status = ?'; params.push(status); }
   if (season_id) { where += ' AND c.season_id = ?'; params.push(season_id); }
   if (search) {
-    where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR c.card_number_masked LIKE ?)`;
+    where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR (a.first_name || ' ' || a.last_name) LIKE ? OR c.card_number_masked LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like);
+    params.push(like, like, like, like);
   }
   const total = db.prepare(`SELECT COUNT(*) c FROM cards c LEFT JOIN applicants a ON a.id=c.applicant_id ${where}`).get(...params).c;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
@@ -43,9 +43,9 @@ router.get('/export', requirePermission('cards', 'can_export'), (req, res) => {
   if (status) { where += ' AND c.status = ?'; params.push(status); }
   if (season_id) { where += ' AND c.season_id = ?'; params.push(season_id); }
   if (search) {
-    where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR c.card_number_masked LIKE ?)`;
+    where += ` AND (a.first_name LIKE ? OR a.last_name LIKE ? OR (a.first_name || ' ' || a.last_name) LIKE ? OR c.card_number_masked LIKE ?)`;
     const like = `%${search}%`;
-    params.push(like, like, like);
+    params.push(like, like, like, like);
   }
   const rows = db.prepare(`SELECT c.*, a.first_name, a.last_name, a.email, s.name_en as shul_name
     FROM cards c LEFT JOIN applicants a ON a.id=c.applicant_id LEFT JOIN shuls s ON s.id=a.shul_id

@@ -104,6 +104,15 @@ renderShell('/admin/settings', `
       <label>Route Invoice Notifications To <span class="small-muted">(comma-separated, blank to disable)</span></label>
       <input id="sb-notify-email" placeholder="billing@example.com">
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveStoreBillingSettings()">Save</button>
+      <div class="divider" style="margin:18px 0"></div>
+      <h3 style="font-size:15px">Bank List</h3>
+      <p class="small-muted">The banks a store can pick from on its Payment Information form, one per line, in the order shown. Add, rename or remove freely &mdash; "Other / Not Listed" is always kept at the end so a store can still type in a bank that isn't here. Changes apply the next time a store opens the form.</p>
+      <textarea id="sb-banks" rows="12" style="font-family:inherit;font-size:13px"></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+        <button class="btn btn-sm btn-primary" onclick="saveBankList()">Save Bank List</button>
+        <button class="btn btn-sm btn-outline" onclick="resetBankList()">Reset to Built-in List</button>
+        <span class="small-muted" id="sb-banks-count"></span>
+      </div>
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Application Restrictions</h3>
@@ -532,7 +541,23 @@ async function loadStoreBillingSettings() {
   qs('#sb-legal-name').value = settings.store_billing_legal_name || '';
   qs('#sb-tax-id').value = settings.store_billing_tax_id || '';
   qs('#sb-notify-email').value = settings.store_billing_notify_email || '';
+  await loadBankList(!!settings.store_billing_banks);
 }
+async function loadBankList(customized) {
+  const { banks } = await api('/store-billing/banks');
+  const editable = banks.filter(b => b !== 'Other / Not Listed');
+  qs('#sb-banks').value = editable.join('\n');
+  qs('#sb-banks-count').textContent = `${editable.length} banks${customized ? ' (customized)' : ' (built-in list)'}`;
+}
+window.saveBankList = async () => {
+  const banks = [...new Set(qs('#sb-banks').value.split('\n').map(s => s.trim()).filter(Boolean))];
+  if (!banks.length) return toast('Enter at least one bank, or use Reset to go back to the built-in list', true);
+  try { await api('/settings', { method: 'PUT', body: { store_billing_banks: JSON.stringify(banks) } }); toast('Bank list saved'); await loadBankList(true); } catch (err) { toast(err.message, true); }
+};
+window.resetBankList = async () => {
+  if (!confirm('Replace your custom bank list with the built-in one?')) return;
+  try { await api('/settings', { method: 'PUT', body: { store_billing_banks: '' } }); toast('Reset to the built-in list'); await loadBankList(false); } catch (err) { toast(err.message, true); }
+};
 window.saveStoreBillingSettings = async () => {
   try {
     await api('/settings', { method: 'PUT', body: {
