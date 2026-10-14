@@ -123,13 +123,25 @@ disccardpromos customers that *aren't* linked (and charges on a card we couldn't
 be dropped, leaving Total Spent below disccardpromos' own figure. `syncUnlinkedCustomers()`
 (run by every `syncAllCards`, from the bulk customer indexes it already pulls) stores them in
 `unattributed_transactions` (customer id/name, vendor resolved to a store, same negative-purchase
-/ positive-refund convention). `services/spendTotals.js` (`unattributedNet`,
-`unattributedByStore`) adds them to every total — `orgFundsSummary` (Dashboard + Donor's Dash
-Total Spent/Remaining), `topStores`/`totalStoreSpend`, the donor Stores panel, and the Stores
-list/export/profile/transaction history. Season totals window them by the season's date range
-(they have no card to carry a season). When such a customer is later linked, `syncApplicantCards`
-records the same `provider_txn_id`s as real card transactions and deletes the unattributed
-copies (`dropUnattributed`) so nothing is counted twice.
+/ positive-refund convention). A customer is skipped only if the per-applicant sync actually
+processed it this sweep (it finds customers by `external_id`, so "some applicant holds this
+account id" isn't enough), and a charge already in `card_transactions` is never also recorded
+here — every charge is counted in exactly one table.
+
+**"Total Spent" has ONE definition**: `totalSpend()` in `services/spendTotals.js` = net
+(purchases minus refunds) of *every* card transaction — any applicant, whatever their status now,
+no merge adjustments — plus the unattributed charges. The Dashboard Total Spent tile
+(`orgFundsSummary`), its Live Store Spend total, and Donor's Dash all read it, so they cannot
+disagree, and it matches disccardpromos' own total. (It used to sum only *approved* applicants'
+own spend, which silently dropped anyone later rejected/removed and any merge adjustment, so it
+never reached disccardpromos' figure. Remaining = Total Loaded − Total Spent, as before.)
+`unattributedByStore` feeds `topStores`, the donor Stores panel and the Stores list/export/
+profile/history; Cards > All Transactions lists the unattributed rows (labelled with the
+disccardpromos customer) with a Total spent summary and an "Unattributed spend — INCLUDED"
+line, and Spent by Shul shows a "Not linked to any applicant" row. Season totals window
+unattributed rows by the season's date range (they have no card to carry a season). When such a
+customer is later linked, `syncApplicantCards` records the same `provider_txn_id`s as real card
+transactions and deletes the unattributed copies (`dropUnattributed`) so nothing is counted twice.
 
 Their docs host (docs.disccardpromos.com) blocked automated fetching from the
 build environment, so the exact endpoint paths/payloads in `giftcard.js` are

@@ -26,6 +26,7 @@ renderShell('/admin/cards', `
     <div class="paginator" id="pager-cards"></div>
   </div>
   <div id="panel-txns" style="display:none">
+    <div class="card" id="txn-summary" style="margin-bottom:12px"></div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>Date</th><th>Applicant</th><th>Card #</th><th>Type</th><th>Amount</th><th>Store</th></tr></thead>
       <tbody id="tbody-txns"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table>
@@ -133,24 +134,37 @@ function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTi
 
 async function loadTxns() {
   try {
-    const { transactions, total } = await api('/cards/transactions/all?page=' + txnPage);
-    qs('#tbody-txns').innerHTML = transactions.length ? transactions.map(t => `<tr>
-        <td>${fmtDateTime(t.occurred_at)}</td><td>${esc(t.first_name||'')} ${esc(t.last_name||'')}</td><td>${esc(t.card_number_masked||'')}</td>
+    const { transactions, summary } = await api('/cards/transactions/all?page=' + txnPage);
+    if (summary) {
+      qs('#txn-summary').innerHTML = `
+        <div class="flex-between" style="flex-wrap:wrap;gap:10px"><div><strong style="font-size:18px">Total spent: ${fmtMoney(summary.totalSpent)}</strong>
+          <div class="small-muted">Purchases on cards ${fmtMoney(summary.purchases)} &minus; refunds ${fmtMoney(summary.refunds)} + unattributed spend ${fmtMoney(summary.unattributedNet)}</div></div></div>
+        <div class="divider" style="margin:10px 0"></div>
+        <div><strong>Unattributed spend &mdash; INCLUDED in Total spent above:</strong> ${fmtMoney(summary.unattributedNet)}
+          <span class="small-muted">(${summary.unattributedCount} charge(s)${summary.unlinkedCustomers ? ` from ${summary.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant` : ''}). These are charges disccardpromos has but that belong to no card of ours; link those customers under Applicants &gt; Disccardpromos Sync to attach them to a person.</span></div>`;
+    }
+    qs('#tbody-txns').innerHTML = transactions.length ? transactions.map(t => {
+      const person = t.first_name || t.last_name ? `${esc(t.first_name || '')} ${esc(t.last_name || '')}`
+        : (t.unattributed ? `${esc(t.customer_name || 'Unknown customer')} <span class="small-muted">(disccardpromos customer #${esc(t.customer_id || '?')}, not linked here)</span>` : '');
+      return `<tr>
+        <td>${fmtDateTime(t.occurred_at)}</td><td>${person}</td><td>${esc(t.card_number_masked||'')}</td>
         <td>${badge(t.type,t.type)}</td><td>${fmtMoney(t.amount)}</td><td>${esc(t.store_name||'')}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No transactions yet.</td></tr>';
+      </tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty-state">No transactions yet.</td></tr>';
   } catch (err) { toast(err.message, true); }
 }
 
 async function loadByShul() {
   try {
-    const { shuls } = await api('/cards/by-shul');
-    qs('#tbody-byshul').innerHTML = shuls.length ? shuls.map(s => {
+    const { shuls, unattributed } = await api('/cards/by-shul');
+    const unlinkedRow = unattributed && unattributed.spent ? `<tr><td><em>Not linked to any applicant</em> <span class="small-muted">(disccardpromos customers not linked here)</span></td><td></td><td>${fmtMoney(unattributed.spent)}</td><td></td><td></td></tr>` : '';
+    qs('#tbody-byshul').innerHTML = shuls.length || unlinkedRow ? shuls.map(s => {
       const pct = s.allocated > 0 ? Math.min(100, Math.round((s.spent / s.allocated) * 100)) : 0;
       return `<tr>
         <td>${esc(s.shul_name)}</td><td>${fmtMoney(s.allocated)}</td><td>${fmtMoney(s.spent)}</td><td>${fmtMoney(s.remaining)}</td>
         <td style="min-width:120px"><div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden"><div style="width:${pct}%;background:var(--brand-gold-dark);height:100%"></div></div><span class="small-muted">${pct}%</span></td>
       </tr>`;
-    }).join('') : '<tr><td colspan="5" class="empty-state">No cards loaded yet.</td></tr>';
+    }).join('') + unlinkedRow : '<tr><td colspan="5" class="empty-state">No cards loaded yet.</td></tr>';
   } catch (err) { toast(err.message, true); }
 }
 
