@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js?v=20261005"></script>
+<script src="/js/app.js?v=20261014"></script>
 <script>
 Auth.requireAdmin();
 const isSuperAdmin = Auth.user()?.role === 'super_admin';
@@ -103,6 +103,8 @@ renderShell('/admin/settings', `
       </div>
       <label>Route Invoice Notifications To <span class="small-muted">(comma-separated, blank to disable)</span></label>
       <input id="sb-notify-email" placeholder="billing@example.com">
+      <label>Processing Fee to Deduct (%) <span class="small-muted">(taken off every store invoice &mdash; 1 means a $100 invoice pays out $99; blank for none. It can be waived on individual invoices.)</span></label>
+      <input id="sb-fee-percent" type="number" min="0" max="100" step="0.01" placeholder="e.g. 1" style="max-width:160px">
       <button class="btn btn-sm btn-primary" style="margin-top:14px" onclick="saveStoreBillingSettings()">Save</button>
       <div class="divider" style="margin:18px 0"></div>
       <h3 style="font-size:15px">Bank List</h3>
@@ -541,6 +543,7 @@ async function loadStoreBillingSettings() {
   qs('#sb-legal-name').value = settings.store_billing_legal_name || '';
   qs('#sb-tax-id').value = settings.store_billing_tax_id || '';
   qs('#sb-notify-email').value = settings.store_billing_notify_email || '';
+  qs('#sb-fee-percent').value = settings.store_billing_fee_percent || '';
   await loadBankList(!!settings.store_billing_banks);
 }
 async function loadBankList(customized) {
@@ -564,6 +567,7 @@ window.saveStoreBillingSettings = async () => {
       store_billing_legal_name: qs('#sb-legal-name').value.trim(),
       store_billing_tax_id: qs('#sb-tax-id').value.trim(),
       store_billing_notify_email: qs('#sb-notify-email').value.trim(),
+      store_billing_fee_percent: (() => { const v = parseFloat(qs('#sb-fee-percent').value); return Number.isFinite(v) && v > 0 ? String(Math.min(v, 100)) : ''; })(),
     } });
     toast('Saved');
   } catch (err) { toast(err.message, true); }

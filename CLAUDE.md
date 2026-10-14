@@ -72,6 +72,17 @@ frontend/
   and shul/applicant actions are rejected until an admin resolves or bypasses
   the flag. Shuls/Applicants > Duplicates panel can open a **full side-by-side
   comparison** (`renderCompareTable()` in `app.js`) before deciding.
+- **One disccardpromos account per person** (`services/duplicates.js`
+  `findProviderAccountConflict` / `flagProviderAccountConflict` / `sweepProviderAccountConflicts`):
+  the same person legitimately spans several applicant rows (merge group, season carry-forward,
+  same `external_id`) and shares one account by design; two *different* people must never.
+  disccardpromos can return an existing customer at approval, so every auto-link in
+  `services/providerAccount.js` (`ensureProviderAccount`, which the enforce job also uses, and the
+  audit's relink-by-external-id) checks first: on a conflict nothing is linked, both applicants
+  are paused, and a normal Duplicates flag "Same disccardpromos account (#id)" is opened
+  (surfaced as `providerAccountError` on approve). **Recheck All** also sweeps existing bad data
+  (manual only — deliberately not run at boot, since it pauses applicants and deactivates cards);
+  a pair the admin bypassed for that exact account is not re-flagged.
 - **Field-level RBAC** (`middleware/permissions.js`): each internal user gets a
   `permissions` row per resource (`shuls`, `applicants`, `cards`, `stores`,
   `forms`, `users`, `settings`, `dashboard`) with `can_view`/`can_edit`/
@@ -106,6 +117,19 @@ sweep; "Sync Now" on the card detail modal does one card. `assignCard()` also
 pushes the applicant's internal ID as `external_ref` when a card is created —
 disccardpromos only ever learns the card/applicant *reference*, not personal
 details; **this app remains the system of record for all applicant data**.
+
+**Unattributed spend.** Card sync only reads customers linked to an applicant, so charges by
+disccardpromos customers that *aren't* linked (and charges on a card we couldn't match) used to
+be dropped, leaving Total Spent below disccardpromos' own figure. `syncUnlinkedCustomers()`
+(run by every `syncAllCards`, from the bulk customer indexes it already pulls) stores them in
+`unattributed_transactions` (customer id/name, vendor resolved to a store, same negative-purchase
+/ positive-refund convention). `services/spendTotals.js` (`unattributedNet`,
+`unattributedByStore`) adds them to every total — `orgFundsSummary` (Dashboard + Donor's Dash
+Total Spent/Remaining), `topStores`/`totalStoreSpend`, the donor Stores panel, and the Stores
+list/export/profile/transaction history. Season totals window them by the season's date range
+(they have no card to carry a season). When such a customer is later linked, `syncApplicantCards`
+records the same `provider_txn_id`s as real card transactions and deletes the unattributed
+copies (`dropUnattributed`) so nothing is counted twice.
 
 Their docs host (docs.disccardpromos.com) blocked automated fetching from the
 build environment, so the exact endpoint paths/payloads in `giftcard.js` are
@@ -296,6 +320,30 @@ call). Admin > Stores shows source, onboarding progress, and **live spend**
 (purchases/refunds/transaction count, computed fresh from synced
 transactions on every request — not cached). Dashboard has a "Live Store
 Spend" panel with total spend + top-5 breakdown.
+
+## Store Billing (`/admin/store-billing`, `routes/storeBilling.js`)
+Stores bill the fund back (not the other way round). Admin issues a **billing period**
+("please submit your invoice" email to chosen stores); a store may submit one invoice per
+period it was invited to (store portal Billing tab, email-code verified); admin reviews it.
+- **Approve for payment**: a pending invoice can be ticked "approved" with an editable
+  amount (`approved_for_payment`/`approved_amount`/`approved_by`/`approved_at`); only pending
+  invoices can be (un)approved. Mark Payment Sent prefills the approved amount, else the net
+  payable. The page's four tiles come from `GET /invoices/summary` (registered before
+  `/invoices/:id`): Paid, Outstanding (approved invoices count at their approved amount, others
+  at net payable), Approved Awaiting Payment, Pending Review. The list has search + sortable
+  headers, and the store name links to `/admin/stores?id=`.
+- **Processing fee**: setting `store_billing_fee_percent` (Settings > Store Billing) is deducted
+  at read time (`withPayable()`: `fee_amount`, `payable_amount`), so changing it re-prices every
+  unpaid invoice. Per invoice it can be waived (`POST /invoices/:id/fee-waiver`, who/when
+  recorded; an approval that equalled the old payable follows the change). The invoice popup's
+  `renderInvoiceCalculator()` in `app.js` shows invoice / fee / total to pay.
+- **Bank list**: the store portal's bank picker comes from `GET /store-billing/banks` — the
+  admin's list (`store_billing_banks`, Settings > Store Billing > Bank List) or the bundled
+  `frontend/js/usbanks.js`; "Other / Not Listed" is always forced last.
+- **Download Store Bank Details (Excel)**: `GET /store-billing/stores/payment-info/export`,
+  super_admin/org_admin only (like the per-store Reveal), audited as `export_payment_info`.
+- Internal columns (`admin_notes`, approval and fee-override fields) are stripped from the
+  store-facing `GET /my/invoices`.
 
 ## Address autocomplete (Google Places)
 `attachPlacesAutocomplete(inputId, fields)` in app.js is a from-scratch

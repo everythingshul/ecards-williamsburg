@@ -3,6 +3,7 @@ import { db } from '../db.js';
 import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { orgFundsSummary } from '../services/applicantBalance.js';
+import { unattributedNet, unattributedByStore } from '../services/spendTotals.js';
 
 const router = Router();
 // Donor's Dash (frontend/admin/donor-dashboard.html) is its own separately
@@ -163,6 +164,16 @@ router.get('/stores', (req, res) => {
   `).all(...seasonParams, ...seasonParams, orgId);
   const unmatched = db.prepare(`SELECT ${NET} total, COUNT(*) n FROM card_transactions t JOIN cards c ON c.id = t.card_id
     WHERE c.org_id = ? AND t.store_id IS NULL${seasonClause}`).get(orgId, ...seasonParams);
+  // Charges from disccardpromos customers not linked to any applicant (see
+  // services/spendTotals.js): per-store when the vendor resolved to a store,
+  // otherwise part of "unmatched" — so the panel total still equals the
+  // headline Total Spent.
+  const extraByStore = unattributedByStore(orgId, seasonId);
+  for (const r of rows) r.total_spent += extraByStore[r.id] || 0;
+  rows.sort((a, b) => b.total_spent - a.total_spent || String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }));
+  const extraUnmatched = unattributedNet(orgId, { seasonId, unmatchedOnly: true });
+  unmatched.total = (unmatched.total || 0) + extraUnmatched.net;
+  unmatched.n = (unmatched.n || 0) + extraUnmatched.count;
   const grand = rows.reduce((a, r) => a + r.total_spent, 0) + (unmatched.total || 0);
   res.json({
     stores: rows.map(r => ({ id: r.id, name: r.name, status: r.setup_status, totalSpent: Math.round(r.total_spent * 100) / 100, purchaseCount: r.purchase_count })),

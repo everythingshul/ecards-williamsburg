@@ -1,4 +1,5 @@
 import { db } from '../db.js';
+import { unattributedNet } from './spendTotals.js';
 
 // An applicant merged into a group (see services/duplicates.js's
 // mergeApplicants) shares exactly one real disccardpromos account with
@@ -134,7 +135,11 @@ export function orgFundsSummary(orgId, seasonId) {
   const seasonClause = seasonId ? ' AND season_id = ?' : '';
   const seasonParams = seasonId ? [seasonId] : [];
   const approved = db.prepare(`SELECT id, merge_group_id FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).all(orgId, ...seasonParams);
-  if (!approved.length) return { approvedFunds: 0, totalSpent: 0 };
+  // Charges by disccardpromos customers not linked to any applicant (see
+  // services/spendTotals.js) are real spend too — without them Total Spent
+  // falls short of disccardpromos' own figure.
+  const unattributed = unattributedNet(orgId, { seasonId }).net;
+  if (!approved.length) return { approvedFunds: 0, totalSpent: unattributed, unattributedSpend: unattributed };
   const balances = getApplicantBalances(orgId, approved.map(a => a.id));
   const seenGroups = new Set();
   let approvedFunds = 0, totalSpent = 0;
@@ -146,7 +151,7 @@ export function orgFundsSummary(orgId, seasonId) {
     approvedFunds += b?.loaded || 0;
     totalSpent += b?.spent || 0;
   }
-  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: Math.round(totalSpent * 100) / 100 };
+  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: Math.round((totalSpent + unattributed) * 100) / 100, unattributedSpend: unattributed };
 }
 
 // Dashboard KPI: "X of Y loaded accounts are active" — Y is every real

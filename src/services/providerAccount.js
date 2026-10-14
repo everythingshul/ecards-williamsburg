@@ -8,6 +8,7 @@ import * as giftcard from '../services/giftcard.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { lockApplicantCards } from './cardSync.js';
 import { getApplicantBalances } from './applicantBalance.js';
+import { findProviderAccountConflict, flagProviderAccountConflict } from './duplicates.js';
 
 // Old rows can carry a corrupted "74421.0" id (see giftcard.js's
 // normalizeCustomerId) — stripped here too so a comparison against a clean
@@ -15,6 +16,18 @@ import { getApplicantBalances } from './applicantBalance.js';
 function cleanId(id) { return id == null ? null : String(id).replace(/\.0$/, ''); }
 
 // ============================= Account creation/linking =============================
+
+// Two different PEOPLE must never end up on one disccardpromos account (see
+// services/duplicates.js's findProviderAccountConflict for what counts as
+// the same person). Every auto-link below runs this first: on a conflict the
+// link is NOT written, both applicants are paused and a standard Duplicates
+// flag is opened, and the returned message names who already holds it.
+function providerAccountConflictError(orgId, applicantId, accountId) {
+  const holder = findProviderAccountConflict(orgId, accountId, applicantId);
+  if (!holder) return null;
+  flagProviderAccountConflict(orgId, applicantId, holder, accountId);
+  return `disccardpromos account #${cleanId(accountId)} already belongs to ${`${holder.first_name || ''} ${holder.last_name || ''}`.trim() || 'another applicant'} — not linked; both applicants are paused and flagged under Duplicates for review`;
+}
 
 // Which applicant fields Settings > Organization > Gift Card Loading lets an
 // admin choose to push to disccardpromos — external_id and the shul's group
@@ -166,6 +179,8 @@ export async function ensureProviderAccount(orgId, applicant, index) {
   try {
     const result = await giftcard.upsertAccountForApproval(anchor.season_id, buildProviderOpts(orgId, anchor, shul?.name_en || 'Unknown'), existingHint);
     if (result.accountId) {
+      const conflict = providerAccountConflictError(orgId, applicant.id, result.accountId);
+      if (conflict) return { accountId: null, created: false, linked: false, error: conflict };
       // Every member of this merge group (for a non-merged applicant, just
       // itself) shares this one account id.
       db.prepare(`UPDATE applicants SET provider_account_id = ? WHERE id = ? OR merge_group_id = ?`).run(result.accountId, groupId, groupId);
@@ -315,7 +330,7 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
   const byId = new Map(allCustomers.map(c => [cleanId(c.id), c]));
   const byExt = new Map(allCustomers.filter(c => c.external_id != null && c.external_id !== '').map(c => [String(c.external_id), c]));
 
-  const active = [], inactive = [], notFound = [], mock = [], relinked = [];
+  const active = [], inactive = [], notFound = [], mock = [], relinked = [], conflicts = [];
   for (const a of applicants) {
     job.progress++;
     if (isMock) { if (a.provider_account_id) mock.push(a.id); continue; }
@@ -331,6 +346,8 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
     if (a.approval_status === 'approved' && !a.provider_exempt && a.external_id) {
       const c = byExt.get(String(a.external_id));
       if (c) {
+        const conflict = providerAccountConflictError(orgId, a.id, c.id);
+        if (conflict) { conflicts.push({ applicantId: a.id, accountId: cleanId(c.id), error: conflict }); continue; }
         db.prepare('UPDATE applicants SET provider_account_id = ? WHERE id = ?').run(cleanId(c.id), a.id);
         relinked.push({ applicantId: a.id, accountId: cleanId(c.id) });
       }
@@ -372,7 +389,7 @@ export async function runProviderAudit(orgId, seasonId, job = { progress: 0, tot
     mockMode: isMock,
     active: active.length, inactive: inactive.length, notFound: notFound.length,
     activeIds: active, inactiveIds: inactive, notFoundIds: notFound, mockIds: mock,
-    relinked, orphans,
+    relinked, conflicts, orphans,
   };
 }
 
