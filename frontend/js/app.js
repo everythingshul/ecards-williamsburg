@@ -736,16 +736,54 @@ function attachModalDrag(header, box) {
     e.preventDefault();
   });
 }
-function closeModal() { document.getElementById('ec-modal')?.remove(); }
+// Modals can stack (an invoice popup, then Mark Payment Sent over it) and all
+// share the id, so close the TOPMOST one — getElementById would return the
+// oldest and leave the one on top open.
+function closeModal() { const all = document.querySelectorAll('#ec-modal'); all[all.length - 1]?.remove(); }
+function closeAllModals() { document.querySelectorAll('#ec-modal').forEach(m => m.remove()); }
 
 // Minimal dependency-free rich text editor for composing HTML email/update
 // bodies — a toolbar of execCommand actions over a contenteditable div, so
 // admins don't have to hand-write HTML tags. Renders into `#${containerId}`
-// and returns { getHtml, setHtml }. Images are inlined as base64 data URIs
-// (no separate upload step needed for something this small).
-function createRichTextEditor(containerId, initialHtml = '') {
+// and returns { getHtml, setHtml, insertHtml, onInput, surface }. Images are
+// inlined as base64 data URIs (no separate upload step needed for something
+// this small).
+//
+// opts.fields = [{ key, label }] turns {{key}} placeholders into labelled,
+// non-editable "field chips" while editing (so nobody has to look at
+// {{braces}} or HTML) and adds an "Insert field" menu. getHtml() turns the
+// chips back into {{key}} for saving; only text is converted, so a
+// {{portalUrl}} inside an href stays exactly as written.
+//
+// renderFieldChips(): {{key}} placeholders in the text of an HTML string ->
+// the same labelled pills, read-only. Attributes are left alone; unknown
+// {{keys}} stay as written.
+function renderFieldChips(html, fields) {
+  const label = Object.fromEntries((fields || []).map(f => [f.key, f.label || f.key]));
+  const box = document.createElement('div'); box.innerHTML = html || '';
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  const texts = []; while (walker.nextNode()) texts.push(walker.currentNode);
+  for (const node of texts) {
+    if (!/\{\{\w+\}\}/.test(node.nodeValue)) continue;
+    const frag = document.createElement('span');
+    frag.innerHTML = esc(node.nodeValue).replace(/\{\{(\w+)\}\}/g, (m, k) => label[k] ? `<span class="rte-field" data-field="${k}" contenteditable="false" title="Filled in automatically when the email is sent">${esc(label[k])}</span>` : m);
+    node.replaceWith(...frag.childNodes);
+  }
+  return box.innerHTML;
+}
+function createRichTextEditor(containerId, initialHtml = '', opts = {}) {
   const container = document.getElementById(containerId);
   const editorId = containerId + '-surface';
+  const fields = Array.isArray(opts.fields) ? opts.fields : [];
+  const fieldLabel = Object.fromEntries(fields.map(f => [f.key, f.label || f.key]));
+  const chipHtml = (key) => `<span class="rte-field" data-field="${key}" contenteditable="false" title="Filled in automatically when the email is sent">${esc(fieldLabel[key])}</span>`;
+  const toChips = (html) => fields.length ? renderFieldChips(html, fields) : (html || '');
+  const fromChips = (html) => {
+    if (!fields.length) return html;
+    const box = document.createElement('div'); box.innerHTML = html;
+    box.querySelectorAll('.rte-field').forEach(el => el.replaceWith(document.createTextNode(`{{${el.dataset.field}}}`)));
+    return box.innerHTML;
+  };
   container.innerHTML = `
     <div class="rte-toolbar">
       <button type="button" data-cmd="bold" title="Bold"><strong>B</strong></button>
@@ -761,14 +799,36 @@ function createRichTextEditor(containerId, initialHtml = '') {
       <button type="button" data-cmd="justifyRight" title="Align right">&#8677;</button>
       <button type="button" data-action="rtl" title="Right-to-left paragraph direction">RTL</button>
       <button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button>
+      ${fields.length ? `<select class="rte-fields" title="Insert a field that is filled in automatically"><option value="">Insert field&hellip;</option>${fields.map(f => `<option value="${esc(f.key)}">${esc(f.label || f.key)}</option>`).join('')}</select>` : ''}
       <input type="file" accept="image/*" class="rte-file-input" style="display:none">
     </div>
-    <div id="${editorId}" class="rte-surface" contenteditable="true" dir="auto">${initialHtml || ''}</div>
+    <div id="${editorId}" class="rte-surface" contenteditable="true" dir="auto"></div>
   `;
   const surface = document.getElementById(editorId);
+  surface.innerHTML = toChips(initialHtml);
+  // Remember the caret so toolbar clicks / the field menu insert where the
+  // admin was typing, not at the top.
+  let savedRange = null;
+  const remember = () => { const sel = window.getSelection(); if (sel.rangeCount && surface.contains(sel.anchorNode)) savedRange = sel.getRangeAt(0).cloneRange(); };
+  ['keyup', 'mouseup', 'input'].forEach(ev => surface.addEventListener(ev, remember));
+  const restore = () => {
+    surface.focus();
+    const sel = window.getSelection();
+    // no caret yet -> insert at the END of the message, not the top
+    if (!savedRange) { savedRange = document.createRange(); savedRange.selectNodeContents(surface); savedRange.collapse(false); }
+    sel.removeAllRanges(); sel.addRange(savedRange);
+  };
+  const insertHtml = (html) => {
+    restore();
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !surface.contains(sel.anchorNode)) surface.insertAdjacentHTML('beforeend', html);
+    else document.execCommand('insertHTML', false, html);
+    remember();
+    surface.dispatchEvent(new Event('input', { bubbles: true }));
+  };
   container.querySelectorAll('.rte-toolbar button[data-cmd]').forEach(btn => {
     btn.addEventListener('click', () => {
-      surface.focus();
+      restore();
       const cmd = btn.dataset.cmd;
       if (cmd === 'createLink') {
         const url = prompt('Link URL:', 'https://');
@@ -784,7 +844,7 @@ function createRichTextEditor(containerId, initialHtml = '') {
   // clicks. Falls back to the whole surface if the selection isn't inside
   // a recognized block (e.g. everything is still one bare text run).
   container.querySelector('button[data-action="rtl"]').addEventListener('click', () => {
-    surface.focus();
+    restore();
     const sel = window.getSelection();
     let node = sel.rangeCount ? sel.getRangeAt(0).commonAncestorContainer : surface;
     if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
@@ -792,19 +852,27 @@ function createRichTextEditor(containerId, initialHtml = '') {
     if (!node) node = surface;
     node.dir = node.dir === 'rtl' ? 'ltr' : 'rtl';
   });
+  const fieldSelect = container.querySelector('.rte-fields');
+  if (fieldSelect) fieldSelect.addEventListener('change', () => {
+    const key = fieldSelect.value; fieldSelect.value = '';
+    if (key) insertHtml(chipHtml(key) + '&nbsp;');
+  });
   const fileInput = container.querySelector('.rte-file-input');
   container.querySelector('button[data-action="image"]').addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', () => {
     const file = fileInput.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => { surface.focus(); document.execCommand('insertImage', false, reader.result); };
+    reader.onload = () => { restore(); document.execCommand('insertImage', false, reader.result); };
     reader.readAsDataURL(file);
     fileInput.value = '';
   });
   return {
-    getHtml: () => surface.innerHTML,
-    setHtml: (html) => { surface.innerHTML = html || ''; },
+    getHtml: () => fromChips(surface.innerHTML),
+    setHtml: (html) => { surface.innerHTML = toChips(html); },
+    insertHtml,
+    onInput: (cb) => surface.addEventListener('input', cb),
+    surface,
   };
 }
 
@@ -1364,7 +1432,8 @@ window.openStoreInvoiceModal = async (id, onDone) => {
     `;
     const footer = `
       ${canEdit && bill.status === 'pending' ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="rejectStoreInvoice('${bill.id}')">Reject</button>
-      <button class="btn btn-primary btn-sm" onclick="openStoreCompletePayment('${bill.id}', ${bill.approved_for_payment && bill.approved_amount != null ? bill.approved_amount : bill.payable_amount}, '${(bill.period || '').replace(/'/g, "\\'")}')">Mark Payment Sent</button>` : ''}
+      <button class="btn btn-primary btn-sm" onclick="openStoreCompletePayment('${bill.id}')">Mark Payment Sent</button>` : ''}
+      ${isTopAdmin && bill.status === 'completed' ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStorePayment('${bill.id}')">Delete Payment</button>` : ''}
       ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="editStoreInvoiceNote('${bill.id}', '${(bill.admin_notes || '').replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">${bill.admin_notes ? 'Edit' : 'Add'} Internal Note</button>` : ''}
       ${isTopAdmin ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteStoreInvoice('${bill.id}')">Delete</button>` : ''}
     `;
@@ -1421,26 +1490,119 @@ window.confirmRejectStoreInvoice = async (id) => {
   } catch (err) { toast(err.message, true); }
 };
 
-window.openStoreCompletePayment = (id, amount, period) => {
-  const today = new Date().toISOString().slice(0, 10);
-  const body = `
-    <p class="small-muted">Record the offline payment you already sent &mdash; this only logs it here and emails the store; it doesn't move any money itself.</p>
-    <label>Amount Sent</label><input id="cp-amount" type="number" step="0.01" value="${amount}">
-    <label>Date Sent</label><input id="cp-date" type="date" value="${today}">
-    <label>Note to Store <span class="small-muted">(optional — included in the email they get)</span></label><textarea id="cp-public-note" rows="2"></textarea>
-    <label>Internal Note <span class="small-muted">(optional — never shown to the store)</span></label><textarea id="cp-internal-note" rows="2"></textarea>
-  `;
-  openModal(`Mark Payment Sent — ${period || ''}`, body, `<button class="btn btn-primary btn-sm" onclick="confirmStoreCompletePayment('${id}')">Confirm Sent</button>`);
+// Mark Payment Sent: records the payment, optionally corrects this invoice's
+// billing period, and emails the store a rich-text message built from a
+// template (the default one is pre-selected). The email shown in the editor
+// is the REAL email — placeholders and the invoice breakdown (invoice − fee
+// = total) are already filled in by the server (POST .../payment-email-preview),
+// so the admin edits what the store will actually receive.
+window.openStoreCompletePayment = async (id) => {
+  try {
+    const [{ bill, paymentInfo }, { templates }] = await Promise.all([api(`/store-billing/invoices/${id}`), api('/store-billing/payment-email-templates')]);
+    const today = new Date().toISOString().slice(0, 10);
+    const amount = bill.approved_for_payment && bill.approved_amount != null ? bill.approved_amount : (bill.payable_amount ?? bill.amount);
+    const def = templates.find(t => t.is_default) || templates[0];
+    window.__cp = { id, dirty: false, editor: null, timer: null, seq: 0, lastTemplate: def.id };
+    const body = `
+      <p class="small-muted">Record the offline payment you already sent &mdash; this logs it here and emails the store; it doesn't move any money itself.${paymentInfo ? '' : ' <strong style="color:var(--danger)">This store has no payment information on file</strong> &mdash; you can still record the payment.'}</p>
+      <div class="grid-2">
+        <div><label>Amount Sent</label><input id="cp-amount" type="number" step="0.01" value="${amount}" oninput="cpRefreshSoon()"></div>
+        <div><label>Date Sent</label><input id="cp-date" type="date" value="${today}" onchange="cpRefreshSoon()"></div>
+      </div>
+      <div class="grid-2">
+        <div><label>Billing Period Start</label><input id="cp-pstart" type="date" value="${esc(bill.period_start || '')}" onchange="cpRefreshSoon()"></div>
+        <div><label>Billing Period End</label><input id="cp-pend" type="date" value="${esc(bill.period_end || '')}" onchange="cpRefreshSoon()"></div>
+      </div>
+      <p class="small-muted" style="margin:-2px 0 0">Change the dates to correct the period this payment covers. It updates this invoice only, not the billing period other stores were sent.</p>
+      <div class="divider"></div>
+      <label class="checkbox-row" style="margin-top:0"><input type="checkbox" id="cp-send" checked onchange="cpToggleEmail()"><span><strong>Email the store that payment is on the way</strong> <span class="small-muted" id="cp-to"></span></span></label>
+      <div id="cp-email">
+        <div class="grid-2" style="margin-top:8px">
+          <div><label>Template</label><select id="cp-template" onchange="cpPickTemplate()">${templates.map(t => `<option value="${t.id}" ${t.id === def.id ? 'selected' : ''}>${esc(t.name)}${t.is_default ? ' (default)' : ''}</option>`).join('')}</select></div>
+          <div><label>Subject</label><input id="cp-subject"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-top:6px">
+          <label style="margin:0">Message</label>
+          <span style="display:flex;gap:6px">
+            <button type="button" class="btn btn-outline btn-sm" onclick="cpInsertBreakdown()" title="Adds a table: invoice amount, minus the processing fee, total sent">Insert breakdown</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="cpReloadEmail()" title="Throw away edits and rebuild from the selected template">Reload from template</button>
+          </span>
+        </div>
+        <div id="cp-rte" style="margin-top:4px"></div>
+        <p class="small-muted" id="cp-stale" style="display:none;color:var(--brand-gold-dark)">You changed the amount, date or period after editing this email &mdash; use &ldquo;Reload from template&rdquo; to refresh the figures in it.</p>
+        <p class="small-muted" style="margin-top:6px">This is exactly what the store will receive &mdash; edit it freely. Manage templates (and pick the default) under Store Billing &rsaquo; Payment Emails.</p>
+      </div>
+      <label>Internal Note <span class="small-muted">(optional &mdash; never shown to the store)</span></label><textarea id="cp-internal-note" rows="2"></textarea>
+    `;
+    openModal(`Mark Payment Sent — ${bill.period || ''}`, body, `<button class="btn btn-primary btn-sm" id="cp-confirm" onclick="confirmStoreCompletePayment('${id}')">Confirm Sent</button>`, { wide: true });
+    __cp.editor = createRichTextEditor('cp-rte', '');
+    __cp.editor.onInput(() => { __cp.dirty = true; });
+    await cpLoadEmail();
+  } catch (err) { toast(err.message, true); }
+};
+function cpPayload() {
+  return { template_id: qs('#cp-template')?.value, payment_amount: +qs('#cp-amount').value, payment_date: qs('#cp-date').value, period_start: qs('#cp-pstart').value || undefined, period_end: qs('#cp-pend').value || undefined };
+}
+// Rebuilds subject + message from the selected template and the current
+// amount/date/period. Ignores out-of-date responses if the admin keeps typing.
+async function cpLoadEmail() {
+  const mine = ++__cp.seq;
+  try {
+    const r = await api(`/store-billing/invoices/${__cp.id}/payment-email-preview`, { method: 'POST', body: cpPayload() });
+    if (mine !== __cp.seq || !qs('#cp-subject')) return;
+    qs('#cp-subject').value = r.subject; __cp.editor.setHtml(r.body); __cp.dirty = false; __cp.breakdown = r.breakdown;
+    qs('#cp-stale').style.display = 'none';
+    qs('#cp-to').textContent = r.store_email ? `(to ${r.store_email})` : '(this store has no email on file)';
+  } catch (err) { toast(err.message, true); }
+}
+window.cpRefreshSoon = () => {
+  clearTimeout(__cp.timer);
+  __cp.timer = setTimeout(() => { if (!qs('#cp-send')?.checked) return; if (__cp.dirty) qs('#cp-stale').style.display = 'block'; else cpLoadEmail(); }, 400);
+};
+window.cpReloadEmail = () => {
+  if (__cp.dirty && !confirm('Replace your edits with a fresh copy of the template?')) return;
+  cpLoadEmail();
+};
+window.cpPickTemplate = () => {
+  if (__cp.dirty && !confirm('Replace your edits with this template?')) { qs('#cp-template').value = __cp.lastTemplate || qs('#cp-template').value; return; }
+  __cp.lastTemplate = qs('#cp-template').value; cpLoadEmail();
+};
+window.cpToggleEmail = () => { qs('#cp-email').style.display = qs('#cp-send').checked ? 'block' : 'none'; };
+window.cpInsertBreakdown = async () => {
+  try {
+    const r = await api(`/store-billing/invoices/${__cp.id}/payment-email-preview`, { method: 'POST', body: cpPayload() });
+    __cp.editor.insertHtml(r.breakdown);
+  } catch (err) { toast(err.message, true); }
 };
 window.confirmStoreCompletePayment = async (id) => {
+  const btn = qs('#cp-confirm');
   try {
-    await api(`/store-billing/invoices/${id}/complete`, { method: 'POST', body: {
+    const sendEmail = qs('#cp-send').checked;
+    if (btn) btn.disabled = true;
+    const r = await api(`/store-billing/invoices/${id}/complete`, { method: 'POST', body: {
       payment_amount: +qs('#cp-amount').value, payment_date: qs('#cp-date').value,
-      payment_note: qs('#cp-public-note').value, admin_notes: qs('#cp-internal-note').value,
+      period_start: qs('#cp-pstart').value || undefined, period_end: qs('#cp-pend').value || undefined,
+      admin_notes: qs('#cp-internal-note').value, send_email: sendEmail,
+      ...(sendEmail ? { email_subject: qs('#cp-subject').value, email_body: __cp.editor.getHtml() } : {}),
     } });
-    toast('Marked completed');
-    closeModal();
+    const e = r.email || {};
+    if (e.error) toast(`Payment recorded, but the email to ${e.to} failed: ${e.error}`, true);
+    else toast(e.sent ? `Marked completed — email sent to ${e.to}` : `Marked completed${e.skipped ? ` — no email sent (${e.skipped})` : ''}`);
+    closeAllModals();
     window.__storeInvoiceOnDone?.();
+  } catch (err) { toast(err.message, true); if (btn) btn.disabled = false; }
+};
+
+// Takes a recorded payment back (invoice returns to Pending). Top admins only,
+// same as deleting an invoice.
+window.deleteStorePayment = async (id) => {
+  if (!confirm('Delete this payment?\n\nThe invoice goes back to Pending and the payment details are cleared. Any email already sent to the store cannot be unsent.')) return;
+  try {
+    await api(`/store-billing/invoices/${id}/payment`, { method: 'DELETE' });
+    toast('Payment deleted — the invoice is pending again');
+    closeAllModals();
+    window.__storeInvoiceOnDone?.();
+    openStoreInvoiceModal(id, window.__storeInvoiceOnDone);
   } catch (err) { toast(err.message, true); }
 };
 

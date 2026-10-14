@@ -1666,6 +1666,27 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN approved_at TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived INTEGER DEFAULT 0`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_by TEXT REFERENCES users(id)`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
+// "Mark Payment Sent" can correct the billing period this one invoice covers
+// (the shared billing_periods row is left alone — other stores were invited to
+// it too). NULL = use the period it was submitted for.
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
+// Reusable rich-text "payment is on the way" emails, with the invoice
+// breakdown (invoice amount − processing fee = total) as a placeholder. At
+// most one default per org (partial unique index); Mark Payment Sent starts
+// from it.
+db.exec(`CREATE TABLE IF NOT EXISTS payment_email_templates (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_html TEXT NOT NULL,
+  is_default INTEGER DEFAULT 0,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_email_templates_default ON payment_email_templates(org_id) WHERE is_default = 1`);
 db.prepare(`UPDATE store_bill_submissions SET status = 'pending' WHERE status IN ('submitted', 'reviewed')`).run();
 db.prepare(`UPDATE store_bill_submissions SET status = 'completed' WHERE status = 'paid'`).run();
 

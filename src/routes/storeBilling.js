@@ -9,6 +9,7 @@ import { sendMailChecked, renderSystemTemplate, escapeHtml } from '../services/m
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { logAudit } from '../services/audit.js';
 import { sendXlsx } from '../services/xlsx.js';
+import { sanitizeEmailHtml, isBlankHtml } from '../utils/sanitizeEmailHtml.js';
 
 const router = Router();
 const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -48,6 +49,120 @@ function periodLabel(startDate, endDate) {
 function substitute(text, vars) {
   return String(text).replace(/\{\{(\w+)\}\}/g, (m, k) => (vars[k] != null ? vars[k] : m));
 }
+// ---------------------------------------------------------------------
+// "Payment is on the way" emails: rich-text templates (one can be the
+// default) with the invoice breakdown — invoice amount, processing fee,
+// total sent — available as a {{breakdown}} block and as separate fields.
+// ---------------------------------------------------------------------
+const usd = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const isoDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && !Number.isNaN(Date.parse(d + 'T00:00:00Z')) && new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) === d;
+const longDate = (d) => { try { return new Date(d + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }); } catch { return d || ''; } };
+
+// The address a store's billing emails go to: its portal login, else the
+// manager/owner email on the store record.
+function storeContactEmail(storeId) {
+  const s = db.prepare(`SELECT s.manager_email, s.owner_email, u.email AS login_email FROM stores s LEFT JOIN users u ON u.id = s.portal_user_id WHERE s.id = ?`).get(storeId);
+  return s?.login_email || s?.manager_email || s?.owner_email || null;
+}
+
+// Fields an admin can drop into a payment email template (Insert Field menu).
+export const PAYMENT_EMAIL_VARS = [
+  { key: 'breakdown', label: 'Invoice breakdown (invoice − fee = total)' },
+  { key: 'storeName', label: 'Store name' },
+  { key: 'amount', label: 'Total sent' },
+  { key: 'invoiceAmount', label: 'Invoice amount' },
+  { key: 'feePercent', label: 'Processing fee %' },
+  { key: 'feeAmount', label: 'Processing fee amount' },
+  { key: 'period', label: 'Billing period' },
+  { key: 'paymentDate', label: 'Date sent' },
+  { key: 'bankName', label: 'Bank name' },
+  { key: 'last4', label: 'Account last 4' },
+  { key: 'sentTo', label: 'Sent to (bank + last 4)' },
+];
+
+const DEFAULT_PAYMENT_SUBJECT = 'Payment sent — {{period}}';
+const DEFAULT_PAYMENT_BODY = `<p>Shalom {{storeName}},</p>
+<p>Your payment has been sent.</p>
+{{breakdown}}
+<table style="width:100%;border-collapse:collapse;margin:18px 0">
+<tr><td style="padding:6px 0;color:#8a7c63">Sent To</td><td style="padding:6px 0;text-align:right;font-weight:600">{{sentTo}}</td></tr>
+<tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Billing Period</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{period}}</td></tr>
+<tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Date Sent</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{paymentDate}}</td></tr>
+</table>
+<p>It may take up to <strong>4 business days</strong> to show up in your account.</p>`;
+
+// First use seeds one default template — from the org's customized
+// "Payment Sent" auto-email if they had one (so their wording carries over),
+// else the built-in text above.
+function ensurePaymentTemplates(orgId) {
+  const n = db.prepare('SELECT COUNT(*) c FROM payment_email_templates WHERE org_id = ?').get(orgId).c;
+  if (n) return;
+  const o = db.prepare(`SELECT subject, body FROM system_email_templates WHERE org_id = ? AND key = 'storeInvoicePaymentSent'`).get(orgId);
+  db.prepare(`INSERT INTO payment_email_templates (id, org_id, name, subject, body_html, is_default) VALUES (?,?,?,?,?,1)`)
+    .run(uuid(), orgId, 'Standard payment notice', o?.subject || DEFAULT_PAYMENT_SUBJECT, sanitizeEmailHtml(o?.body || DEFAULT_PAYMENT_BODY));
+}
+function listPaymentTemplates(orgId) {
+  ensurePaymentTemplates(orgId);
+  return db.prepare('SELECT * FROM payment_email_templates WHERE org_id = ? ORDER BY is_default DESC, name COLLATE NOCASE').all(orgId);
+}
+
+// invoice − fee = total as a small table. The fee row reflects what really
+// happened: the org's fee %, "Not deducted" when waived on this invoice, or
+// a generic "fee / adjustments" line when the amount actually sent isn't
+// exactly invoice − policy fee, so the arithmetic on the page always adds up.
+function buildBreakdown(bill, pct, sent) {
+  const invoice = money(bill.amount), total = money(sent);
+  const policyFee = bill.fee_waived ? 0 : money(invoice * pct / 100);
+  const matches = Math.abs(money(invoice - policyFee) - total) < 0.005;
+  const rows = [];
+  const td = (l, v, o = {}) => `<tr><td style="padding:7px 0;${o.top ? 'border-top:' + o.top + ';' : ''}color:${o.strong ? '#2b2118' : '#8a7c63'};${o.strong ? 'font-weight:700;' : ''}">${l}</td><td style="padding:7px 0;${o.top ? 'border-top:' + o.top + ';' : ''}text-align:right;font-weight:${o.strong ? 700 : 600};${o.size ? 'font-size:' + o.size + ';' : ''}">${v}</td></tr>`;
+  let feeText = usd(0);
+  if (invoice === total && !pct) { rows.push(td('Total sent', usd(total), { strong: true, size: '18px' })); }
+  else {
+    rows.push(td('Invoice amount', usd(invoice)));
+    if (bill.fee_waived && matches) { feeText = 'Not deducted'; rows.push(td(`Processing fee${pct ? ` (${pct}%)` : ''}`, 'Not deducted', { top: '1px solid #ece3d3' })); }
+    else if (matches) { feeText = usd(policyFee); rows.push(td(`Processing fee (${pct}%)`, '&minus;' + usd(policyFee), { top: '1px solid #ece3d3' })); }
+    else {
+      const diff = money(invoice - total);
+      if (Math.abs(diff) < 0.005) { feeText = 'Not deducted'; rows.push(td(`Processing fee${pct ? ` (${pct}%)` : ''}`, 'Not deducted', { top: '1px solid #ece3d3' })); }
+      else { feeText = usd(Math.abs(diff)); rows.push(td('Processing fee / adjustments', (diff >= 0 ? '&minus;' : '+') + usd(Math.abs(diff)), { top: '1px solid #ece3d3' })); }
+    }
+    rows.push(td('Total sent', usd(total), { top: '2px solid #c9a76a', strong: true, size: '18px' }));
+  }
+  return { html: `<table style="width:100%;border-collapse:collapse;margin:18px 0">${rows.join('')}</table>`, feeText };
+}
+
+function buildPaymentVars({ bill, storeName, paymentInfo, amount, date, pct, periodText }) {
+  const bd = buildBreakdown(bill, pct, amount);
+  const last4 = (paymentInfo?.account_number || '').slice(-4);
+  const bankName = paymentInfo?.bank_name || '';
+  const plain = {
+    storeName, period: periodText || 'N/A', paymentDate: date ? longDate(date) : '', bankName, last4,
+    sentTo: bankName ? `${bankName}${last4 ? ` (…${last4})` : ''}` : 'Not specified',
+    amount: usd(amount), total: usd(amount), invoiceAmount: usd(bill.amount),
+    feePercent: pct ? `${pct}%` : '0%', feeAmount: bd.feeText.replace(/&minus;/g, '-'), breakdown: '', noteBlock: '',
+  };
+  // Body vars are HTML-escaped (names are typed by stores) and carry the
+  // breakdown table; subject vars stay plain text.
+  const html = { ...plain, storeName: escapeHtml(storeName), period: escapeHtml(plain.period), bankName: escapeHtml(bankName), last4: escapeHtml(last4),
+    sentTo: bankName ? `${escapeHtml(bankName)}${last4 ? ` (&hellip;${escapeHtml(last4)})` : ''}` : 'Not specified', breakdown: bd.html };
+  return { vars: html, textVars: plain };
+}
+// {{vars}} left in what the admin sent (or typed by hand) get filled; a
+// {{breakdown}} the editor wrapped in its own <p> is unwrapped first so a
+// table doesn't end up nested inside a paragraph.
+function fillPaymentTemplate(text, vars) {
+  return substitute(String(text).replace(/<p[^>]*>\s*(\{\{breakdown\}\})\s*<\/p>/gi, '$1'), vars);
+}
+
+// Effective period dates for an invoice: the per-invoice correction if one
+// was made at payment time, else the billing period it was submitted for.
+function effectivePeriod(bill) {
+  if (bill.bill_period_start && bill.bill_period_end) return { start: bill.bill_period_start, end: bill.bill_period_end };
+  if (bill.period_start && bill.period_end) return { start: bill.period_start, end: bill.period_end };
+  return { start: null, end: null };
+}
+
 function randomCode8() {
   return String(Math.floor(Math.random() * 1e8)).padStart(8, '0');
 }
@@ -99,16 +214,25 @@ function maskPaymentInfo(row) {
 router.get('/my/status', async (req, res) => {
   if (req.user.role !== 'store') return res.status(403).json({ error: 'Store portal only' });
   const paymentInfo = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(req.user.store_id);
-  const invites = db.prepare(`SELECT bp.id, bp.start_date, bp.end_date, bp.created_at,
-      EXISTS(SELECT 1 FROM store_bill_submissions b WHERE b.billing_period_id = bp.id AND b.store_id = ?) AS submitted
-    FROM billing_period_invites bpi JOIN billing_periods bp ON bp.id = bpi.billing_period_id
-    WHERE bpi.store_id = ? ORDER BY bp.start_date DESC`).all(req.user.store_id, req.user.store_id);
+  // An admin who entered the portal can submit against ANY billing period,
+  // not only ones this store was invited to — they get every period, with
+  // `invited` so the form can still tell them which is which.
+  const invites = req.impersonatedBy
+    ? db.prepare(`SELECT bp.id, bp.start_date, bp.end_date, bp.created_at,
+        EXISTS(SELECT 1 FROM store_bill_submissions b WHERE b.billing_period_id = bp.id AND b.store_id = ?) AS submitted,
+        EXISTS(SELECT 1 FROM billing_period_invites i WHERE i.billing_period_id = bp.id AND i.store_id = ?) AS invited
+      FROM billing_periods bp WHERE bp.org_id = ? ORDER BY bp.start_date DESC`).all(req.user.store_id, req.user.store_id, req.user.org_id)
+    : db.prepare(`SELECT bp.id, bp.start_date, bp.end_date, bp.created_at,
+        EXISTS(SELECT 1 FROM store_bill_submissions b WHERE b.billing_period_id = bp.id AND b.store_id = ?) AS submitted, 1 AS invited
+      FROM billing_period_invites bpi JOIN billing_periods bp ON bp.id = bpi.billing_period_id
+      WHERE bpi.store_id = ? ORDER BY bp.start_date DESC`).all(req.user.store_id, req.user.store_id);
   const settings = Object.fromEntries(db.prepare(`SELECT key, value FROM settings WHERE org_id = ? AND key IN ('store_billing_tax_id','store_billing_legal_name')`).all(req.user.org_id).map(r => [r.key, r.value]));
   res.json({
     hasPaymentInfo: !!paymentInfo,
     paymentInfo: maskPaymentInfo(paymentInfo),
-    invoiceVerifiedThisSession: hasVerifiedThisSession(req.user.store_id, req.tokenIat),
-    periods: invites.map(p => ({ id: p.id, start_date: p.start_date, end_date: p.end_date, label: periodLabel(p.start_date, p.end_date), submitted: !!p.submitted })),
+    invoiceVerifiedThisSession: !!req.impersonatedBy || hasVerifiedThisSession(req.user.store_id, req.tokenIat),
+    impersonating: !!req.impersonatedBy,
+    periods: invites.map(p => ({ id: p.id, start_date: p.start_date, end_date: p.end_date, label: periodLabel(p.start_date, p.end_date), submitted: !!p.submitted, invited: !!p.invited })),
     taxId: settings.store_billing_tax_id || '',
     legalName: settings.store_billing_legal_name || '',
   });
@@ -142,36 +266,57 @@ router.post('/verify/confirm', (req, res) => {
 router.post('/payment-info', (req, res) => {
   if (req.user.role !== 'store') return res.status(403).json({ error: 'Store portal only' });
   const b = req.body || {};
-  const required = ['bank_name', 'name_on_account', 'address', 'city', 'state', 'zip', 'contact_name', 'contact_cell', 'account_number', 'account_number_confirm', 'routing_number'];
-  for (const f of required) {
-    if (!String(b[f] || '').trim()) return res.status(400).json({ error: `${f.replace(/_/g, ' ')} is required` });
+  // An admin who entered this portal bypasses everything in this section:
+  // no email verification, no required fields, no format checks. Anything
+  // left blank keeps what is already on file, so an admin can fix one field
+  // (say the routing number) without re-typing the rest. The one guard that
+  // stays: if both account-number boxes are filled and differ, that is a
+  // typo, not something to bypass.
+  const adminBypass = !!req.impersonatedBy;
+  const existingRow = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(req.user.store_id);
+  if (!adminBypass) {
+    const required = ['bank_name', 'name_on_account', 'address', 'city', 'state', 'zip', 'contact_name', 'contact_cell', 'account_number', 'account_number_confirm', 'routing_number'];
+    for (const f of required) {
+      if (!String(b[f] || '').trim()) return res.status(400).json({ error: `${f.replace(/_/g, ' ')} is required` });
+    }
+    if (!isValidPhone(b.contact_cell)) return res.status(400).json({ error: 'Enter a valid phone number for Contact Cell (10 digits).' });
+    if (String(b.account_number).trim() !== String(b.account_number_confirm).trim()) return res.status(400).json({ error: 'Account numbers do not match.' });
+    if (!/^\d{4,17}$/.test(b.account_number)) return res.status(400).json({ error: 'Enter a valid account number (digits only).' });
+    if (!/^\d{9}$/.test(b.routing_number)) return res.status(400).json({ error: 'Routing number must be exactly 9 digits.' });
+    // Spent only once every other validation has already passed — a typo'd
+    // field (e.g. mismatched account numbers) must be fixable by resubmitting
+    // the SAME form without burning the verification code and forcing the
+    // whole email-code dance over again for a one-character fix.
+    if (!useVerification(req.user.store_id, 'payment_info', b.verificationId)) {
+      return res.status(400).json({ error: 'Please verify your email before saving payment information.', code: 'VERIFICATION_REQUIRED' });
+    }
+  } else if (String(b.account_number || '').trim() && String(b.account_number_confirm || '').trim() && String(b.account_number).trim() !== String(b.account_number_confirm).trim()) {
+    return res.status(400).json({ error: 'Account numbers do not match.' });
   }
-  if (!isValidPhone(b.contact_cell)) return res.status(400).json({ error: 'Enter a valid phone number for Contact Cell (10 digits).' });
-  if (String(b.account_number).trim() !== String(b.account_number_confirm).trim()) return res.status(400).json({ error: 'Account numbers do not match.' });
-  if (!/^\d{4,17}$/.test(b.account_number)) return res.status(400).json({ error: 'Enter a valid account number (digits only).' });
-  if (!/^\d{9}$/.test(b.routing_number)) return res.status(400).json({ error: 'Routing number must be exactly 9 digits.' });
-  // Spent only once every other validation has already passed — a typo'd
-  // field (e.g. mismatched account numbers) must be fixable by resubmitting
-  // the SAME form without burning the verification code and forcing the
-  // whole email-code dance over again for a one-character fix.
-  if (!useVerification(req.user.store_id, 'payment_info', b.verificationId)) {
-    return res.status(400).json({ error: 'Please verify your email before saving payment information.', code: 'VERIFICATION_REQUIRED' });
-  }
-  const existing = db.prepare('SELECT id FROM store_payment_info WHERE store_id = ?').get(req.user.store_id);
+  const pick = (f) => { const v = String(b[f] ?? '').trim(); return v || (adminBypass ? (existingRow?.[f] ?? '') : v); };
+  const contactCell = String(b.contact_cell || '').trim();
+  const row = {
+    bank_name: pick('bank_name'), name_on_account: pick('name_on_account'), address: pick('address'), city: pick('city'), state: pick('state'), zip: pick('zip'),
+    contact_name: pick('contact_name'), account_number: pick('account_number'), routing_number: pick('routing_number'),
+    // normalised when it parses as a phone; an admin's odd value is kept as typed
+    contact_cell: contactCell ? (isValidPhone(contactCell) ? normalizePhone(contactCell) : contactCell) : (existingRow?.contact_cell ?? ''),
+    place_id: b.place_id || (adminBypass ? existingRow?.place_id : null) || null,
+  };
+  const existing = existingRow ? { id: existingRow.id } : null;
   db.prepare(`INSERT INTO store_payment_info (id, org_id, store_id, bank_name, name_on_account, address, city, state, zip, place_id, contact_name, contact_cell, account_number, routing_number)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(store_id) DO UPDATE SET bank_name=excluded.bank_name, name_on_account=excluded.name_on_account, address=excluded.address,
       city=excluded.city, state=excluded.state, zip=excluded.zip, place_id=excluded.place_id, contact_name=excluded.contact_name,
       contact_cell=excluded.contact_cell, account_number=excluded.account_number, routing_number=excluded.routing_number, updated_at=datetime('now')`)
-    .run(existing?.id || uuid(), req.user.org_id, req.user.store_id, b.bank_name.trim(), b.name_on_account.trim(), b.address.trim(), b.city.trim(), b.state.trim(), b.zip.trim(),
-      b.place_id || null, b.contact_name.trim(), normalizePhone(b.contact_cell), b.account_number.trim(), b.routing_number.trim());
-  logAudit(req.user.org_id, req.user.id, existing ? 'update_payment_info' : 'create_payment_info', 'store', req.user.store_id, null, { bank_name: b.bank_name }, req.ip);
+    .run(existing?.id || uuid(), req.user.org_id, req.user.store_id, row.bank_name, row.name_on_account, row.address, row.city, row.state, row.zip,
+      row.place_id, row.contact_name, row.contact_cell, row.account_number, row.routing_number);
+  logAudit(req.user.org_id, req.user.id, existing ? 'update_payment_info' : 'create_payment_info', 'store', req.user.store_id, null, { bank_name: row.bank_name, ...(adminBypass ? { entered_by_admin: req.impersonatedBy } : {}) }, req.ip);
   res.json({ ok: true });
 });
 
 router.get('/my/invoices', (req, res) => {
   if (req.user.role !== 'store') return res.status(403).json({ error: 'Store portal only' });
-  const bills = db.prepare(`SELECT b.*, bp.start_date AS period_start, bp.end_date AS period_end FROM store_bill_submissions b
+  const bills = db.prepare(`SELECT b.*, COALESCE(b.bill_period_start, bp.start_date) AS period_start, COALESCE(b.bill_period_end, bp.end_date) AS period_end FROM store_bill_submissions b
     LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id WHERE b.store_id = ? ORDER BY b.submitted_at DESC`).all(req.user.store_id);
   // Internal-only columns never go to the store: the admin's private note, the
   // approval-for-payment bookkeeping, and the fee-override record.
@@ -186,26 +331,41 @@ router.get('/my/invoices', (req, res) => {
 router.post('/my/invoices', invoiceUpload.single('file'), async (req, res) => {
   if (req.user.role !== 'store') return res.status(403).json({ error: 'Store portal only' });
   const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(req.user.store_id);
+  // An admin who entered this portal ("Enter Portal") bypasses every gate in
+  // the payment section: payment info on file, email verification, the
+  // attachment, the period-confirmation checkbox, being invited to the
+  // period, and the one-invoice-per-period limit. Only the amount is still
+  // required (an invoice with no amount means nothing anywhere else), and
+  // the invoice can be filed against any billing period or none at all.
+  const adminBypass = !!req.impersonatedBy;
   const paymentInfo = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(req.user.store_id);
-  if (!paymentInfo) return res.status(400).json({ error: 'Please complete your payment information before submitting an invoice.', code: 'PAYMENT_INFO_REQUIRED' });
+  if (!paymentInfo && !adminBypass) return res.status(400).json({ error: 'Please complete your payment information before submitting an invoice.', code: 'PAYMENT_INFO_REQUIRED' });
   const b = req.body || {};
-  if (!hasVerifiedThisSession(req.user.store_id, req.tokenIat) && !useVerification(req.user.store_id, 'invoice_submit', b.verificationId)) {
+  if (!adminBypass && !hasVerifiedThisSession(req.user.store_id, req.tokenIat) && !useVerification(req.user.store_id, 'invoice_submit', b.verificationId)) {
     return res.status(400).json({ error: 'Please verify your email before submitting.', code: 'VERIFICATION_REQUIRED' });
   }
   const amountNum = +b.amount;
   if (!amountNum || amountNum <= 0) return res.status(400).json({ error: 'A valid amount is required' });
-  if (!['1', 'true', true].includes(b.period_confirmed)) return res.status(400).json({ error: 'Please confirm this invoice matches the billing period.' });
+  if (!adminBypass && !['1', 'true', true].includes(b.period_confirmed)) return res.status(400).json({ error: 'Please confirm this invoice matches the billing period.' });
   // A store can only submit against a billing period it was actually
   // invited to AND hasn't already submitted for — no more ad-hoc
   // submissions with no period at all. Without an open period to submit
   // against, the store portal's own "Submit an Invoice" button is hidden
   // entirely (see store-portal/billing.html), but this is the real gate —
   // never trust the client not to have shown the form anyway.
-  if (!b.billing_period_id) return res.status(400).json({ error: 'There is no open billing period for you to submit against right now.', code: 'NO_OPEN_PERIOD' });
-  const billingPeriod = db.prepare(`SELECT bp.* FROM billing_periods bp JOIN billing_period_invites bpi ON bpi.billing_period_id = bp.id WHERE bp.id = ? AND bpi.store_id = ?`).get(b.billing_period_id, req.user.store_id);
-  if (!billingPeriod) return res.status(400).json({ error: 'Billing period not found for this store.' });
-  const alreadySubmitted = db.prepare(`SELECT 1 FROM store_bill_submissions WHERE billing_period_id = ? AND store_id = ?`).get(billingPeriod.id, req.user.store_id);
-  if (alreadySubmitted) return res.status(400).json({ error: 'An invoice has already been submitted for this billing period.' });
+  let billingPeriod = null;
+  if (adminBypass) {
+    if (b.billing_period_id) {
+      billingPeriod = db.prepare('SELECT * FROM billing_periods WHERE id = ? AND org_id = ?').get(b.billing_period_id, req.user.org_id);
+      if (!billingPeriod) return res.status(400).json({ error: 'Billing period not found.' });
+    }
+  } else {
+    if (!b.billing_period_id) return res.status(400).json({ error: 'There is no open billing period for you to submit against right now.', code: 'NO_OPEN_PERIOD' });
+    billingPeriod = db.prepare(`SELECT bp.* FROM billing_periods bp JOIN billing_period_invites bpi ON bpi.billing_period_id = bp.id WHERE bp.id = ? AND bpi.store_id = ?`).get(b.billing_period_id, req.user.store_id);
+    if (!billingPeriod) return res.status(400).json({ error: 'Billing period not found for this store.' });
+    const alreadySubmitted = db.prepare(`SELECT 1 FROM store_bill_submissions WHERE billing_period_id = ? AND store_id = ?`).get(billingPeriod.id, req.user.store_id);
+    if (alreadySubmitted) return res.status(400).json({ error: 'An invoice has already been submitted for this billing period.' });
+  }
   const id = uuid();
   let filePath = null, fileName = null;
   if (req.file) {
@@ -213,10 +373,10 @@ router.post('/my/invoices', invoiceUpload.single('file'), async (req, res) => {
     const safeName = `${id}-${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     writeFileSync(join(BILLS_DIR, safeName), req.file.buffer);
     filePath = safeName;
-  } else {
+  } else if (!adminBypass) {
     return res.status(400).json({ error: 'Please attach your invoice (image, PDF, Excel, or CSV).' });
   }
-  const period = billingPeriod ? periodLabel(billingPeriod.start_date, billingPeriod.end_date) : '';
+  const period = billingPeriod ? periodLabel(billingPeriod.start_date, billingPeriod.end_date) : (adminBypass ? String(b.period_label || '').trim().slice(0, 100) : '');
   db.prepare(`INSERT INTO store_bill_submissions (id, org_id, store_id, billing_period_id, period, period_confirmed, amount, description, file_path, file_name, status)
     VALUES (?,?,?,?,?,1,?,?,?,?,'pending')`)
     .run(id, req.user.org_id, store.id, billingPeriod?.id || null, period, amountNum, b.description || '', filePath, fileName);
@@ -234,7 +394,7 @@ router.post('/my/invoices', invoiceUpload.single('file'), async (req, res) => {
       await sendMailChecked(req.user.org_id, to, toAdmin.subject, toAdmin.body, { relatedEntityType: 'store', relatedEntityId: store.id });
     }
   }
-  logAudit(req.user.org_id, req.user.id, 'submit_invoice', 'store', store.id, null, { amount: amountNum, period }, req.ip);
+  logAudit(req.user.org_id, req.user.id, 'submit_invoice', 'store', store.id, null, { amount: amountNum, period, ...(adminBypass ? { entered_by_admin: req.impersonatedBy, has_file: !!filePath } : {}) }, req.ip);
   res.status(201).json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(id) });
 });
 
@@ -264,8 +424,11 @@ router.post('/periods', requirePermission('store_billing', 'can_edit'), async (r
   if (!email_subject || !email_body) return res.status(400).json({ error: 'Email subject and body are required' });
   if (!Array.isArray(store_ids) || !store_ids.length) return res.status(400).json({ error: 'Select at least one store' });
   const id = uuid();
+  // rich text from the composer — cleaned once here, before it's stored and sent
+  const cleanBody = sanitizeEmailHtml(email_body);
+  if (isBlankHtml(cleanBody)) return res.status(400).json({ error: 'Email subject and body are required' });
   db.prepare(`INSERT INTO billing_periods (id, org_id, start_date, end_date, email_subject, email_body, created_by) VALUES (?,?,?,?,?,?,?)`)
-    .run(id, req.user.org_id, start_date, end_date, email_subject, email_body, req.user.id);
+    .run(id, req.user.org_id, start_date, end_date, email_subject, cleanBody, req.user.id);
   let sent = 0, failed = 0, skipped = 0;
   const label = periodLabel(start_date, end_date);
   for (const storeId of store_ids) {
@@ -273,7 +436,7 @@ router.post('/periods', requirePermission('store_billing', 'can_edit'), async (r
     if (!store || !store.login_email) { skipped++; continue; }
     const portalUrl = `${process.env.APP_URL || ''}/store-portal/billing`;
     const subject = substitute(email_subject, { storeName: store.name, startDate: start_date, endDate: end_date, period: label, portalUrl });
-    const body = substitute(email_body, { storeName: store.name, startDate: start_date, endDate: end_date, period: label, portalUrl });
+    const body = substitute(cleanBody, { storeName: escapeHtml(store.name), startDate: start_date, endDate: end_date, period: label, portalUrl });
     const { emailError } = await sendMailChecked(req.user.org_id, store.login_email, subject, body, { relatedEntityType: 'store', relatedEntityId: store.id, sentBy: req.user.id });
     db.prepare(`INSERT INTO billing_period_invites (id, billing_period_id, store_id, email_status) VALUES (?,?,?,?)`)
       .run(uuid(), id, store.id, emailError ? 'failed' : 'sent');
@@ -315,7 +478,7 @@ router.get('/invoices', requirePermission('store_billing'), (req, res) => {
   if (status) { where += ' AND b.status = ?'; params.push(status); }
   if (store_id) { where += ' AND b.store_id = ?'; params.push(store_id); }
   const pct = feePercent(req.user.org_id);
-  const bills = db.prepare(`SELECT b.*, s.name AS store_name, bp.start_date AS period_start, bp.end_date AS period_end, ${approverNameSql}
+  const bills = db.prepare(`SELECT b.*, s.name AS store_name, COALESCE(b.bill_period_start, bp.start_date) AS period_start, COALESCE(b.bill_period_end, bp.end_date) AS period_end, ${approverNameSql}
     FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id
     LEFT JOIN users u ON u.id = b.approved_by
     WHERE ${where} ORDER BY b.submitted_at DESC`).all(...params);
@@ -347,9 +510,9 @@ router.get('/invoices/summary', requirePermission('store_billing'), (req, res) =
 });
 
 router.get('/invoices/:id', requirePermission('store_billing'), (req, res) => {
-  const bill = db.prepare(`SELECT b.*, s.name AS store_name, ${approverNameSql},
+  const bill = db.prepare(`SELECT b.*, s.name AS store_name, COALESCE(b.bill_period_start, bp.start_date) AS period_start, COALESCE(b.bill_period_end, bp.end_date) AS period_end, ${approverNameSql},
       TRIM(COALESCE(w.first_name,'')||' '||COALESCE(w.last_name,'')) AS fee_waived_by_name
-    FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id
+    FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id
     LEFT JOIN users u ON u.id = b.approved_by LEFT JOIN users w ON w.id = b.fee_waived_by
     WHERE b.id = ? AND b.org_id = ?`).get(req.params.id, req.user.org_id);
   if (!bill) return res.status(404).json({ error: 'Not found' });
@@ -461,34 +624,174 @@ router.post('/invoices/:id/reject', requirePermission('store_billing', 'can_edit
   res.json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(bill.id) });
 });
 
-router.post('/invoices/:id/complete', requirePermission('store_billing', 'can_edit'), async (req, res) => {
-  const bill = db.prepare(`SELECT b.*, s.name AS store_name FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id WHERE b.id = ? AND b.org_id = ?`).get(req.params.id, req.user.org_id);
-  if (!bill) return res.status(404).json({ error: 'Not found' });
-  if (bill.status === 'completed') return res.status(400).json({ error: 'Already marked completed.' });
+// Everything the Mark Payment Sent popup and the send itself need to know
+// about an invoice: effective billing period, fee policy, bank on file.
+function paymentContext(orgId, billId) {
+  const bill = db.prepare(`SELECT b.*, s.name AS store_name, COALESCE(b.bill_period_start, bp.start_date) AS period_start, COALESCE(b.bill_period_end, bp.end_date) AS period_end
+    FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id
+    WHERE b.id = ? AND b.org_id = ?`).get(billId, orgId);
+  if (!bill) return null;
   const paymentInfo = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(bill.store_id);
-  if (!paymentInfo) return res.status(400).json({ error: 'This store has no payment information on file.' });
-  const { payment_amount, payment_date, payment_note, admin_notes } = req.body || {};
+  return { bill, paymentInfo, pct: feePercent(orgId) };
+}
+// A period correction sent with the payment: both dates, valid, end not
+// before start. Returns { start, end } or { error }; null when neither sent.
+function parsePeriodOverride(start, end) {
+  if (!start && !end) return null;
+  if (!isoDate(start) || !isoDate(end)) return { error: 'Enter both billing period dates.' };
+  if (end < start) return { error: 'The billing period end date cannot be before its start date.' };
+  return { start, end };
+}
+function previewPayload(ctx, body, orgId) {
+  const { bill, paymentInfo, pct } = ctx;
+  const amount = Number(body.payment_amount);
+  const ov = parsePeriodOverride(body.period_start, body.period_end);
+  const eff = ov && !ov.error ? ov : effectivePeriod(bill);
+  const periodText = eff.start ? periodLabel(eff.start, eff.end) : (bill.period || 'N/A');
+  const sentAmount = Number.isFinite(amount) && amount > 0 ? amount : withPayable(bill, pct).payable_amount;
+  const { vars, textVars } = buildPaymentVars({ bill: withPayable(bill, pct), storeName: bill.store_name, paymentInfo, amount: sentAmount, date: isoDate(body.payment_date) ? body.payment_date : new Date().toISOString().slice(0, 10), pct, periodText });
+  const templates = listPaymentTemplates(orgId);
+  const tpl = (body.template_id && templates.find(t => t.id === body.template_id)) || templates.find(t => t.is_default) || templates[0];
+  return {
+    template_id: tpl.id, subject: fillPaymentTemplate(tpl.subject, textVars), body: fillPaymentTemplate(sanitizeEmailHtml(tpl.body_html), vars),
+    breakdown: vars.breakdown, period: periodText, vars, textVars,
+  };
+}
+
+// The popup calls this whenever the template, amount, date or period
+// changes, so the admin edits the REAL email (breakdown table filled in),
+// not a pile of {{placeholders}}.
+router.post('/invoices/:id/payment-email-preview', requirePermission('store_billing'), (req, res) => {
+  const ctx = paymentContext(req.user.org_id, req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Not found' });
+  const { vars, textVars, ...out } = previewPayload(ctx, req.body || {}, req.user.org_id);
+  res.json({ ...out, store_email: storeContactEmail(ctx.bill.store_id), has_payment_info: !!ctx.paymentInfo });
+});
+
+router.post('/invoices/:id/complete', requirePermission('store_billing', 'can_edit'), async (req, res) => {
+  const ctx = paymentContext(req.user.org_id, req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Not found' });
+  const { bill, paymentInfo, pct } = ctx;
+  if (bill.status === 'completed') return res.status(400).json({ error: 'Already marked completed.' });
+  // No bank on file is no longer a blocker: an admin can record a payment
+  // that went out another way (check, Zelle, ...). The bank columns stay
+  // blank and the email says "Not specified" for that row.
+  const { payment_amount, payment_date, payment_note, admin_notes, period_start, period_end, email_subject, email_body, send_email } = req.body || {};
   const amountNum = +payment_amount;
   if (!amountNum || amountNum <= 0) return res.status(400).json({ error: 'A valid payment amount is required' });
   if (!payment_date) return res.status(400).json({ error: 'A payment date is required' });
-  const last4 = (paymentInfo.account_number || '').slice(-4);
+  const ov = parsePeriodOverride(period_start, period_end);
+  if (ov?.error) return res.status(400).json({ error: ov.error });
+  const last4 = (paymentInfo?.account_number || '').slice(-4);
+  const oldPeriod = effectivePeriod(bill);
+  const changedPeriod = ov && (ov.start !== oldPeriod.start || ov.end !== oldPeriod.end);
+  const periodText = ov ? periodLabel(ov.start, ov.end) : (bill.period || 'N/A');
   db.prepare(`UPDATE store_bill_submissions SET status = 'completed', payment_amount = ?, payment_bank_name = ?, payment_account_last4 = ?, payment_sent_date = ?,
       payment_note = ?, admin_notes = ?, reviewed_at = datetime('now') WHERE id = ?`)
-    .run(amountNum, paymentInfo.bank_name, last4, payment_date, payment_note || null, admin_notes || null, bill.id);
-  const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(bill.store_id);
-  const storeUser = store?.portal_user_id ? db.prepare('SELECT email FROM users WHERE id = ?').get(store.portal_user_id) : null;
-  if (storeUser?.email) {
-    const amountFmt = '$' + amountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    // payment_note is admin-written but store-visible (it goes out in this
-    // email) — escaped since it's free text, same as every other
-    // user-typed field dropped into an email body elsewhere in this app.
-    // admin_notes never leaves this response/the admin UI.
-    const noteBlock = payment_note ? `<p style="color:#8a7c63;font-size:13.5px">${escapeHtml(payment_note).replace(/\n/g, '<br>')}</p>` : '';
-    const tmpl = renderSystemTemplate(req.user.org_id, 'storeInvoicePaymentSent', { storeName: bill.store_name, amount: amountFmt, bankName: paymentInfo.bank_name, last4, period: bill.period || 'N/A', noteBlock });
-    await sendMailChecked(req.user.org_id, storeUser.email, tmpl.subject, tmpl.body, { replyTo: tmpl.replyTo, relatedEntityType: 'store', relatedEntityId: bill.store_id, sentBy: req.user.id });
+    .run(amountNum, paymentInfo?.bank_name || null, last4, payment_date, payment_note || null, admin_notes || null, bill.id);
+  if (changedPeriod) db.prepare('UPDATE store_bill_submissions SET bill_period_start = ?, bill_period_end = ?, period = ? WHERE id = ?').run(ov.start, ov.end, periodText, bill.id);
+
+  const storeTo = storeContactEmail(bill.store_id);
+  const email = { sent: false, to: storeTo, error: null, skipped: null };
+  if (send_email === false || send_email === 'false' || send_email === 0) email.skipped = 'turned off';
+  else if (!storeTo) email.skipped = 'no email on file';
+  else {
+    const { vars, textVars } = buildPaymentVars({ bill: withPayable(bill, pct), storeName: bill.store_name, paymentInfo, amount: amountNum, date: payment_date, pct, periodText });
+    let subject, body;
+    const tpl = listPaymentTemplates(req.user.org_id).find(t => t.is_default);
+    if (email_body && !isBlankHtml(email_body)) {
+      // The admin's final, rich-text version from the popup (any {{fields}}
+      // still in it are filled; the HTML is cleaned first).
+      subject = fillPaymentTemplate(email_subject || tpl?.subject || DEFAULT_PAYMENT_SUBJECT, textVars);
+      body = fillPaymentTemplate(sanitizeEmailHtml(email_body), vars);
+    } else {
+      // Nothing composed (an API caller, say): use the DEFAULT template, plus
+      // the optional plain note as a closing paragraph.
+      const noteBlock = payment_note ? `<p style="color:#8a7c63;font-size:13.5px">${escapeHtml(payment_note).replace(/\n/g, '<br>')}</p>` : '';
+      subject = fillPaymentTemplate(tpl.subject, textVars);
+      body = fillPaymentTemplate(sanitizeEmailHtml(tpl.body_html), vars) + noteBlock;
+    }
+    const r = await sendMailChecked(req.user.org_id, storeTo, subject, body, { relatedEntityType: 'store', relatedEntityId: bill.store_id, sentBy: req.user.id });
+    email.error = r?.emailError || null; email.sent = !r?.emailError;
   }
-  logAudit(req.user.org_id, req.user.id, 'complete_invoice_payment', 'store', bill.store_id, { status: bill.status }, { status: 'completed', payment_amount: amountNum, payment_date }, req.ip);
-  res.json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(bill.id) });
+  logAudit(req.user.org_id, req.user.id, 'complete_invoice_payment', 'store', bill.store_id, { status: bill.status, ...(changedPeriod ? { period: oldPeriod } : {}) },
+    { status: 'completed', payment_amount: amountNum, payment_date, ...(changedPeriod ? { period: { start: ov.start, end: ov.end } } : {}), email_sent: email.sent, invoice_id: bill.id }, req.ip);
+  res.json({ bill: db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(bill.id), email });
+});
+
+// Takes a recorded payment back: the invoice returns to Pending (so it can
+// be paid again correctly) and the payment fields are cleared. The invoice,
+// its approval and its attachment are untouched; any email already sent to
+// the store can't be unsent. Same tight roster as deleting an invoice —
+// this removes a financial record.
+router.delete('/invoices/:id/payment', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  if (!['super_admin', 'org_admin'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
+  const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!bill) return res.status(404).json({ error: 'Not found' });
+  if (bill.status !== 'completed') return res.status(400).json({ error: 'This invoice has no recorded payment.' });
+  db.prepare(`UPDATE store_bill_submissions SET status = 'pending', payment_amount = NULL, payment_bank_name = NULL, payment_account_last4 = NULL,
+      payment_sent_date = NULL, payment_note = NULL, reviewed_at = NULL WHERE id = ?`).run(bill.id);
+  logAudit(req.user.org_id, req.user.id, 'delete_invoice_payment', 'store', bill.store_id,
+    { invoice_id: bill.id, payment_amount: bill.payment_amount, payment_sent_date: bill.payment_sent_date, bank: bill.payment_bank_name, last4: bill.payment_account_last4 }, { status: 'pending' }, req.ip);
+  const row = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ?').get(bill.id);
+  res.json({ bill: withPayable(row, feePercent(req.user.org_id)) });
+});
+
+// ---------------------------------------------------------------------
+// Payment email templates (rich text). One is the default; the Mark
+// Payment Sent popup starts from it.
+// ---------------------------------------------------------------------
+router.get('/payment-email-templates', requirePermission('store_billing'), (req, res) => {
+  res.json({ templates: listPaymentTemplates(req.user.org_id), vars: PAYMENT_EMAIL_VARS });
+});
+function templateFields(b, partial = false) {
+  const out = {};
+  if (!partial || b.name !== undefined) { out.name = String(b.name || '').trim(); if (!out.name) return { error: 'A template name is required.' }; }
+  if (!partial || b.subject !== undefined) { out.subject = String(b.subject || '').trim(); if (!out.subject) return { error: 'An email subject is required.' }; }
+  if (!partial || b.body_html !== undefined) { out.body_html = sanitizeEmailHtml(b.body_html); if (isBlankHtml(out.body_html)) return { error: 'The email body cannot be empty.' }; }
+  return out;
+}
+const setOnlyDefault = (orgId, id) => db.transaction(() => {
+  db.prepare('UPDATE payment_email_templates SET is_default = 0 WHERE org_id = ? AND id != ?').run(orgId, id);
+  db.prepare('UPDATE payment_email_templates SET is_default = 1 WHERE id = ? AND org_id = ?').run(id, orgId);
+})();
+router.post('/payment-email-templates', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  ensurePaymentTemplates(req.user.org_id);
+  const f = templateFields(req.body || {});
+  if (f.error) return res.status(400).json({ error: f.error });
+  const id = uuid();
+  db.prepare('INSERT INTO payment_email_templates (id, org_id, name, subject, body_html, is_default, created_by) VALUES (?,?,?,?,?,0,?)').run(id, req.user.org_id, f.name, f.subject, f.body_html, req.user.id);
+  if (req.body?.is_default) setOnlyDefault(req.user.org_id, id);
+  logAudit(req.user.org_id, req.user.id, 'create', 'payment_email_template', id, null, { name: f.name, is_default: !!req.body?.is_default }, req.ip);
+  res.status(201).json({ template: db.prepare('SELECT * FROM payment_email_templates WHERE id = ?').get(id) });
+});
+router.put('/payment-email-templates/:id', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const t = db.prepare('SELECT * FROM payment_email_templates WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  const f = templateFields(b, true);
+  if (f.error) return res.status(400).json({ error: f.error });
+  if (b.is_default === false && t.is_default) return res.status(400).json({ error: 'Choose another template as the default instead — there must always be one.' });
+  const next = { name: f.name ?? t.name, subject: f.subject ?? t.subject, body_html: f.body_html ?? t.body_html };
+  db.prepare(`UPDATE payment_email_templates SET name = ?, subject = ?, body_html = ?, updated_at = datetime('now') WHERE id = ?`).run(next.name, next.subject, next.body_html, t.id);
+  if (b.is_default) setOnlyDefault(req.user.org_id, t.id);
+  logAudit(req.user.org_id, req.user.id, 'update', 'payment_email_template', t.id, { name: t.name }, { name: next.name, is_default: !!b.is_default }, req.ip);
+  res.json({ template: db.prepare('SELECT * FROM payment_email_templates WHERE id = ?').get(t.id) });
+});
+router.post('/payment-email-templates/:id/default', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const t = db.prepare('SELECT * FROM payment_email_templates WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  setOnlyDefault(req.user.org_id, t.id);
+  logAudit(req.user.org_id, req.user.id, 'set_default', 'payment_email_template', t.id, null, { name: t.name }, req.ip);
+  res.json({ templates: listPaymentTemplates(req.user.org_id) });
+});
+router.delete('/payment-email-templates/:id', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const t = db.prepare('SELECT * FROM payment_email_templates WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  if (t.is_default) return res.status(400).json({ error: 'This is the default template. Set another template as the default first, then delete this one.' });
+  db.prepare('DELETE FROM payment_email_templates WHERE id = ?').run(t.id);
+  logAudit(req.user.org_id, req.user.id, 'delete', 'payment_email_template', t.id, { name: t.name }, null, req.ip);
+  res.json({ ok: true });
 });
 
 router.get('/invoices/:id/file', requirePermission('store_billing'), (req, res) => {

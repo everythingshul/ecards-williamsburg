@@ -356,6 +356,35 @@ period it was invited to (store portal Billing tab, email-code verified); admin 
   super_admin/org_admin only (like the per-store Reveal), audited as `export_payment_info`.
 - Internal columns (`admin_notes`, approval and fee-override fields) are stripped from the
   store-facing `GET /my/invoices`.
+- **Mark Payment Sent** (`openStoreCompletePayment(id)`): amount, date, **billing period dates** (a
+  per-invoice correction in `bill_period_start/_end`, read everywhere as `COALESCE(b.bill_period_*,
+  bp.*)`; the shared `billing_periods` row is never touched; `period` text is rewritten), an
+  "email the store" checkbox, a **template picker**, and a rich-text message that already contains
+  the real figures (`POST /invoices/:id/payment-email-preview`; auto-refreshes on amount/date/period
+  unless the admin edited it, then a hint offers Reload). `POST /complete` takes
+  `period_start/period_end`, `email_subject/email_body`, `send_email` and returns
+  `email: {sent,to,error,skipped}`; no bank on file no longer blocks it. **Delete Payment**
+  (`DELETE /invoices/:id/payment`, super_admin/org_admin, audited) returns a completed invoice to
+  Pending and clears payment fields (approval, fee override, attachment, corrected period stay).
+- **Payment emails** are rich-text templates (`payment_email_templates`, partial unique index = one
+  default per org; Store Billing > Payment Emails tab). Fields: breakdown, storeName, amount,
+  invoiceAmount, feePercent, feeAmount, period, paymentDate, bankName, last4, sentTo. The
+  **breakdown** table (`buildBreakdown`) shows invoice − fee = total and says "Not deducted" /
+  "Processing fee / adjustments" when the amount sent isn't invoice − policy fee. The old
+  `storeInvoicePaymentSent` auto-email is gone from `SYSTEM_EMAIL_TEMPLATES`; a customized override
+  row is only read once, to seed the first template.
+- **Rich text, never HTML**: `createRichTextEditor(id, html, { fields })` turns `{{key}}` into
+  non-editable pills (`.rte-field`) and adds an Insert-field menu; `renderFieldChips()` renders the
+  same pills read-only. Used by Issue Billing Email, payment templates and Settings > Auto Emails.
+  `utils/sanitizeEmailHtml.js` cleans saved/sent rich text (templates, system email templates,
+  billing-period body, composed payment email).
+- **Enter Portal admin bypass**: the impersonation redeem (`POST /auth/impersonate/:token`) signs the
+  JWT with `impersonatedBy`; `auth()` sets `req.impersonatedBy` only while that admin is still an
+  active internal user. In the store billing routes that skips email verification, required payment
+  fields (blank fields keep what is on file), the attachment, the confirmation checkbox, the
+  invited-to-period and one-invoice-per-period rules (any period or none; amount still required);
+  `/my/status` returns every period with an `invited` flag and `impersonating`. A store's own login
+  is unchanged. `closeModal()` now closes the topmost stacked modal (`closeAllModals()` closes all).
 
 ## Address autocomplete (Google Places)
 `attachPlacesAutocomplete(inputId, fields)` in app.js is a from-scratch
