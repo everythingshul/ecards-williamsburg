@@ -173,7 +173,14 @@ router.get('/my/invoices', (req, res) => {
   if (req.user.role !== 'store') return res.status(403).json({ error: 'Store portal only' });
   const bills = db.prepare(`SELECT b.*, bp.start_date AS period_start, bp.end_date AS period_end FROM store_bill_submissions b
     LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id WHERE b.store_id = ? ORDER BY b.submitted_at DESC`).all(req.user.store_id);
-  res.json({ bills: bills.map(b => ({ ...b, period_label: b.period_start ? periodLabel(b.period_start, b.period_end) : (b.period || '') })) });
+  // Internal-only columns never go to the store: the admin's private note, the
+  // approval-for-payment bookkeeping, and the fee-override record.
+  const INTERNAL = ['admin_notes', 'approved_for_payment', 'approved_amount', 'approved_by', 'approved_at', 'fee_waived', 'fee_waived_by', 'fee_waived_at'];
+  res.json({ bills: bills.map(b => {
+    const pub = { ...b, period_label: b.period_start ? periodLabel(b.period_start, b.period_end) : (b.period || '') };
+    for (const k of INTERNAL) delete pub[k];
+    return pub;
+  }) });
 });
 
 router.post('/my/invoices', invoiceUpload.single('file'), async (req, res) => {
@@ -285,29 +292,115 @@ router.get('/periods/:id', requirePermission('store_billing'), (req, res) => {
   res.json({ period: { ...period, label: periodLabel(period.start_date, period.end_date) }, invited });
 });
 
+// Processing fee: a configurable percent (Settings > Store Billing) deducted
+// from what a store is paid, e.g. 1 => a $100 invoice pays out $99. Each
+// invoice can be individually exempted ("fee overridden"), recorded with who
+// and when. Applied at read time, so changing the percent re-prices every
+// invoice not yet paid.
+const money = v => Math.round((Number(v) || 0) * 100) / 100;
+function feePercent(orgId) {
+  const v = parseFloat(db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'store_billing_fee_percent'`).get(orgId)?.value);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 100) : 0;
+}
+function withPayable(bill, pct) {
+  const fee = bill.fee_waived ? 0 : money(bill.amount * pct / 100);
+  return { ...bill, fee_percent: pct, fee_amount: fee, payable_amount: money(bill.amount - fee) };
+}
+const approverNameSql = `TRIM(COALESCE(u.first_name,'')||' '||COALESCE(u.last_name,'')) AS approved_by_name`;
+
 router.get('/invoices', requirePermission('store_billing'), (req, res) => {
   const { status, store_id } = req.query;
   let where = 'b.org_id = ?';
   const params = [req.user.org_id];
   if (status) { where += ' AND b.status = ?'; params.push(status); }
   if (store_id) { where += ' AND b.store_id = ?'; params.push(store_id); }
-  const bills = db.prepare(`SELECT b.*, s.name AS store_name, bp.start_date AS period_start, bp.end_date AS period_end
+  const pct = feePercent(req.user.org_id);
+  const bills = db.prepare(`SELECT b.*, s.name AS store_name, bp.start_date AS period_start, bp.end_date AS period_end, ${approverNameSql}
     FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id LEFT JOIN billing_periods bp ON bp.id = b.billing_period_id
+    LEFT JOIN users u ON u.id = b.approved_by
     WHERE ${where} ORDER BY b.submitted_at DESC`).all(...params);
-  res.json({ bills: bills.map(b => ({ ...b, period_label: b.period_start ? periodLabel(b.period_start, b.period_end) : (b.period || '') })) });
+  res.json({ bills: bills.map(b => withPayable({ ...b, period_label: b.period_start ? periodLabel(b.period_start, b.period_end) : (b.period || '') }, pct)) });
+});
+
+// Registered BEFORE /invoices/:id so "summary" isn't taken as an invoice id.
+// Totals tiles on the Store Billing page: what's been paid, what's still
+// owed (an approved invoice counts at its approved amount, otherwise its net
+// payable), what's approved and waiting for payment, and how many invoices
+// still need review.
+router.get('/invoices/summary', requirePermission('store_billing'), (req, res) => {
+  const pct = feePercent(req.user.org_id);
+  const bills = db.prepare(`SELECT * FROM store_bill_submissions WHERE org_id = ?`).all(req.user.org_id);
+  const s = { paid_amount: 0, paid_count: 0, outstanding_amount: 0, outstanding_count: 0, approved_amount: 0, approved_count: 0, rejected_count: 0, fee_percent: pct, fees_deducted: 0 };
+  for (const raw of bills) {
+    const b = withPayable(raw, pct);
+    if (b.status === 'completed') { s.paid_amount += b.payment_amount ?? b.amount; s.paid_count++; }
+    else if (b.status === 'pending') {
+      const approved = !!b.approved_for_payment;
+      const owed = approved && b.approved_amount != null ? b.approved_amount : b.payable_amount;
+      s.outstanding_amount += owed; s.outstanding_count++;
+      s.fees_deducted += b.fee_amount;
+      if (approved) { s.approved_amount += owed; s.approved_count++; }
+    } else if (b.status === 'rejected') s.rejected_count++;
+  }
+  for (const k of ['paid_amount', 'outstanding_amount', 'approved_amount', 'fees_deducted']) s[k] = money(s[k]);
+  res.json(s);
 });
 
 router.get('/invoices/:id', requirePermission('store_billing'), (req, res) => {
-  const bill = db.prepare(`SELECT b.*, s.name AS store_name FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id WHERE b.id = ? AND b.org_id = ?`).get(req.params.id, req.user.org_id);
+  const bill = db.prepare(`SELECT b.*, s.name AS store_name, ${approverNameSql},
+      TRIM(COALESCE(w.first_name,'')||' '||COALESCE(w.last_name,'')) AS fee_waived_by_name
+    FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id
+    LEFT JOIN users u ON u.id = b.approved_by LEFT JOIN users w ON w.id = b.fee_waived_by
+    WHERE b.id = ? AND b.org_id = ?`).get(req.params.id, req.user.org_id);
   if (!bill) return res.status(404).json({ error: 'Not found' });
   const paymentInfo = db.prepare('SELECT * FROM store_payment_info WHERE store_id = ?').get(bill.store_id);
-  res.json({ bill, paymentInfo: maskPaymentInfo(paymentInfo) });
+  res.json({ bill: withPayable(bill, feePercent(req.user.org_id)), paymentInfo: maskPaymentInfo(paymentInfo) });
 });
 
-// Full, unmasked account/routing numbers — only when an admin is actually
-// about to send a real payment, same tighter super_admin/org_admin-only
-// gate applicants.js's "View Live Disccardpromos Data" uses for a similarly
-// sensitive reveal, plus an audit row recording who looked.
+function billWithApprover(id, orgId) {
+  const row = db.prepare(`SELECT b.*, ${approverNameSql} FROM store_bill_submissions b LEFT JOIN users u ON u.id = b.approved_by WHERE b.id = ?`).get(id);
+  return withPayable(row, feePercent(orgId));
+}
+
+// "Approved for payment" — the second pair of eyes before money moves. Only a
+// pending invoice can be (un)approved; the approved amount defaults to the
+// net payable figure and can be edited down/up before payment.
+router.post('/invoices/:id/approve-for-payment', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!bill) return res.status(404).json({ error: 'Not found' });
+  if (bill.status !== 'pending') return res.status(400).json({ error: 'Only a pending invoice can be approved for payment.' });
+  const body = req.body || {};
+  const approved = body.approved === undefined ? !!bill.approved_for_payment : !!body.approved;
+  const amount = body.amount === undefined || body.amount === null || body.amount === ''
+    ? (bill.approved_amount ?? withPayable(bill, feePercent(req.user.org_id)).payable_amount)
+    : money(body.amount);
+  if (!(amount >= 0)) return res.status(400).json({ error: 'A valid amount is required' });
+  db.prepare(`UPDATE store_bill_submissions SET approved_for_payment = ?, approved_amount = ?, approved_by = ?, approved_at = datetime('now') WHERE id = ?`)
+    .run(approved ? 1 : 0, amount, req.user.id, bill.id);
+  logAudit(req.user.org_id, req.user.id, approved ? 'approve_invoice_for_payment' : 'unapprove_invoice_for_payment', 'store', bill.store_id,
+    { approved_for_payment: !!bill.approved_for_payment, approved_amount: bill.approved_amount }, { approved_for_payment: approved, approved_amount: amount }, req.ip);
+  res.json({ bill: billWithApprover(bill.id, req.user.org_id) });
+});
+
+// Per-invoice processing-fee override. If the invoice was approved for
+// exactly the old payable figure, the approved amount follows the new one so
+// the approval doesn't silently go stale.
+router.post('/invoices/:id/fee-waiver', requirePermission('store_billing', 'can_edit'), (req, res) => {
+  const bill = db.prepare('SELECT * FROM store_bill_submissions WHERE id = ? AND org_id = ?').get(req.params.id, req.user.org_id);
+  if (!bill) return res.status(404).json({ error: 'Not found' });
+  if (bill.status !== 'pending') return res.status(400).json({ error: 'The fee can only be changed on a pending invoice.' });
+  const waived = !!(req.body || {}).waived;
+  const pct = feePercent(req.user.org_id);
+  const oldPayable = withPayable(bill, pct).payable_amount;
+  const newPayable = withPayable({ ...bill, fee_waived: waived ? 1 : 0 }, pct).payable_amount;
+  const followApproval = bill.approved_for_payment && bill.approved_amount != null && Math.abs(bill.approved_amount - oldPayable) < 0.005;
+  db.prepare(`UPDATE store_bill_submissions SET fee_waived = ?, fee_waived_by = ?, fee_waived_at = datetime('now')${followApproval ? ', approved_amount = ?' : ''} WHERE id = ?`)
+    .run(...[waived ? 1 : 0, req.user.id, ...(followApproval ? [newPayable] : []), bill.id]);
+  logAudit(req.user.org_id, req.user.id, waived ? 'waive_invoice_fee' : 'reinstate_invoice_fee', 'store', bill.store_id,
+    { fee_waived: !!bill.fee_waived, payable_amount: oldPayable }, { fee_waived: waived, payable_amount: newPayable }, req.ip);
+  res.json({ bill: billWithApprover(bill.id, req.user.org_id) });
+});
+
 // Every store (anything not inactive) with its payment info IN FULL — bank,
 // name on account, full account + routing numbers — plus the store's own
 // contacts. Stores with nothing on file are included with blank bank columns
@@ -331,6 +424,10 @@ router.get('/stores/payment-info/export', requirePermission('store_billing'), (r
   sendXlsx(res, `store-bank-details-${new Date().toISOString().slice(0, 10)}.xlsx`, out);
 });
 
+// Full, unmasked account/routing numbers — only when an admin is actually
+// about to send a real payment, same tighter super_admin/org_admin-only
+// gate applicants.js's "View Live Disccardpromos Data" uses for a similarly
+// sensitive reveal, plus an audit row recording who looked.
 router.get('/stores/:storeId/payment-info/reveal', requirePermission('store_billing'), (req, res) => {
   if (!['super_admin', 'org_admin'].includes(req.user.role)) return res.status(403).json({ error: 'Not permitted' });
   const row = db.prepare('SELECT pi.* FROM store_payment_info pi JOIN stores s ON s.id = pi.store_id WHERE pi.store_id = ? AND s.org_id = ?').get(req.params.storeId, req.user.org_id);

@@ -242,6 +242,101 @@ export function detectAndFlag(orgId, entityType, entity, excludeIds = [], previo
   return db.prepare('SELECT * FROM duplicate_flags WHERE id = ?').get(id);
 }
 
+// ===== One disccardpromos account per PERSON =====
+// The same person legitimately spans several applicant rows — a merge group
+// (merge_group_id), a season carry-forward (carried_from_applicant_id), or
+// the same external_id — and those share one account by design. Two
+// DIFFERENT people must never share one: disccardpromos can hand back an
+// existing customer at approval (it matches on phone/email on its side), and
+// before this guard that silently linked a second person onto the first
+// person's account, pooling their money and spend.
+const cleanAccountId = (id) => id == null ? '' : String(id).replace(/\.0+$/, '');
+
+function carryAncestors(applicant) {
+  const seen = new Set([applicant.id]);
+  let cur = applicant;
+  for (let i = 0; i < 20 && cur?.carried_from_applicant_id && !seen.has(cur.carried_from_applicant_id); i++) {
+    seen.add(cur.carried_from_applicant_id);
+    cur = db.prepare('SELECT id, carried_from_applicant_id FROM applicants WHERE id = ?').get(cur.carried_from_applicant_id);
+  }
+  return seen;
+}
+
+function sameApplicantPerson(a, b) {
+  if (a.id === b.id) return true;
+  if (a.merge_group_id && (a.merge_group_id === b.merge_group_id || a.merge_group_id === b.id)) return true;
+  if (b.merge_group_id && b.merge_group_id === a.id) return true;
+  if (a.external_id && a.external_id === b.external_id) return true;
+  const ancestorsA = carryAncestors(a);
+  for (const id of carryAncestors(b)) if (ancestorsA.has(id)) return true;
+  return false;
+}
+
+// The OTHER person's applicant row currently holding `accountId`, or null
+// when nobody holds it or every holder is the same person as `applicantId`.
+export function findProviderAccountConflict(orgId, accountId, applicantId) {
+  const clean = cleanAccountId(accountId);
+  if (!clean) return null;
+  const me = db.prepare('SELECT * FROM applicants WHERE id = ?').get(applicantId);
+  if (!me) return null;
+  const holders = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND id != ? AND provider_account_id IN (?, ?)`).all(orgId, applicantId, clean, `${clean}.0`);
+  return holders.find(h => !sameApplicantPerson(me, h)) || null;
+}
+
+const accountConflictReason = (accountId) => `Same disccardpromos account (#${cleanAccountId(accountId)})`;
+
+// Opens a standard Duplicates-panel flag for the pair and pauses both. One
+// person's real account being shared by two applicants is resolved the normal
+// way: Compare & Resolve — merging them IS the fix when it's one person.
+// Idempotent per pair: an already-open flag is returned, never stacked.
+export function flagProviderAccountConflict(orgId, applicantId, other, accountId) {
+  const existing = db.prepare(`SELECT * FROM duplicate_flags WHERE org_id = ? AND entity_type = 'applicant' AND status = 'open'
+      AND ((entity_id = ? AND matched_entity_id = ?) OR (entity_id = ? AND matched_entity_id = ?))`).get(orgId, applicantId, other.id, other.id, applicantId);
+  if (existing) return existing;
+  const id = uuid();
+  db.prepare(`INSERT INTO duplicate_flags (id, org_id, entity_type, entity_id, matched_entity_id, reason, status) VALUES (?,?,'applicant',?,?,?,'open')`)
+    .run(id, orgId, applicantId, other.id, accountConflictReason(accountId));
+  db.prepare(`UPDATE applicants SET duplicate_status = 'flagged', duplicate_of_applicant_id = ? WHERE id = ?`).run(other.id, applicantId);
+  pauseAccountsFor('applicant', applicantId);
+  pauseAccountsFor('applicant', other.id);
+  return db.prepare('SELECT * FROM duplicate_flags WHERE id = ?').get(id);
+}
+
+// Flags every account currently held by more than one PERSON (existing bad
+// data, or anything that slipped in some other way). A pair an admin already
+// bypassed for this exact account is left alone, same convention as the other
+// duplicate checks (a bypass only comes back on genuinely new matching data).
+// Returns the flag rows newly opened.
+export function sweepProviderAccountConflicts(orgId) {
+  const rows = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_account_id != '' ORDER BY created_at ASC`).all(orgId);
+  const byAccount = new Map();
+  for (const r of rows) {
+    const key = cleanAccountId(r.provider_account_id);
+    if (!key || key.startsWith('mock_')) continue;
+    if (!byAccount.has(key)) byAccount.set(key, []);
+    byAccount.get(key).push(r);
+  }
+  const created = [];
+  for (const [accountId, holders] of byAccount) {
+    if (holders.length < 2) continue;
+    const people = []; // clusters of applicant rows that are one real person
+    for (const h of holders) {
+      const cluster = people.find(c => c.some(m => sameApplicantPerson(m, h)));
+      if (cluster) cluster.push(h); else people.push([h]);
+    }
+    for (let i = 1; i < people.length; i++) {
+      const entity = people[i][0], other = people[0][0];
+      const reason = accountConflictReason(accountId);
+      if (bypassedReasonsFor('applicant', entity.id, other.id)?.has(reason)) continue;
+      const before = db.prepare(`SELECT id FROM duplicate_flags WHERE org_id = ? AND entity_type = 'applicant' AND status = 'open'
+          AND ((entity_id = ? AND matched_entity_id = ?) OR (entity_id = ? AND matched_entity_id = ?))`).get(orgId, entity.id, other.id, other.id, entity.id);
+      const flag = flagProviderAccountConflict(orgId, entity.id, other, accountId);
+      if (!before) created.push(flag);
+    }
+  }
+  return created;
+}
+
 // Re-runs checkApplicantDuplicate (and so whatever matchReasons currently
 // considers a match — e.g. the any-to-any phone comparison above) across
 // applicants already in the system, not just ones being saved right now.
@@ -290,6 +385,7 @@ export async function recheckApplicantDuplicates(orgId, seasonId, job = { progre
     : db.prepare(`SELECT ${entityColumns} FROM applicants WHERE org_id = ? AND approval_status NOT IN ('draft', 'incomplete') ORDER BY created_at ASC`).all(orgId);
   job.total = rows.length;
   const newFlags = [];
+  for (const f of sweepProviderAccountConflicts(orgId)) { newFlags.push(f); beforeOpenIds.add(f.id); }
   let i = 0;
   for (const a of rows) {
     const flag = detectAndFlag(orgId, 'applicant', a);

@@ -774,6 +774,31 @@ CREATE INDEX IF NOT EXISTS idx_txn_card ON card_transactions(card_id);
 -- grows (every disccardpromos-synced transaction, forever), this is the
 -- single most likely cause of the whole site slowing down over time.
 CREATE INDEX IF NOT EXISTS idx_txn_store ON card_transactions(store_id, occurred_at);
+-- Charges that belong to NO card row of ours: made by disccardpromos
+-- customers that aren't linked to any applicant, or by a linked applicant on a
+-- card we couldn't match. Card sync only ever pulled transactions per linked
+-- applicant, so these were never stored and every spend total silently left
+-- them out, leaving Total Spent lower than disccardpromos' own. They count in
+-- every total (see services/spendTotals.js). applicant_id/store_id are plain
+-- columns, not foreign keys, so permanently deleting an applicant or store
+-- never fails on these rows.
+CREATE TABLE IF NOT EXISTS unattributed_transactions (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  applicant_id TEXT,
+  provider_txn_id TEXT UNIQUE,
+  type TEXT NOT NULL DEFAULT 'purchase',
+  amount REAL NOT NULL,
+  store_name TEXT,
+  store_id TEXT,
+  occurred_at TEXT,
+  raw_payload TEXT,
+  customer_id TEXT,
+  customer_name TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_unattributed_store ON unattributed_transactions(store_id);
+CREATE INDEX IF NOT EXISTS idx_unattributed_org_date ON unattributed_transactions(org_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
 -- The Logs page's getRecentActions (services/audit.js) filters
 -- WHERE org_id = ? AND created_at >= ... ORDER BY created_at DESC — exactly
@@ -1633,6 +1658,14 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_sent_date TEXT`
 // pre-existing admin_notes column (from the old bill-submissions flow) is
 // reused here as the internal-only counterpart, never sent anywhere.
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN payment_note TEXT`);
+// Approval step before payout, and the per-invoice processing-fee override.
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN approved_for_payment INTEGER DEFAULT 0`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN approved_amount REAL`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN approved_by TEXT REFERENCES users(id)`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN approved_at TEXT`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived INTEGER DEFAULT 0`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_by TEXT REFERENCES users(id)`);
+safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
 db.prepare(`UPDATE store_bill_submissions SET status = 'pending' WHERE status IN ('submitted', 'reviewed')`).run();
 db.prepare(`UPDATE store_bill_submissions SET status = 'completed' WHERE status = 'paid'`).run();
 

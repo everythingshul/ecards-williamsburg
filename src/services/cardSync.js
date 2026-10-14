@@ -13,6 +13,45 @@ function last4(masked) { return String(masked ?? '').replace(/\D/g, '').slice(-4
 // See the refund-detection comment in syncApplicantCards. No "return".
 const REFUND_WORD = /\b(refund|refunded|reversal|reversed|void|voided|chargeback)\b/i;
 
+const cleanProviderId = (id) => id == null ? null : String(id).replace(/\.0+$/, '');
+
+// ONE place that turns a raw disccardpromos transaction into our stored shape
+// (see syncApplicantCards for the confirmed field list and the refund /
+// negative-purchase conventions), shared by the card_transactions insert and
+// the unattributed one so the two can never classify a charge differently.
+// Returns null when the entry has no id or no usable amount.
+function normalizeTxn(t) {
+  const paid = Number(t.disccardPaid ?? t.cartAmount ?? t.amount);
+  if (t.id == null || !Number.isFinite(paid)) return null;
+  const isRefund = paid < 0
+    || t.is_refund === true || t.refund === true
+    || [t.type, t.kind, t.transaction_type, t.status, t.description, t.note, t.vendor]
+      .some(v => typeof v === 'string' && REFUND_WORD.test(v));
+  const storeName = t.vendor || t.store_name || t.merchant || '';
+  return {
+    providerTxnId: String(t.id),
+    type: isRefund ? 'refund' : 'purchase',
+    amount: isRefund ? Math.abs(paid) : -Math.abs(paid),
+    storeName,
+    occurredAt: t.timestamp || t.occurred_at || null,
+  };
+}
+
+// Records a charge that has no card row of ours — by a disccardpromos
+// customer not linked to any applicant, or by a linked applicant on a card we
+// couldn't match. INSERT OR IGNORE on provider_txn_id, so re-running is safe.
+// Returns the number of rows actually inserted (0 or 1).
+function insertUnattributed(orgId, applicantId, t, customer = null) {
+  const n = normalizeTxn(t);
+  if (!n) return 0;
+  const customerName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null;
+  return db.prepare(`INSERT OR IGNORE INTO unattributed_transactions
+    (id, org_id, applicant_id, provider_txn_id, type, amount, store_name, store_id, occurred_at, raw_payload, customer_id, customer_name)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(uuid(), orgId, applicantId || null, n.providerTxnId, n.type, n.amount, n.storeName, resolveStoreId(orgId, n.storeName), n.occurredAt, JSON.stringify(t),
+      customer ? cleanProviderId(customer.id) : null, customerName || null).changes;
+}
+
 // FIXED (2026-09) — root cause of "transactions never show up": this used
 // to call giftcard.js's listTransactions(), which hits /cards/:id/transactions
 // — one of the OLD unverified best-guess paths documented at the top of
@@ -191,6 +230,11 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
     const singleCardId = allLocal.length === 1 ? allLocal[0].id : null;
     const insertTxn = db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload)
       VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    // A charge we now hold as a real card_transactions row must stop also
+    // counting as an unattributed one (it was recorded there earlier, while
+    // its customer wasn't linked to this applicant yet) — otherwise every
+    // total would count it twice.
+    const dropUnattributed = db.prepare(`DELETE FROM unattributed_transactions WHERE org_id = ? AND provider_txn_id = ?`);
     // CONFIRMED transaction shape (STORE-TRANSACTIONS-INSTRUCTIONS.md §3) —
     // the ONLY fields that exist: id (bare number), timestamp, disccardPaid
     // (always positive; the amount charged to the card), cartAmount, card
@@ -211,34 +255,22 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
         const cardId = cardIdByLast4.get(last4(t.card)) || singleCardId;
         if (!cardId) {
           unattributed++;
-          console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no last-4 match) — raw: ${JSON.stringify(t).slice(0, 300)}`);
+          insertUnattributed(orgId, applicant.id, t, customer);
+          console.warn(`[cardSync] transaction for applicant ${applicant.id} could not be matched to a local card (multi-card applicant, no last-4 match) — recorded as unattributed spend — raw: ${JSON.stringify(t).slice(0, 300)}`);
           continue;
         }
-        const paid = Number(t.disccardPaid ?? t.cartAmount ?? t.amount);
-        if (t.id == null || !Number.isFinite(paid)) {
+        const n = normalizeTxn(t);
+        if (!n) {
           malformed++;
           console.warn(`[cardSync] malformed transaction for applicant ${applicant.id} skipped — raw: ${JSON.stringify(t).slice(0, 300)}`);
           continue;
         }
-        // Refund detection (REFUNDS-AND-BYPASS-INSTRUCTIONS.md): the real
-        // entries carry no `type`, and the exact refund marker isn't
-        // confirmed, so every plausible signal counts — a negative amount,
-        // an explicit flag, or a refund/reversal/void/chargeback word in any
-        // descriptive field (vendor included). "return" is deliberately NOT
-        // in the list: a store name can legitimately contain it, and a false
-        // refund SUBTRACTS from every total. An ordinary purchase (positive,
-        // none of these) is never mistaken for one. Refund stored positive,
-        // purchase stored negative — see the SUM convention in
-        // applicantBalance.js.
-        const isRefund = paid < 0
-          || t.is_refund === true || t.refund === true
-          || [t.type, t.kind, t.transaction_type, t.status, t.description, t.note, t.vendor]
-            .some(v => typeof v === 'string' && REFUND_WORD.test(v));
-        const type = isRefund ? 'refund' : 'purchase';
-        const amount = isRefund ? Math.abs(paid) : -Math.abs(paid);
-        const storeName = t.vendor || t.store_name || t.merchant || '';
-        const result = insertTxn.run(uuid(), cardId, String(t.id), type, amount, null, storeName, resolveStoreId(orgId, storeName), t.timestamp || t.occurred_at || null, JSON.stringify(t));
+        // Refund/purchase classification and the sign convention (refund stored
+        // positive, purchase negative) live in normalizeTxn above — see the SUM
+        // convention in applicantBalance.js.
+        const result = insertTxn.run(uuid(), cardId, n.providerTxnId, n.type, n.amount, null, n.storeName, resolveStoreId(orgId, n.storeName), n.occurredAt, JSON.stringify(t));
         if (result.changes) transactionsSynced++;
+        dropUnattributed.run(orgId, n.providerTxnId);
       } catch (e) {
         malformed++;
         console.warn(`[cardSync] transaction insert threw for applicant ${applicant.id}: ${e.message} — raw: ${JSON.stringify(t).slice(0, 300)}`);
@@ -337,6 +369,37 @@ async function notifyReconciliationMismatch(orgId, applicant, flag) {
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
+// Charges made by disccardpromos customers that NO applicant here is linked
+// to. The per-applicant sync above only ever reads linked customers, so these
+// were never stored and every spend total fell short of disccardpromos' own.
+// Takes the bulk customer indexes the sweep already pulled (one per season)
+// and records every transaction of every customer whose id isn't held by any
+// applicant, via insertUnattributed (idempotent). If one of those customers
+// is linked to an applicant later, syncApplicantCards records the same
+// provider_txn_ids as real card transactions and drops these rows.
+export function syncUnlinkedCustomers(orgId, indexes) {
+  const linked = new Set(db.prepare(`SELECT provider_account_id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL`).all(orgId)
+    .map(r => cleanProviderId(r.provider_account_id)));
+  const seen = new Set();
+  let unlinkedCustomers = 0, unlinkedTransactions = 0;
+  for (const index of indexes) {
+    for (const c of index?.list || []) {
+      const id = cleanProviderId(c.id);
+      if (!id || linked.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      const txns = Array.isArray(c.transactions) ? c.transactions
+        : (Array.isArray(c.packages) ? c.packages.flatMap(p => Array.isArray(p.transactions) ? p.transactions : []) : []);
+      if (!txns.length) continue;
+      unlinkedCustomers++;
+      for (const t of txns) {
+        try { unlinkedTransactions += insertUnattributed(orgId, null, t, c); }
+        catch (e) { console.warn(`[cardSync] could not record a charge from unlinked customer ${id}: ${e.message}`); }
+      }
+    }
+  }
+  return { unlinkedCustomers, unlinkedTransactions };
+}
+
 // Sweeps every applicant with a disccardpromos account — cards, transactions,
 // AND balance reconciliation together — used by the automatic background
 // interval (see index.js, every 60s) and the "Sync All" button. This is
@@ -397,6 +460,9 @@ export async function syncAllCards(orgId) {
       unattributed += r.unattributed || 0; malformed += r.malformed || 0;
     } catch (e) { failed++; console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
   }
+  let unlinked = { unlinkedCustomers: 0, unlinkedTransactions: 0 };
+  try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean)); }
+  catch (e) { console.error('[cardSync] unlinked-customer sync failed:', e.message); }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares
   // its group's one real disccardpromos customer and would just re-check
@@ -414,5 +480,5 @@ export async function syncAllCards(orgId) {
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
-  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed };
+  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
 }

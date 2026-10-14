@@ -148,10 +148,13 @@ router.get('/', (req, res) => {
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   // Live spend per store — computed fresh on every request from the synced
   // transaction ledger, not cached, so it's always current as of the last sync.
+  // Includes charges by disccardpromos customers not linked to any applicant
+  // (unattributed_transactions) — the register took that money regardless of
+  // whose card it was.
   const spendStmt = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
     COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds, COUNT(*) txn_count
-    FROM card_transactions WHERE store_id = ?`);
-  const withSpend = stores.map(s => ({ ...s, ...spendStmt.get(s.id) }));
+    FROM (SELECT type, amount FROM card_transactions WHERE store_id = ? UNION ALL SELECT type, amount FROM unattributed_transactions WHERE store_id = ?)`);
+  const withSpend = stores.map(s => ({ ...s, ...spendStmt.get(s.id, s.id) }));
   // discount is admin-only info about the store, not something the store's
   // own portal login should ever see about itself.
   if (req.user.role === 'store') withSpend.forEach(s => { delete s.discount; });
@@ -179,7 +182,8 @@ router.get('/export', requirePermission('stores', 'can_export'), (req, res) => {
   }
   const stores = db.prepare(`SELECT * FROM stores ${where} ORDER BY created_at DESC`).all(...params);
   const withSpend = stores.map(s => {
-    const totals = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases, COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds FROM card_transactions WHERE store_id = ?`).get(s.id);
+    const totals = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases, COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds
+      FROM (SELECT type, amount FROM card_transactions WHERE store_id = ? UNION ALL SELECT type, amount FROM unattributed_transactions WHERE store_id = ?)`).get(s.id, s.id);
     return { ...s, total_purchases: totals.total_purchases, total_refunds: totals.total_refunds };
   });
   sendXlsx(res, `stores-${Date.now()}.xlsx`, redact(withSpend, req.permission.hidden_fields));
@@ -223,7 +227,7 @@ router.get('/:id', (req, res) => {
   if (req.user.role === 'store' && store.id !== req.user.store_id) return res.status(403).json({ error: 'Not your store' });
   const transactionTotals = db.prepare(`SELECT COUNT(*) count, COALESCE(SUM(CASE WHEN type = 'refund' THEN -amount WHEN amount < 0 THEN -amount ELSE 0 END),0) total_purchases,
     COALESCE(SUM(CASE WHEN type='refund' THEN amount ELSE 0 END),0) total_refunds
-    FROM card_transactions WHERE store_id = ?`).get(store.id);
+    FROM (SELECT type, amount FROM card_transactions WHERE store_id = ? UNION ALL SELECT type, amount FROM unattributed_transactions WHERE store_id = ?)`).get(store.id, store.id);
   // A store's own portal login sees its total purchases (their own sales
   // figure) but not transaction count or refund totals — internal-only
   // numbers a store shouldn't be able to reconstruct their transaction
@@ -252,8 +256,11 @@ router.get('/:id/transactions', (req, res) => {
   if (req.user.role === 'store' && store.id !== req.user.store_id) return res.status(403).json({ error: 'Not your store' });
   const { page = 1, pageSize = 50 } = req.query;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
-  const total = db.prepare('SELECT COUNT(*) c FROM card_transactions WHERE store_id = ?').get(store.id).c;
-  const transactions = db.prepare(`SELECT id, type, amount, occurred_at FROM card_transactions WHERE store_id = ? ORDER BY occurred_at DESC LIMIT ? OFFSET ?`).all(store.id, +pageSize, offset);
+  const total = db.prepare(`SELECT (SELECT COUNT(*) FROM card_transactions WHERE store_id = ?) + (SELECT COUNT(*) FROM unattributed_transactions WHERE store_id = ?) c`).get(store.id, store.id).c;
+  const transactions = db.prepare(`SELECT id, type, amount, occurred_at FROM (
+      SELECT id, type, amount, occurred_at FROM card_transactions WHERE store_id = ?
+      UNION ALL SELECT id, type, amount, occurred_at FROM unattributed_transactions WHERE store_id = ?
+    ) ORDER BY occurred_at DESC LIMIT ? OFFSET ?`).all(store.id, store.id, +pageSize, offset);
   res.json({ transactions, total, page: +page, pageSize: +pageSize });
 });
 
