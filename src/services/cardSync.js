@@ -44,6 +44,9 @@ function normalizeTxn(t) {
 function insertUnattributed(orgId, applicantId, t, customer = null) {
   const n = normalizeTxn(t);
   if (!n) return 0;
+  // A charge is counted in exactly ONE table: if it's already a real card
+  // transaction, it must never also be recorded as unattributed spend.
+  if (db.prepare('SELECT 1 FROM card_transactions WHERE provider_txn_id = ?').get(n.providerTxnId)) return 0;
   const customerName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null;
   return db.prepare(`INSERT OR IGNORE INTO unattributed_transactions
     (id, org_id, applicant_id, provider_txn_id, type, amount, store_name, store_id, occurred_at, raw_payload, customer_id, customer_name)
@@ -377,8 +380,14 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 // applicant, via insertUnattributed (idempotent). If one of those customers
 // is linked to an applicant later, syncApplicantCards records the same
 // provider_txn_ids as real card transactions and drops these rows.
-export function syncUnlinkedCustomers(orgId, indexes) {
-  const linked = new Set(db.prepare(`SELECT provider_account_id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL`).all(orgId)
+export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
+  // Skip only customers the per-applicant sync really processed this sweep
+  // (coveredIds). Merely "some applicant holds this account id" isn't enough:
+  // the per-applicant sync finds its customer by external_id, so a customer
+  // linked by account id whose external_id doesn't match would otherwise be
+  // skipped by BOTH paths and its charges lost. Without coveredIds (a caller
+  // outside the sweep) fall back to the account-id link.
+  const linked = coveredIds || new Set(db.prepare(`SELECT provider_account_id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL`).all(orgId)
     .map(r => cleanProviderId(r.provider_account_id)));
   const seen = new Set();
   let unlinkedCustomers = 0, unlinkedTransactions = 0;
@@ -453,15 +462,18 @@ export async function syncAllCards(orgId) {
   // which is how a sweep failing for half the org once passed as healthy.
   const indexPullsFailed = seasonIds.filter(s => !giftcard.isMockMode(s) && !indexBySeason.get(s)).length;
   let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0, unattributed = 0, malformed = 0, failed = 0;
+  const coveredCustomerIds = new Set();
   for (const applicant of applicants) {
     try {
-      const r = await syncApplicantCards(orgId, applicant, customerFor(applicant));
+      const customer = customerFor(applicant);
+      const r = await syncApplicantCards(orgId, applicant, customer);
+      if (customer) coveredCustomerIds.add(cleanProviderId(customer.id));
       cardsDiscovered += r.discovered || 0; cardsRemoved += r.removed || 0; totalSynced += r.transactionsSynced || 0;
       unattributed += r.unattributed || 0; malformed += r.malformed || 0;
     } catch (e) { failed++; console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
   }
   let unlinked = { unlinkedCustomers: 0, unlinkedTransactions: 0 };
-  try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean)); }
+  try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean), coveredCustomerIds); }
   catch (e) { console.error('[cardSync] unlinked-customer sync failed:', e.message); }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares

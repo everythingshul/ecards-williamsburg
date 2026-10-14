@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { getPermission, requirePermission } from '../middleware/permissions.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { orgFundsSummary, loadedAccountsActive } from '../services/applicantBalance.js';
-import { unattributedNet, unattributedByStore } from '../services/spendTotals.js';
+import { totalSpend, unattributedByStore } from '../services/spendTotals.js';
 
 const router = Router();
 // Internal team only — every count below is computed org-wide (total shuls,
@@ -146,11 +146,9 @@ router.get('/stats', (req, res) => {
     // Headline total is NOT gated on a store match (STORE-TRANSACTIONS-
     // INSTRUCTIONS.md §5): a vendor the admin hasn't added as a store still
     // counts here — only the per-store breakdown above is store-scoped.
-    const attributedSpend = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
-      FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id WHERE c2.org_id = ?${storeSeasonClause}`).get(orgId, ...seasonParams).total;
-    const unattributedSpend = unattributedNet(orgId, { seasonId }).net;
-    stats.totalStoreSpend = Math.round((attributedSpend + unattributedSpend) * 100) / 100;
-    stats.unattributedSpend = unattributedSpend;
+    const spend = totalSpend(orgId, seasonId);
+    stats.totalStoreSpend = spend.total;
+    stats.unattributedSpend = spend.unattributed;
   }
   res.json({ stats });
 });

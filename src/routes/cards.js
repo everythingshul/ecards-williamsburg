@@ -8,6 +8,7 @@ import { syncOneCard, syncAllCards } from '../services/cardSync.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { resolveFundingAnchor } from '../services/providerAccount.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
+import { totalSpend, unattributedNet } from '../services/spendTotals.js';
 
 const router = Router();
 router.use(auth, requirePermission('cards'));
@@ -92,13 +93,22 @@ router.get('/by-shul', (req, res) => {
         WHERE a2.shul_id = s.id${seasonClause}), 0) AS allocated,
       COALESCE((SELECT SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END)
         FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id JOIN applicants a2 ON a2.id = c2.applicant_id
-        WHERE a2.shul_id = s.id AND c2.org_id = @org_id${seasonClause}), 0) AS spent
+        WHERE a2.shul_id = s.id AND c2.org_id = @org_id${seasonClause}), 0)
+      + COALESCE((SELECT SUM(CASE WHEN u.type = 'refund' THEN -u.amount WHEN u.amount < 0 THEN -u.amount ELSE 0 END)
+        FROM unattributed_transactions u JOIN applicants a2 ON a2.id = u.applicant_id
+        WHERE a2.shul_id = s.id AND u.org_id = @org_id${seasonClause}), 0) AS spent
     FROM shuls s
     WHERE s.org_id = @org_id
     GROUP BY s.id
     HAVING allocated > 0
     ORDER BY allocated DESC`).all(params);
-  res.json({ shuls: rows.map(r => ({ ...r, allocated: Math.round(r.allocated * 100) / 100, spent: Math.round(r.spent * 100) / 100, remaining: Math.round((r.allocated - r.spent) * 100) / 100 })) });
+  // Charges by disccardpromos customers not linked to any applicant belong to
+  // no shul — returned separately so this tab's total still adds up to Total Spent.
+  const unlinked = unattributedNet(req.user.org_id, { seasonId: season_id, noApplicant: true });
+  res.json({
+    shuls: rows.map(r => ({ ...r, allocated: Math.round(r.allocated * 100) / 100, spent: Math.round(r.spent * 100) / 100, remaining: Math.round((r.allocated - r.spent) * 100) / 100 })),
+    unattributed: { spent: unlinked.net, transactionCount: unlinked.count },
+  });
 });
 
 // Open card-balance-vs-disccardpromos mismatches (see services/cardSync.js's
@@ -288,33 +298,66 @@ router.get('/:id/transactions', (req, res) => {
   res.json({ transactions: db.prepare('SELECT * FROM card_transactions WHERE card_id = ? ORDER BY occurred_at DESC').all(card.id) });
 });
 
-// Full-detail CSV export of every transaction across the org.
+// Shared by the list and the export: card transactions AND the charges that
+// belong to no card of ours (customers not linked to any applicant — see
+// services/spendTotals.js), filtered the same way.
+function txnFilters(orgId, { type, store_id }) {
+  let cardWhere = 'WHERE c.org_id = ?', unWhere = 'WHERE u.org_id = ?';
+  const cardParams = [orgId], unParams = [orgId];
+  if (type) { cardWhere += ' AND t.type = ?'; cardParams.push(type); unWhere += ' AND u.type = ?'; unParams.push(type); }
+  if (store_id) { cardWhere += ' AND t.store_id = ?'; cardParams.push(store_id); unWhere += ' AND u.store_id = ?'; unParams.push(store_id); }
+  return { cardWhere, cardParams, unWhere, unParams };
+}
+
+// Full-detail export of every transaction across the org, including the
+// unattributed ones (unattributed = 1, with the disccardpromos customer).
 router.get('/transactions/export', requirePermission('cards', 'can_export'), (req, res) => {
-  const { type, store_id } = req.query;
-  let where = 'WHERE c.org_id = ?';
-  const params = [req.user.org_id];
-  if (type) { where += ' AND t.type = ?'; params.push(type); }
-  if (store_id) { where += ' AND t.store_id = ?'; params.push(store_id); }
-  const rows = db.prepare(`SELECT t.*, a.first_name, a.last_name, c.card_number_masked, s.name as resolved_store_name
+  const { cardWhere, cardParams, unWhere, unParams } = txnFilters(req.user.org_id, req.query);
+  const cardRows = db.prepare(`SELECT t.*, a.first_name, a.last_name, c.card_number_masked, s.name as resolved_store_name
     FROM card_transactions t JOIN cards c ON c.id=t.card_id LEFT JOIN applicants a ON a.id=c.applicant_id LEFT JOIN stores s ON s.id=t.store_id
-    ${where} ORDER BY t.occurred_at DESC`).all(...params);
+    ${cardWhere}`).all(...cardParams).map(r => ({ ...r, unattributed: 0 }));
+  const unRows = db.prepare(`SELECT u.id, u.provider_txn_id, u.type, u.amount, u.store_name, u.store_id, u.occurred_at, u.customer_id, u.customer_name,
+      a.first_name, a.last_name, s.name as resolved_store_name, 1 AS unattributed
+    FROM unattributed_transactions u LEFT JOIN applicants a ON a.id=u.applicant_id LEFT JOIN stores s ON s.id=u.store_id
+    ${unWhere}`).all(...unParams);
+  const rows = [...cardRows, ...unRows].sort((x, y) => String(y.occurred_at || '').localeCompare(String(x.occurred_at || '')));
   sendXlsx(res, `transactions-${Date.now()}.xlsx`, rows);
 });
 
 // All transactions across the org — "see all transactions they make in stores,
 // with all transaction info, balance, activation time, refunds — everything."
+// `summary` is the org-wide spend total this list adds up to (unfiltered, not
+// just this page): purchases and refunds on cards, plus the unattributed
+// charges, which are INCLUDED in totalSpent.
 router.get('/transactions/all', (req, res) => {
-  const { page = 1, pageSize = 100, type, store_id } = req.query;
-  let where = 'WHERE c.org_id = ?';
-  const params = [req.user.org_id];
-  if (type) { where += ' AND t.type = ?'; params.push(type); }
-  if (store_id) { where += ' AND t.store_id = ?'; params.push(store_id); }
-  const total = db.prepare(`SELECT COUNT(*) c FROM card_transactions t JOIN cards c ON c.id=t.card_id ${where}`).get(...params).c;
+  const { page = 1, pageSize = 100 } = req.query;
+  const orgId = req.user.org_id;
+  const { cardWhere, cardParams, unWhere, unParams } = txnFilters(orgId, req.query);
+  const total = db.prepare(`SELECT (SELECT COUNT(*) FROM card_transactions t JOIN cards c ON c.id=t.card_id ${cardWhere})
+    + (SELECT COUNT(*) FROM unattributed_transactions u ${unWhere}) c`).get(...cardParams, ...unParams).c;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
-  const rows = db.prepare(`SELECT t.*, a.first_name, a.last_name, c.card_number_masked
-    FROM card_transactions t JOIN cards c ON c.id=t.card_id LEFT JOIN applicants a ON a.id=c.applicant_id
-    ${where} ORDER BY t.occurred_at DESC LIMIT ? OFFSET ?`).all(...params, +pageSize, offset);
-  res.json({ transactions: rows, total, page: +page, pageSize: +pageSize });
+  const rows = db.prepare(`SELECT * FROM (
+      SELECT t.id, t.card_id, t.provider_txn_id, t.occurred_at, t.type, t.amount, t.balance_after, t.store_name, t.store_id,
+        a.first_name, a.last_name, c.card_number_masked, a.id AS linked_applicant_id, NULL AS customer_id, NULL AS customer_name, 0 AS unattributed
+      FROM card_transactions t JOIN cards c ON c.id=t.card_id LEFT JOIN applicants a ON a.id=c.applicant_id ${cardWhere}
+      UNION ALL
+      SELECT u.id, NULL, u.provider_txn_id, u.occurred_at, u.type, u.amount, NULL, u.store_name, u.store_id,
+        a.first_name, a.last_name, NULL, a.id, u.customer_id, u.customer_name, 1
+      FROM unattributed_transactions u LEFT JOIN applicants a ON a.id=u.applicant_id ${unWhere}
+    ) ORDER BY occurred_at DESC LIMIT ? OFFSET ?`).all(...cardParams, ...unParams, +pageSize, offset);
+  const card = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type != 'refund' AND t.amount < 0 THEN -t.amount ELSE 0 END), 0) purchases,
+      COALESCE(SUM(CASE WHEN t.type = 'refund' THEN t.amount ELSE 0 END), 0) refunds
+    FROM card_transactions t JOIN cards c ON c.id=t.card_id WHERE c.org_id = ?`).get(orgId);
+  const unlinkedCustomers = db.prepare(`SELECT COUNT(DISTINCT customer_id) n FROM unattributed_transactions WHERE org_id = ? AND applicant_id IS NULL AND customer_id IS NOT NULL`).get(orgId).n;
+  const un = unattributedNet(orgId);
+  res.json({
+    transactions: rows, total, page: +page, pageSize: +pageSize,
+    summary: {
+      purchases: Math.round(card.purchases * 100) / 100, refunds: Math.round(card.refunds * 100) / 100,
+      unattributedNet: un.net, unattributedCount: un.count, unlinkedCustomers,
+      totalSpent: totalSpend(orgId).total,
+    },
+  });
 });
 
 export default router;

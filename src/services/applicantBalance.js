@@ -1,5 +1,5 @@
 import { db } from '../db.js';
-import { unattributedNet } from './spendTotals.js';
+import { totalSpend } from './spendTotals.js';
 
 // An applicant merged into a group (see services/duplicates.js's
 // mergeApplicants) shares exactly one real disccardpromos account with
@@ -135,23 +135,23 @@ export function orgFundsSummary(orgId, seasonId) {
   const seasonClause = seasonId ? ' AND season_id = ?' : '';
   const seasonParams = seasonId ? [seasonId] : [];
   const approved = db.prepare(`SELECT id, merge_group_id FROM applicants WHERE org_id = ? AND approval_status = 'approved'${seasonClause}`).all(orgId, ...seasonParams);
-  // Charges by disccardpromos customers not linked to any applicant (see
-  // services/spendTotals.js) are real spend too — without them Total Spent
-  // falls short of disccardpromos' own figure.
-  const unattributed = unattributedNet(orgId, { seasonId }).net;
-  if (!approved.length) return { approvedFunds: 0, totalSpent: unattributed, unattributedSpend: unattributed };
+  // "Total Spent" is the full org-wide spend (see services/spendTotals.js's
+  // totalSpend) — NOT the sum of the approved applicants' own spend below.
+  // That per-applicant sum drops anyone later rejected/removed, subtracts
+  // merge spend adjustments, and (before charges by unlinked disccardpromos
+  // customers were included) could never reach disccardpromos' own figure.
+  const spend = totalSpend(orgId, seasonId);
+  if (!approved.length) return { approvedFunds: 0, totalSpent: spend.total, unattributedSpend: spend.unattributed };
   const balances = getApplicantBalances(orgId, approved.map(a => a.id));
   const seenGroups = new Set();
-  let approvedFunds = 0, totalSpent = 0;
+  let approvedFunds = 0;
   for (const a of approved) {
     const groupKey = a.merge_group_id || a.id;
     if (seenGroups.has(groupKey)) continue;
     seenGroups.add(groupKey);
-    const b = balances.get(a.id);
-    approvedFunds += b?.loaded || 0;
-    totalSpent += b?.spent || 0;
+    approvedFunds += balances.get(a.id)?.loaded || 0;
   }
-  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: Math.round((totalSpent + unattributed) * 100) / 100, unattributedSpend: unattributed };
+  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: spend.total, unattributedSpend: spend.unattributed };
 }
 
 // Dashboard KPI: "X of Y loaded accounts are active" — Y is every real
