@@ -13,8 +13,13 @@ if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
 }
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 
-export function signToken(user) {
-  return jwt.sign({ userId: user.id, tokenVersion: user.token_version || 0 }, JWT_SECRET, { expiresIn: '30d' });
+// `impersonatedBy` (an admin's user id) marks an "Enter Portal" session: the
+// token is signed, so the claim can't be forged by the client. auth() below
+// re-checks that admin is still active before honouring it.
+export function signToken(user, { impersonatedBy } = {}) {
+  const payload = { userId: user.id, tokenVersion: user.token_version || 0 };
+  if (impersonatedBy) payload.impersonatedBy = impersonatedBy;
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
 }
 
 // Strips password_hash and parses page_size_prefs from its raw stored JSON
@@ -47,6 +52,12 @@ export function auth(req, res, next) {
   // submission uses this to require a fresh verification code once per
   // login rather than on every single submission (see routes/storeBilling.js).
   req.tokenIat = decoded.iat;
+  // Enter Portal: set only while the admin who entered is still an active
+  // internal user, so deactivating them kills the bypass immediately.
+  if (decoded.impersonatedBy) {
+    const admin = db.prepare('SELECT id, role, is_active FROM users WHERE id = ?').get(decoded.impersonatedBy);
+    if (admin && admin.is_active && ['super_admin', 'org_admin', 'staff'].includes(admin.role)) req.impersonatedBy = admin.id;
+  }
   next();
 }
 

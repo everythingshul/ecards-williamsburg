@@ -86,7 +86,7 @@ router.post('/impersonate/:token', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id);
   if (!user || !user.is_active) return res.status(404).json({ error: 'This account is no longer active' });
   if (!row.used_at) db.prepare('UPDATE impersonation_tokens SET used_at = datetime(\'now\') WHERE token = ?').run(row.token);
-  res.json({ token: signToken(user), user: safeUser(user), permissions: computePermissionMap(user) });
+  res.json({ token: signToken(user, { impersonatedBy: row.created_by }), user: safeUser(user), permissions: computePermissionMap(user) });
 });
 
 // Self-service preference save — deliberately living here (gated only on

@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js?v=20261014"></script>
+<script src="/js/app.js?v=20261017"></script>
 <script>
 Auth.requireAdmin();
 const isSuperAdmin = Auth.user()?.role === 'super_admin';
@@ -672,10 +672,12 @@ window.openEditEmailTemplate = (key) => {
     <label>Body</label><div id="et-body-rte"></div>
     <label style="margin-top:14px">Reply-To <span class="small-muted">(leave blank to use ${t.defaultReplyTo ? 'the org default, ' + esc(t.defaultReplyTo) : 'the sending address'})</span></label>
     <input id="et-replyto" value="${esc(t.replyTo || '')}" placeholder="e.g. approvals@yourorg.org">
-    <p class="small-muted" style="margin-top:10px">Available placeholders: ${t.vars.map(v => `<code>{{${esc(v)}}}</code>`).join(' ')}</p>
+    <p class="small-muted" style="margin-top:10px">In the message, use <strong>Insert field</strong> &mdash; each pill is filled in automatically when the email is sent. The subject line is plain text, so type a placeholder there like ${t.vars.slice(0, 2).map(v => `<code>{{${esc(v)}}}</code>`).join(' ')}.</p>
   `;
   openModal(t.label, body, `<button class="btn btn-primary btn-sm" onclick="saveEmailTemplate('${key}')">Save</button>`);
-  etBodyEditor = createRichTextEditor('et-body-rte', t.body);
+  // each {{placeholder}} shows as a labelled pill, not raw braces
+  const nice = (v) => { const w = v.replace(/([A-Z])/g, ' $1').toLowerCase(); return w.charAt(0).toUpperCase() + w.slice(1); };
+  etBodyEditor = createRichTextEditor('et-body-rte', t.body, { fields: t.vars.map(v => ({ key: v, label: nice(v) })) });
 };
 window.saveEmailTemplate = async (key) => {
   const body = { subject: qs('#et-subject').value, body: etBodyEditor.getHtml(), reply_to: qs('#et-replyto').value };

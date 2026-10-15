@@ -287,24 +287,10 @@ export const SYSTEM_EMAIL_TEMPLATES = {
       <p><strong>Store:</strong> {{storeName}}<br><strong>Period:</strong> {{period}}<br><strong>Amount:</strong> {{amount}}</p>
       <p><a href="{{invoiceUrl}}">View in the admin portal</a></p>`,
   },
-  storeInvoicePaymentSent: {
-    // noteBlock is pre-built HTML (empty string, or a <p>, supplied by the
-    // caller) rather than a plain var — substitute() only does flat
-    // {{var}} replacement, no conditionals, so an optional block has to
-    // already be the right HTML (or blank) before it gets here. See
-    // routes/storeBilling.js's POST /invoices/:id/complete.
-    label: 'Store Billing: Payment Sent', vars: ['storeName', 'amount', 'bankName', 'last4', 'period', 'noteBlock'],
-    subject: 'Payment sent — {{period}}',
-    body: `<p>Shalom {{storeName}},</p>
-      <p>Your payment has been sent.</p>
-      <table style="width:100%;border-collapse:collapse;margin:18px 0">
-        <tr><td style="padding:6px 0;color:#8a7c63">Amount</td><td style="padding:6px 0;text-align:right;font-weight:600">{{amount}}</td></tr>
-        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Sent To</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{bankName}} (&hellip;{{last4}})</td></tr>
-        <tr><td style="padding:6px 0;color:#8a7c63;border-top:1px solid #ece3d3">Billing Period</td><td style="padding:6px 0;text-align:right;font-weight:600;border-top:1px solid #ece3d3">{{period}}</td></tr>
-      </table>
-      <p>It may take up to <strong>4 business days</strong> to show up in your account.</p>
-      {{noteBlock}}`,
-  },
+  // (The "payment is on the way" email is no longer a fixed auto-email here:
+  // it's a set of rich-text templates, one marked default, managed under
+  // Store Billing > Payment Emails — see routes/storeBilling.js. A customized
+  // version of the old entry is carried over as the first template.)
 };
 
 // Renders every field the shul/store just submitted as a plain label/value

@@ -22,7 +22,7 @@
 </style>
 </head>
 <body>
-<script src="/js/app.js?v=20261014"></script>
+<script src="/js/app.js?v=20261017"></script>
 <script src="/js/usbanks.js?v=20261014"></script>
 <script>
 Auth.requireAdmin();
@@ -35,6 +35,7 @@ renderShell('/admin/store-billing', `
   <div class="tabs" id="sb-tabs">
     <button class="active" data-t="invoices">Invoices</button>
     <button data-t="periods">Billing Periods</button>
+    <button data-t="templates">Payment Emails</button>
   </div>
 
   <div id="panel-invoices">
@@ -70,12 +71,18 @@ renderShell('/admin/store-billing', `
       <tbody id="tbody-periods"><tr><td colspan="5" class="empty-state">Loading&hellip;</td></tr></tbody></table>
     </div>
   </div>
+
+  <div id="panel-templates" style="display:none">
+    <div class="flex-between"><p class="small-muted" style="margin:0;max-width:640px">The &ldquo;payment is on the way&rdquo; emails. The <strong>default</strong> template is pre-selected when you click Mark Payment Sent &mdash; you can still switch templates or edit the message for any single payment.</p>
+      ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="openPaymentTemplate()">+ New Template</button>` : ''}</div>
+    <div id="pt-list" style="margin-top:12px"><p class="small-muted">Loading&hellip;</p></div>
+  </div>
 `);
 
 qsa('#sb-tabs button').forEach(b => b.addEventListener('click', () => {
   qsa('#sb-tabs button').forEach(x => x.classList.remove('active')); b.classList.add('active');
-  ['invoices', 'periods'].forEach(t => qs('#panel-' + t).style.display = t === b.dataset.t ? 'block' : 'none');
-  if (b.dataset.t === 'periods') loadPeriods(); else loadInvoices();
+  ['invoices', 'periods', 'templates'].forEach(t => qs('#panel-' + t).style.display = t === b.dataset.t ? 'block' : 'none');
+  if (b.dataset.t === 'periods') loadPeriods(); else if (b.dataset.t === 'templates') loadPaymentTemplates(); else loadInvoices();
 }));
 
 const SB_ICONS = {
@@ -223,27 +230,47 @@ window.openIssueBillingModal = async () => {
       <div><label>Billing Period Start</label><input id="ib-start" type="date" value="${today}"></div>
       <div><label>Billing Period End</label><input id="ib-end" type="date" value="${today}"></div>
     </div>
-    <label>Email Subject</label><input id="ib-subject" value="${esc(subject)}">
-    <label>Email Body <span class="small-muted">(HTML; {{storeName}}, {{period}}, {{startDate}}, {{endDate}}, {{portalUrl}} are substituted per store)</span></label>
-    <textarea id="ib-body" rows="10">${esc(bodyHtml)}</textarea>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px"><label style="margin:0">Email Subject</label>${fieldMenu('ib-subject', BILLING_REQUEST_FIELDS)}</div>
+    <input id="ib-subject" value="${esc(subject)}" style="margin-top:4px">
+    <label>Email Message <span class="small-muted">(the pills are filled in for each store when it sends)</span></label>
+    <div id="ib-rte"></div>
     <p class="small-muted" style="margin-top:6px">Changes here apply to this send only. Use "Save as Default" to make them permanent for every future billing period.</p>
   `;
   openModal('Issue Billing Email', body, `
     <button class="btn btn-outline btn-sm" onclick="saveBillingEmailDefault()">Save as Default</button>
     <button class="btn btn-primary btn-sm" onclick="openStorePicker()">Next: Choose Stores</button>`, { wide: true });
+  ibEditor = createRichTextEditor('ib-rte', bodyHtml, { fields: BILLING_REQUEST_FIELDS });
+};
+
+// Fields filled in per store when a billing request goes out.
+const BILLING_REQUEST_FIELDS = [
+  { key: 'storeName', label: 'Store name' }, { key: 'period', label: 'Billing period' },
+  { key: 'startDate', label: 'Period start' }, { key: 'endDate', label: 'Period end' }, { key: 'portalUrl', label: 'Portal link' },
+];
+let ibEditor = null;
+// A tiny "Insert field…" menu for a plain text input (the subject line): the
+// subject is text-only, so it gets the {{field}} token inserted at the cursor.
+function fieldMenu(inputId, fields) {
+  return `<select class="btn-sm" style="width:auto;font-size:12.5px;padding:4px 8px" onchange="insertIntoInput('${inputId}', this.value); this.value=''"><option value="">Insert field&hellip;</option>${fields.map(f => `<option value="${esc(f.key)}">${esc(f.label)}</option>`).join('')}</select>`;
+}
+window.insertIntoInput = (inputId, key) => {
+  if (!key) return;
+  const el = qs('#' + inputId); const tok = `{{${key}}}`;
+  const a = el.selectionStart ?? el.value.length, z = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, a) + tok + el.value.slice(z); el.focus(); el.setSelectionRange(a + tok.length, a + tok.length);
 };
 
 window.saveBillingEmailDefault = async () => {
   try {
-    await api('/settings/email-templates/storeBillingRequest', { method: 'PUT', body: { subject: qs('#ib-subject').value, body: qs('#ib-body').value } });
+    await api('/settings/email-templates/storeBillingRequest', { method: 'PUT', body: { subject: qs('#ib-subject').value, body: ibEditor.getHtml() } });
     toast('Saved as the default billing email — every future "Issue Billing Email" will start from this.');
   } catch (err) { toast(err.message, true); }
 };
 
 window.openStorePicker = async () => {
-  const start = qs('#ib-start').value, end = qs('#ib-end').value, subject = qs('#ib-subject').value, bodyHtml = qs('#ib-body').value;
+  const start = qs('#ib-start').value, end = qs('#ib-end').value, subject = qs('#ib-subject').value, bodyHtml = ibEditor.getHtml();
   if (!start || !end) return toast('Start and end date are required', true);
-  if (!subject || !bodyHtml) return toast('Subject and body are required', true);
+  if (!subject || !bodyHtml.replace(/<[^>]*>|&nbsp;|\s/g, '')) return toast('Subject and body are required', true);
   try {
     const { stores } = await api('/stores?setup_status=active');
     const body = `
@@ -274,6 +301,61 @@ window.sendBillingEmail = async (start, end) => {
     closeModal();
     loadPeriods();
   } catch (err) { toast(err.message, true); }
+};
+
+// ===================== Payment Emails (templates) =====================
+
+let payTemplates = [], payVars = [], ptEditor = null;
+async function loadPaymentTemplates() {
+  try {
+    const r = await api('/store-billing/payment-email-templates');
+    payTemplates = r.templates; payVars = r.vars;
+    qs('#pt-list').innerHTML = payTemplates.map(t => `
+      <div class="card" style="margin-bottom:12px">
+        <div class="flex-between" style="gap:10px;flex-wrap:wrap">
+          <div><strong style="font-size:15px">${esc(t.name)}</strong> ${t.is_default ? badge('default', 'active') : ''}
+            <div class="small-muted" style="margin-top:2px">Subject: ${renderFieldChips(esc(t.subject), payVars)}</div></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="openPaymentTemplate('${t.id}')">Edit</button>` : ''}
+            ${canEdit && !t.is_default ? `<button class="btn btn-outline btn-sm" onclick="setDefaultPaymentTemplate('${t.id}')">Set as Default</button>` : ''}
+            ${canEdit && !t.is_default ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deletePaymentTemplate('${t.id}')">Delete</button>` : ''}
+          </div>
+        </div>
+        <div class="pt-preview" style="margin-top:10px;max-height:170px;overflow:hidden;border:1px solid var(--border);border-radius:8px;padding:10px 14px;background:#fff;font-size:13.5px;position:relative">
+          ${renderFieldChips(t.body_html, payVars)}
+          <div style="position:absolute;left:0;right:0;bottom:0;height:34px;background:linear-gradient(transparent,#fff)"></div>
+        </div>
+      </div>`).join('');
+  } catch (err) { toast(err.message, true); }
+}
+window.openPaymentTemplate = (id) => {
+  const t = id ? payTemplates.find(x => x.id === id) : null;
+  const body = `
+    <label>Template Name</label><input id="pt-name" value="${esc(t?.name || '')}" placeholder="e.g. Standard payment notice">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px"><label style="margin:0">Subject</label>${fieldMenu('pt-subject', payVars)}</div>
+    <input id="pt-subject" style="margin-top:4px" value="${esc(t?.subject || 'Payment sent — {{period}}')}">
+    <label>Message <span class="small-muted">(use <strong>Insert field</strong> to add the invoice breakdown table &mdash; invoice amount, minus the processing fee, total &mdash; or any single figure)</span></label>
+    <div id="pt-rte"></div>
+    <label class="checkbox-row" style="margin-top:14px"><input type="checkbox" id="pt-default" ${t?.is_default ? 'checked disabled' : ''}><span>Make this the default template${t?.is_default ? ' <span class="small-muted">(it already is)</span>' : ''}</span></label>
+  `;
+  openModal(t ? 'Edit Payment Email' : 'New Payment Email', body, `<button class="btn btn-primary btn-sm" onclick="savePaymentTemplate('${id || ''}')">Save</button>`, { wide: true });
+  ptEditor = createRichTextEditor('pt-rte', t?.body_html || '<p>Shalom {{storeName}},</p><p>Your payment has been sent.</p><p>{{breakdown}}</p>', { fields: payVars });
+};
+window.savePaymentTemplate = async (id) => {
+  const body = { name: qs('#pt-name').value, subject: qs('#pt-subject').value, body_html: ptEditor.getHtml(), is_default: qs('#pt-default').checked || undefined };
+  try {
+    if (id) await api(`/store-billing/payment-email-templates/${id}`, { method: 'PUT', body });
+    else await api('/store-billing/payment-email-templates', { method: 'POST', body });
+    toast('Template saved'); closeModal(); loadPaymentTemplates();
+  } catch (err) { toast(err.message, true); }
+};
+window.setDefaultPaymentTemplate = async (id) => {
+  try { await api(`/store-billing/payment-email-templates/${id}/default`, { method: 'POST' }); toast('Default template changed'); loadPaymentTemplates(); } catch (err) { toast(err.message, true); }
+};
+window.deletePaymentTemplate = async (id) => {
+  const t = payTemplates.find(x => x.id === id);
+  if (!confirm(`Delete the template "${t?.name}"?`)) return;
+  try { await api(`/store-billing/payment-email-templates/${id}`, { method: 'DELETE' }); toast('Template deleted'); loadPaymentTemplates(); } catch (err) { toast(err.message, true); }
 };
 
 loadInvoices();
