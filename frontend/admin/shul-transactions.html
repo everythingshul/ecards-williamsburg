@@ -120,6 +120,8 @@ renderShell('/admin/shul-transactions', `
       </div>
       <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="submitAdminAllocation()">Give</button>
     </div>
+    <div class="flex-between" style="margin-bottom:8px"><h3 style="margin:0">All Allocations</h3>
+      ${Auth.can('shul_payments', 'can_export') ? `<button class="btn btn-outline btn-sm" onclick="exportAllocations()">Export All Allocations (Excel)</button>` : ''}</div>
     <div class="card" style="padding:0;overflow-x:auto" id="allocations-results-card">
       <table><thead><tr><th>Shul</th><th>Applicant</th><th>Given</th><th>Match</th><th>Total</th><th>By</th><th>Date</th><th></th></tr></thead>
       <tbody id="tbody-allocations"><tr><td colspan="8" class="empty-state">Loading…</td></tr></tbody></table>
@@ -672,6 +674,9 @@ async function loadAllocations() {
     </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No allocations match these filters.</td></tr>';
 }
 window.undoAllocation = (id) => openAllocationUndoModal(id, { onDone: loadAllocations });
+// Same shul/season filters as the table; every give including undone ones
+// (marked), plus a TOTAL row of the active ones.
+window.exportAllocations = () => downloadAuthed('/shul-payments/allocations/export?' + currentFilterParams(), `shul-allocations-${new Date().toISOString().slice(0, 10)}.xlsx`).catch(err => toast(err.message, true));
 async function loadApplicantsForShul(shulId) {
   const sel = qs('#al-applicant');
   if (!shulId) { sel.innerHTML = '<option value="">Select a shul first…</option>'; return; }
