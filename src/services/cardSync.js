@@ -4,6 +4,7 @@ import { resolveStoreId } from './storeMatch.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
+import { getActiveSeasonId } from '../utils/formSchedule.js';
 
 // Last 4 digits of any masked card string, whatever mask convention it uses
 // (`****1123`, `************1123`, `**** **** **** 1123`) — the only card
@@ -409,6 +410,38 @@ export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
   return { unlinkedCustomers, unlinkedTransactions };
 }
 
+// Stores what disccardpromos itself says each customer has spent: the
+// committed top-level `amount` minus the live packages[].balance (the two
+// fields confirmed real — packages[].amount is always null). Rewritten in
+// full from the bulk indexes every sweep, so the Dashboard's Total Spent
+// (services/spendTotals.js reads the sum) is disccardpromos' own figure
+// rather than whatever subset of charges the transaction feed listed.
+// Returns the total, or null when no index was pulled (mock mode / failure),
+// in which case the previous snapshot is kept.
+export function recordProviderSpend(orgId, indexes) {
+  const live = (indexes || []).filter(Boolean);
+  if (!live.length) return null;
+  const rows = new Map();
+  for (const index of live) {
+    for (const c of index.list || []) {
+      const id = cleanProviderId(c.id);
+      if (!id || rows.has(id)) continue;
+      const loaded = c.amount != null && c.amount !== '' ? Number(c.amount) : NaN;
+      const balance = (Array.isArray(c.packages) ? c.packages : []).reduce((s, p) => s + (Number(p.balance) || 0), 0);
+      if (!Number.isFinite(loaded)) continue;
+      rows.set(id, { id, external_id: c.external_id != null ? String(c.external_id) : null, name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || null,
+        loaded: Math.round(loaded * 100) / 100, balance: Math.round(balance * 100) / 100, spent: Math.max(0, Math.round((loaded - balance) * 100) / 100) });
+    }
+  }
+  db.transaction(() => {
+    db.prepare('DELETE FROM provider_spend_snapshot WHERE org_id = ?').run(orgId);
+    const ins = db.prepare(`INSERT INTO provider_spend_snapshot (org_id, customer_id, external_id, customer_name, loaded, balance, spent, synced_at) VALUES (?,?,?,?,?,?,?, datetime('now'))`);
+    for (const r of rows.values()) ins.run(orgId, r.id, r.external_id, r.name, r.loaded, r.balance, r.spent);
+  })();
+  const total = Math.round([...rows.values()].reduce((s, r) => s + r.spent, 0) * 100) / 100;
+  return { total, customers: rows.size };
+}
+
 // Sweeps every applicant with a disccardpromos account — cards, transactions,
 // AND balance reconciliation together — used by the automatic background
 // interval (see index.js, every 60s) and the "Sync All" button. This is
@@ -437,7 +470,10 @@ export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
 // rule comes from).
 export async function syncAllCards(orgId) {
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0`).all(orgId);
-  const seasonIds = [...new Set(applicants.map(a => a.season_id))];
+  // The active season is always pulled too (one platform account, so any
+  // season's pull lists every customer): a brand-new org, or one whose
+  // applicants are all exempt, must still get disccardpromos' totals.
+  const seasonIds = [...new Set([...applicants.map(a => a.season_id), getActiveSeasonId(orgId)].filter(Boolean))];
   const indexBySeason = new Map();
   for (const seasonId of seasonIds) {
     indexBySeason.set(seasonId, giftcard.isMockMode(seasonId) ? null : await giftcard.buildCustomerIndex(seasonId, { balances: true, transactions: true }));
@@ -475,6 +511,9 @@ export async function syncAllCards(orgId) {
   let unlinked = { unlinkedCustomers: 0, unlinkedTransactions: 0 };
   try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean), coveredCustomerIds); }
   catch (e) { console.error('[cardSync] unlinked-customer sync failed:', e.message); }
+  let providerSpend = null;
+  try { providerSpend = recordProviderSpend(orgId, [...indexBySeason.values()]); }
+  catch (e) { console.error('[cardSync] provider spend snapshot failed:', e.message); }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares
   // its group's one real disccardpromos customer and would just re-check
@@ -492,5 +531,6 @@ export async function syncAllCards(orgId) {
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
-  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
+  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked,
+    providerSpent: providerSpend?.total ?? null, providerCustomers: providerSpend?.customers ?? 0 };
 }

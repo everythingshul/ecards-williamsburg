@@ -1669,6 +1669,21 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
 // "Mark Payment Sent" can correct the billing period this one invoice covers
 // (the shared billing_periods row is left alone — other stores were invited to
 // it too). NULL = use the period it was submitted for.
+// What disccardpromos itself reports per customer (committed `amount` minus
+// the live packages[].balance), rewritten in full on every successful sync
+// sweep. Total Spent reads the sum of `spent` here, so it is disccardpromos'
+// own figure by construction — the transaction ledger is only the breakdown.
+db.exec(`CREATE TABLE IF NOT EXISTS provider_spend_snapshot (
+  org_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  external_id TEXT,
+  customer_name TEXT,
+  loaded REAL NOT NULL DEFAULT 0,
+  balance REAL NOT NULL DEFAULT 0,
+  spent REAL NOT NULL DEFAULT 0,
+  synced_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (org_id, customer_id)
+)`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
 // Reusable rich-text "payment is on the way" emails, with the invoice

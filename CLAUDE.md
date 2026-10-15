@@ -135,6 +135,15 @@ no merge adjustments — plus the unattributed charges. The Dashboard Total Spen
 disagree, and it matches disccardpromos' own total. (It used to sum only *approved* applicants'
 own spend, which silently dropped anyone later rejected/removed and any merge adjustment, so it
 never reached disccardpromos' figure. Remaining = Total Loaded − Total Spent, as before.)
+**It is disccardpromos' own number**: every sync sweep rewrites `provider_spend_snapshot`
+(`recordProviderSpend` in `cardSync.js`: per customer, the committed top-level `amount` minus the live
+`packages[].balance`, from the bulk index — the active season is always pulled so a fresh org gets it
+too), and `totalSpend()` returns the sum of that as `total` (`source: 'disccardpromos'`, `syncedAt`)
+whenever a snapshot exists, keeping the transaction ledger as `ledger` and the gap as `difference`.
+Until the first live sync (and in mock mode) it falls back to the ledger (`source: 'ledger'`); a
+total filtered to a PAST season is the ledger (the provider figure carries no season; the active season — the Dashboard's default — gets the provider figure). The Dashboard
+tile shows the source under the number, Cards > All Transactions spells out ledger vs reported and
+the gap, and the Sync All toast reports the figure.
 `unattributedByStore` feeds `topStores`, the donor Stores panel and the Stores list/export/
 profile/history; Cards > All Transactions lists the unattributed rows (labelled with the
 disccardpromos customer) with a Total spent summary and an "Unattributed spend — INCLUDED"
