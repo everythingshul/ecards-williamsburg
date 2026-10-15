@@ -8,7 +8,6 @@ import * as solaPay from '../services/sola.js';
 import { notifyNewSignup } from '../services/mail.js';
 import { logAudit } from '../services/audit.js';
 import { sendXlsx } from '../services/xlsx.js';
-import { logAudit } from '../services/audit.js';
 
 const router = Router();
 
