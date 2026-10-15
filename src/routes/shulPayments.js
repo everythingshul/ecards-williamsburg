@@ -625,6 +625,37 @@ router.get('/allocations', (req, res) => {
   res.json({ allocations: rows });
 });
 
+// Export of the Allocations tab — every give (reversals included, marked
+// as such) under the same shul/applicant/season filters, with a TOTAL row
+// of what is still standing. can_export like every other export.
+router.get('/allocations/export', requirePermission('shul_payments', 'can_export'), (req, res) => {
+  if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
+  const { shul_id, applicant_id, season_id } = req.query;
+  let where = 'WHERE sa.org_id = ?';
+  const params = [req.user.org_id];
+  if (shul_id) { where += ' AND sa.shul_id = ?'; params.push(shul_id); }
+  if (applicant_id) { where += ' AND sa.applicant_id = ?'; params.push(applicant_id); }
+  if (season_id) { where += ' AND sa.season_id = ?'; params.push(season_id); }
+  const rows = db.prepare(`SELECT sa.*, s.name_en AS shul_name, a.external_id, a.first_name, a.last_name, se.name AS season_name,
+      u.first_name AS created_by_first, u.last_name AS created_by_last
+    FROM shul_allocations sa LEFT JOIN shuls s ON s.id = sa.shul_id LEFT JOIN applicants a ON a.id = sa.applicant_id
+    LEFT JOIN seasons se ON se.id = sa.season_id LEFT JOIN users u ON u.id = sa.created_by
+    ${where} ORDER BY sa.created_at DESC`).all(...params);
+  const m = v => Math.round((Number(v) || 0) * 100) / 100;
+  const out = rows.map(r => ({
+    'Date': r.created_at, 'Shul': r.shul_name || '', 'Applicant ID': r.external_id || '', 'First Name': r.first_name || '', 'Last Name': r.last_name || '',
+    'Season': r.season_name || '', 'Given by Shul': m(r.base_amount), 'Match': m(r.match_amount), 'Total': m(r.total_amount),
+    'Status': r.reversal_of ? 'reversal' : (r.reversed_at ? `undone ${r.reversed_at}` : 'active'),
+    'Admin Override': r.is_admin_override ? 'yes' : '', 'Entered By': `${r.created_by_first || ''} ${r.created_by_last || ''}`.trim(),
+  }));
+  const active = rows.filter(r => !r.reversed_at && !r.reversal_of);
+  out.push({ 'Date': '', 'Shul': 'TOTAL (active allocations)', 'Applicant ID': '', 'First Name': '', 'Last Name': '', 'Season': '',
+    'Given by Shul': m(active.reduce((t, r) => t + (Number(r.base_amount) || 0), 0)), 'Match': m(active.reduce((t, r) => t + (Number(r.match_amount) || 0), 0)),
+    'Total': m(active.reduce((t, r) => t + (Number(r.total_amount) || 0), 0)), 'Status': `${active.length} of ${rows.length} rows`, 'Admin Override': '', 'Entered By': '' });
+  logAudit(req.user.org_id, req.user.id, 'export', 'shul_allocations', null, null, { rows: rows.length, shul_id: shul_id || null, season_id: season_id || null }, req.ip);
+  sendXlsx(res, `shul-allocations-${new Date().toISOString().slice(0, 10)}.xlsx`, out);
+});
+
 router.post('/allocate', requirePermission('shul_payments', 'can_edit'), async (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
   try {
