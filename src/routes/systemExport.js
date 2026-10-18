@@ -28,6 +28,8 @@ router.get('/', (req, res) => {
   addSheet('Cards', db.prepare(`SELECT c.*, a.first_name, a.last_name FROM cards c LEFT JOIN applicants a ON a.id = c.applicant_id WHERE c.org_id = ? ORDER BY c.created_at`).all(orgId));
   addSheet('Card Transactions', db.prepare(`SELECT t.*, a.first_name, a.last_name, c.card_number_masked FROM card_transactions t
     JOIN cards c ON c.id = t.card_id LEFT JOIN applicants a ON a.id = c.applicant_id WHERE c.org_id = ? ORDER BY t.occurred_at`).all(orgId));
+  addSheet('Unattributed Transactions', db.prepare(`SELECT u.id, u.provider_txn_id, u.type, u.amount, u.store_name, u.occurred_at, u.customer_id, u.customer_name, a.first_name, a.last_name
+    FROM unattributed_transactions u LEFT JOIN applicants a ON a.id = u.applicant_id WHERE u.org_id = ? ORDER BY u.occurred_at`).all(orgId));
   addSheet('Stores', db.prepare('SELECT * FROM stores WHERE org_id = ? ORDER BY created_at').all(orgId));
   addSheet('Store Bills Submitted', db.prepare(`SELECT b.* FROM store_bill_submissions b JOIN stores s ON s.id = b.store_id WHERE s.org_id = ? ORDER BY b.submitted_at`).all(orgId));
   addSheet('Tasks', db.prepare(`SELECT t.*, au.email as assignee_email FROM tasks t LEFT JOIN users au ON au.id = t.assigned_to WHERE t.org_id = ? ORDER BY t.created_at`).all(orgId));

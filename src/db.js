@@ -1669,6 +1669,12 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
 // "Mark Payment Sent" can correct the billing period this one invoice covers
 // (the shared billing_periods row is left alone — other stores were invited to
 // it too). NULL = use the period it was submitted for.
+// Unattributed spend (disccardpromos customers not linked to any applicant)
+// keeps the customer and resolved store; idempotent for a table created before
+// these columns existed.
+safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_id TEXT`);
+safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_name TEXT`);
+safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN store_id TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
 // Reusable rich-text "payment is on the way" emails, with the invoice
