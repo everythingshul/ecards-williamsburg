@@ -4,6 +4,7 @@ import { resolveStoreId } from './storeMatch.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
+import { totalSpend } from './spendTotals.js';
 
 // Last 4 digits of any masked card string, whatever mask convention it uses
 // (`****1123`, `************1123`, `**** **** **** 1123`) — the only card
@@ -380,6 +381,13 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 // applicant, via insertUnattributed (idempotent). If one of those customers
 // is linked to an applicant later, syncApplicantCards records the same
 // provider_txn_ids as real card transactions and drops these rows.
+// The transactions a bulk-list customer record carries, whichever shape the
+// provider used for them.
+function embeddedTxns(c) {
+  return Array.isArray(c?.transactions) ? c.transactions
+    : (Array.isArray(c?.packages) ? c.packages.flatMap(p => Array.isArray(p.transactions) ? p.transactions : []) : []);
+}
+
 export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
   // Skip only customers the per-applicant sync really processed this sweep
   // (coveredIds). Merely "some applicant holds this account id" isn't enough:
@@ -390,23 +398,88 @@ export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
   const linked = coveredIds || new Set(db.prepare(`SELECT provider_account_id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL`).all(orgId)
     .map(r => cleanProviderId(r.provider_account_id)));
   const seen = new Set();
-  let unlinkedCustomers = 0, unlinkedTransactions = 0;
+  let unlinkedCustomers = 0, unlinkedTransactions = 0, unlinkedMalformed = 0;
   for (const index of indexes) {
     for (const c of index?.list || []) {
       const id = cleanProviderId(c.id);
       if (!id || linked.has(id) || seen.has(id)) continue;
       seen.add(id);
-      const txns = Array.isArray(c.transactions) ? c.transactions
-        : (Array.isArray(c.packages) ? c.packages.flatMap(p => Array.isArray(p.transactions) ? p.transactions : []) : []);
+      const txns = embeddedTxns(c);
       if (!txns.length) continue;
       unlinkedCustomers++;
       for (const t of txns) {
+        // An entry with no id / no usable amount used to vanish here without a
+        // trace; now it is counted (and logged) like the per-applicant path does.
+        if (!normalizeTxn(t)) { unlinkedMalformed++; console.warn(`[cardSync] malformed transaction from unlinked customer ${id} skipped — raw: ${JSON.stringify(t).slice(0, 300)}`); continue; }
         try { unlinkedTransactions += insertUnattributed(orgId, null, t, c); }
-        catch (e) { console.warn(`[cardSync] could not record a charge from unlinked customer ${id}: ${e.message}`); }
+        catch (e) { unlinkedMalformed++; console.warn(`[cardSync] could not record a charge from unlinked customer ${id}: ${e.message}`); }
       }
     }
   }
-  return { unlinkedCustomers, unlinkedTransactions };
+  return { unlinkedCustomers, unlinkedTransactions, unlinkedMalformed };
+}
+
+// SPEND AUDIT — reconciles what disccardpromos itself returns right now
+// against what is stored here, customer by customer, so a gap between our
+// Total Spent and theirs is NAMED instead of guessed at. Takes the same bulk
+// customer index(es) the sweep pulls (balances + transactions). For each
+// customer it compares:
+//   - the charges the provider lists (embedded transactions) with what we
+//     hold in card_transactions / unattributed_transactions -> `missing`
+//     (the provider has it, we never stored it: a sync that didn't run, an
+//     entry we couldn't read, a customer we can't see);
+//   - the spend implied by the provider's own balances (committed `amount`
+//     minus the live package balances) with the charges it lists -> `feedGap`
+//     (spend that reduced a balance but is NOT in the transaction list the
+//     provider sends — nothing here can ever sync that).
+// Also reports what we hold that the provider's feed no longer lists
+// (`storedNotInFeed`: history of a deleted/merged account).
+export function auditProviderSpend(orgId, indexes) {
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const net = (n) => -n.amount; // purchases are stored negative (+spend), refunds positive (-spend)
+  const stored = new Set();
+  for (const r of db.prepare(`SELECT t.provider_txn_id id FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ?`).all(orgId)) stored.add(cleanProviderId(r.id));
+  for (const r of db.prepare(`SELECT provider_txn_id id FROM unattributed_transactions WHERE org_id = ?`).all(orgId)) stored.add(cleanProviderId(r.id));
+  const linked = new Map();
+  for (const a of db.prepare(`SELECT provider_account_id, first_name, last_name, external_id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL`).all(orgId)) {
+    const k = cleanProviderId(a.provider_account_id); if (!linked.has(k)) linked.set(k, `${a.first_name || ''} ${a.last_name || ''}`.trim() || `#${a.external_id}`);
+  }
+  const sum = { customers: 0, customersWithCharges: 0, providerListedCount: 0, providerListedNet: 0, missingCount: 0, missingNet: 0, malformedCount: 0,
+    balanceImpliedSpend: 0, feedGapNet: 0, feedGapCustomers: 0, customersWithoutAmount: 0 };
+  const rows = []; const seen = new Set();
+  for (const index of indexes || []) {
+    for (const c of index?.list || []) {
+      const id = cleanProviderId(c.id);
+      if (!id || seen.has(id)) continue; seen.add(id); sum.customers++;
+      let listedNet = 0, listedCount = 0, missNet = 0, missCount = 0, bad = 0;
+      for (const t of embeddedTxns(c)) {
+        const n = normalizeTxn(t);
+        if (!n) { bad++; continue; }
+        listedCount++; listedNet += net(n);
+        if (!stored.has(cleanProviderId(n.providerTxnId))) { missCount++; missNet += net(n); }
+      }
+      if (listedCount) sum.customersWithCharges++;
+      const amount = c.amount != null && c.amount !== '' ? Number(c.amount) : NaN;
+      let balanceSpent = null, feedGap = null;
+      if (Number.isFinite(amount)) {
+        const bal = (Array.isArray(c.packages) ? c.packages : []).reduce((s, p) => s + (Number(p.balance) || 0), 0);
+        balanceSpent = r2(Math.max(0, amount - bal)); feedGap = r2(balanceSpent - listedNet);
+        sum.balanceImpliedSpend += balanceSpent;
+        if (Math.abs(feedGap) >= 0.01) { sum.feedGapNet += feedGap; sum.feedGapCustomers++; }
+      } else sum.customersWithoutAmount++;
+      sum.providerListedCount += listedCount; sum.providerListedNet += listedNet; sum.missingCount += missCount; sum.missingNet += missNet; sum.malformedCount += bad;
+      if (missCount || bad || (feedGap != null && Math.abs(feedGap) >= 0.01)) {
+        rows.push({ customerId: id, externalId: c.external_id != null ? String(c.external_id) : '', name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+          linkedTo: linked.get(id) || '', listedCount, listedNet: r2(listedNet), missingCount: missCount, missingNet: r2(missNet), malformed: bad,
+          balanceSpent, feedGap });
+      }
+    }
+  }
+  const ours = totalSpend(orgId).total;
+  const storedInFeed = sum.providerListedNet - sum.missingNet;
+  for (const k of ['providerListedNet', 'missingNet', 'balanceImpliedSpend', 'feedGapNet']) sum[k] = r2(sum[k]);
+  rows.sort((a, b) => Math.max(Math.abs(b.missingNet), Math.abs(b.feedGap || 0)) - Math.max(Math.abs(a.missingNet), Math.abs(a.feedGap || 0)));
+  return { summary: { ...sum, ourTotalSpent: ours, storedNotInFeed: r2(ours - storedInFeed) }, rows };
 }
 
 // Sweeps every applicant with a disccardpromos account — cards, transactions,

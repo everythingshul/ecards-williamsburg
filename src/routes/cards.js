@@ -4,7 +4,9 @@ import { auth } from '../middleware/auth.js';
 import { requirePermission, redact } from '../middleware/permissions.js';
 import * as giftcard from '../services/giftcard.js';
 import { sendXlsx } from '../services/xlsx.js';
-import { syncOneCard, syncAllCards } from '../services/cardSync.js';
+import { syncOneCard, syncAllCards, auditProviderSpend } from '../services/cardSync.js';
+import { getActiveSeasonId } from '../utils/formSchedule.js';
+import { logAudit } from '../services/audit.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { resolveFundingAnchor } from '../services/providerAccount.js';
 import { getApplicantBalances } from '../services/applicantBalance.js';
@@ -188,6 +190,29 @@ router.post('/reconciliation-flags/fix-all', requirePermission('cards', 'can_edi
     }
   }
   res.json({ ok: true, total: flags.length, fixed, failures });
+});
+
+// Spend audit: one live pull of every disccardpromos customer (balances +
+// charges) reconciled against what is stored here — see auditProviderSpend.
+// Read-only; ?export=1 downloads every row as Excel. Registered before /:id.
+router.get('/spend-audit', requirePermission('cards', 'can_view'), async (req, res) => {
+  const orgId = req.user.org_id;
+  const seasonIds = [getActiveSeasonId(orgId), ...db.prepare('SELECT DISTINCT season_id FROM applicants WHERE org_id = ? AND season_id IS NOT NULL').all(orgId).map(r => r.season_id)].filter(Boolean);
+  const seasonId = seasonIds.find(s => !giftcard.isMockMode(s));
+  if (!seasonId) return res.json({ mock: true, message: 'disccardpromos is not connected (mock mode), so there is nothing live to compare against.' });
+  let index;
+  try { index = await giftcard.buildCustomerIndex(seasonId, { balances: true, transactions: true }); }
+  catch (e) { return res.status(502).json({ error: `Could not read disccardpromos: ${e.message}` }); }
+  if (!index) return res.status(502).json({ error: 'Could not read the customer list from disccardpromos (see the server log for the failing call). Try again.' });
+  const audit = auditProviderSpend(orgId, [index]);
+  if (req.query.export) {
+    return sendXlsx(res, `spend-audit-${new Date().toISOString().slice(0, 10)}.xlsx`, audit.rows.map(r => ({
+      'disccardpromos Customer #': r.customerId, 'External ID': r.externalId, 'Name': r.name, 'Linked to applicant': r.linkedTo,
+      'Charges listed by disccardpromos': r.listedCount, 'Net spend listed': r.listedNet, 'Listed but NOT stored here (count)': r.missingCount,
+      'Listed but NOT stored here ($)': r.missingNet, 'Unreadable entries': r.malformed, 'Spend implied by balances': r.balanceSpent, 'Spend not in charge list ($)': r.feedGap })));
+  }
+  logAudit(orgId, req.user.id, 'spend_audit', 'cards', null, null, audit.summary, req.ip);
+  res.json({ ...audit, rows: audit.rows.slice(0, 200), totalRows: audit.rows.length, pulledCustomers: index.list.length, reportedTotal: index.list.reportedTotal ?? null });
 });
 
 router.get('/:id', (req, res) => {

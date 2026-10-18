@@ -135,6 +135,14 @@ no merge adjustments — plus the unattributed charges. The Dashboard Total Spen
 disagree, and it matches disccardpromos' own total. (It used to sum only *approved* applicants'
 own spend, which silently dropped anyone later rejected/removed and any merge adjustment, so it
 never reached disccardpromos' figure. Remaining = Total Loaded − Total Spent, as before.)
+**Spend Audit** (Cards > Spend Audit, `GET /cards/spend-audit`, `auditProviderSpend()` in `cardSync.js`;
+`?export=1` = Excel): one live pull of every disccardpromos customer (balances + charges) reconciled
+against what is stored, per customer — charges disccardpromos lists that are NOT stored here
+(`missing`: run Sync All Now), spend implied by its own balances (`amount` − `packages[].balance`)
+that is NOT in the charge list it sends (`feedGap`: nothing a sync can ever add), unreadable entries
+(no id/amount; also counted as `unlinkedMalformed` by the sweep instead of being dropped silently),
+and what we hold that its list no longer returns. Read-only and audited; use it to name any gap
+between Total Spent and disccardpromos' own total.
 `unattributedByStore` feeds `topStores`, the donor Stores panel and the Stores list/export/
 profile/history; Cards > All Transactions lists the unattributed rows (labelled with the
 disccardpromos customer) with a Total spent summary and an "Unattributed spend — INCLUDED"
