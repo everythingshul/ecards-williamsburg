@@ -381,6 +381,8 @@ router.get('/transactions/all', (req, res) => {
       purchases: Math.round(card.purchases * 100) / 100, refunds: Math.round(card.refunds * 100) / 100,
       unattributedNet: un.net, unattributedCount: un.count, unlinkedCustomers,
       totalSpent: totalSpend(orgId).total,
+      // charges stored here that disccardpromos no longer lists — kept, but not counted (cardSync.js archiveUnlistedTransactions)
+      notOnProvider: db.prepare(`SELECT COUNT(*) count, COALESCE(SUM(net), 0) net FROM excluded_transactions WHERE org_id = ? AND reason = 'not_on_provider'`).get(orgId),
     },
   });
 });
