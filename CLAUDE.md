@@ -135,18 +135,6 @@ no merge adjustments — plus the unattributed charges. The Dashboard Total Spen
 disagree, and it matches disccardpromos' own total. (It used to sum only *approved* applicants'
 own spend, which silently dropped anyone later rejected/removed and any merge adjustment, so it
 never reached disccardpromos' figure. Remaining = Total Loaded − Total Spent, as before.)
-**Total Spent only counts what disccardpromos still lists** (`archiveUnlistedTransactions()` in
-`cardSync.js`, run at the end of every sweep): once a sweep has pulled the COMPLETE customer list
-with every customer's charges, any stored charge whose provider id is no longer listed (its customer
-or the charge was deleted / merged away on their side — the cause of "we're higher than
-disccardpromos") is MOVED from `card_transactions` / `unattributed_transactions` to
-`excluded_transactions` (kept whole, `net` recorded, restorable) — so every total, list and store /
-shul / applicant figure excludes it with no per-query filter — and moved back automatically if
-disccardpromos lists it again. Fail-safe: nothing moves unless every season's pull succeeded, the
-page count matches the provider's own `count`, and charges actually came back; only rows stored
-before the sweep started are considered; rows with no provider id (manual) are never touched; and it
-refuses to move more than 25% of all spend at once (a broken pull, not deleted data — the Sync All
-toast says so). The Sync All toast and Cards > All Transactions summary report what was excluded.
 **Spend Audit** (Cards > Spend Audit, `GET /cards/spend-audit`, `auditProviderSpend()` in `cardSync.js`;
 `?export=1` = Excel): one live pull of every disccardpromos customer (balances + charges) reconciled
 against what is stored, per customer — charges disccardpromos lists that are NOT stored here

@@ -1675,11 +1675,14 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_id TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_name TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN store_id TEXT`);
-// Charges this app stored that disccardpromos no longer lists (their customer
-// or the charge was deleted / merged away on their side). They are MOVED here —
-// kept whole and restorable — so they stop counting in Total Spent and every
-// store total, which then equal what disccardpromos itself lists. See
-// cardSync.js's archiveUnlistedTransactions.
+// UNDO of an over-eager "mirror disccardpromos" pass that moved stored charges
+// it believed disccardpromos no longer listed out of card_transactions /
+// unattributed_transactions into excluded_transactions — it moved far too much
+// real spend (Total Spent fell ~$533K below disccardpromos'). That logic is
+// gone; this puts every moved charge back, once, at startup, and leaves the
+// (empty) table behind. INSERT OR IGNORE so a charge a later sync already
+// stored again is not duplicated; a charge whose card no longer exists stays
+// in the table rather than being lost.
 db.exec(`CREATE TABLE IF NOT EXISTS excluded_transactions (
   id TEXT PRIMARY KEY,
   org_id TEXT NOT NULL,
@@ -1690,7 +1693,29 @@ db.exec(`CREATE TABLE IF NOT EXISTS excluded_transactions (
   reason TEXT NOT NULL DEFAULT 'not_on_provider',
   excluded_at TEXT DEFAULT (datetime('now'))
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_excluded_txn_provider ON excluded_transactions(provider_txn_id)`);
+try {
+  const parked = db.prepare(`SELECT * FROM excluded_transactions`).all();
+  if (parked.length) {
+    const putCard = db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    const putUn = db.prepare(`INSERT OR IGNORE INTO unattributed_transactions (id, org_id, applicant_id, provider_txn_id, type, amount, store_name, store_id, occurred_at, raw_payload, customer_id, customer_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const hasCard = db.prepare('SELECT 1 FROM cards WHERE id = ?');
+    const drop = db.prepare('DELETE FROM excluded_transactions WHERE id = ?');
+    let back = 0, backNet = 0;
+    db.transaction(() => {
+      for (const a of parked) {
+        const r = JSON.parse(a.row_json);
+        if (a.source === 'card') {
+          if (!hasCard.get(r.card_id)) continue;
+          putCard.run(r.id, r.card_id, r.provider_txn_id, r.type, r.amount, r.balance_after, r.store_name, r.store_id, r.occurred_at, r.raw_payload, r.created_at);
+        } else {
+          putUn.run(r.id, r.org_id, r.applicant_id, r.provider_txn_id, r.type, r.amount, r.store_name, r.store_id, r.occurred_at, r.raw_payload, r.customer_id, r.customer_name, r.created_at);
+        }
+        drop.run(a.id); back++; backNet += Number(a.net) || 0;
+      }
+    })();
+    if (back) console.log(`[db] restored ${back} of ${parked.length} charge(s) (net $${Math.round(backNet * 100) / 100}) that an earlier change had taken out of Total Spent`);
+  }
+} catch (e) { console.error('[db] restoring excluded transactions failed:', e.message); }
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
 // Reusable rich-text "payment is on the way" emails, with the invoice
