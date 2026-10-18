@@ -1675,6 +1675,22 @@ safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN fee_waived_at TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_id TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN customer_name TEXT`);
 safeAlter(`ALTER TABLE unattributed_transactions ADD COLUMN store_id TEXT`);
+// Charges this app stored that disccardpromos no longer lists (their customer
+// or the charge was deleted / merged away on their side). They are MOVED here —
+// kept whole and restorable — so they stop counting in Total Spent and every
+// store total, which then equal what disccardpromos itself lists. See
+// cardSync.js's archiveUnlistedTransactions.
+db.exec(`CREATE TABLE IF NOT EXISTS excluded_transactions (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  provider_txn_id TEXT,
+  net REAL NOT NULL DEFAULT 0,
+  row_json TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT 'not_on_provider',
+  excluded_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_excluded_txn_provider ON excluded_transactions(provider_txn_id)`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
 // Reusable rich-text "payment is on the way" emails, with the invoice

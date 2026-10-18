@@ -13,7 +13,7 @@
 <script>
 Auth.requireAdmin();
 renderShell('/admin/cards', `
-  <div class="flex-between"><h2>Cards & Transactions</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-sync-all">Sync All Now</button><button class="btn btn-outline btn-sm" id="btn-export-cards">Export Cards CSV</button><button class="btn btn-outline btn-sm" id="btn-export-txns">Export Transactions CSV</button></div></div>
+  <div class="flex-between"><h2>Cards & Transactions</h2><div class="pill-row"><button class="btn btn-outline btn-sm" id="btn-sync-all">Sync All Now</button><button class="btn btn-outline btn-sm" id="btn-spend-audit">Spend Audit</button><button class="btn btn-outline btn-sm" id="btn-export-cards">Export Cards CSV</button><button class="btn btn-outline btn-sm" id="btn-export-txns">Export Transactions CSV</button></div></div>
   <p class="small-muted">Cards auto-sync with disccardpromos every 60 seconds in the background. Use Sync All Now for an immediate refresh.</p>
   <div id="mock-banner"></div>
   <div class="tabs"><button class="active" id="tab-cards-btn">Cards</button><button id="tab-txns-btn">All Transactions</button><button id="tab-byshul-btn">Spent by Shul</button><button id="tab-recon-btn">Balance Mismatches<span id="recon-badge"></span></button></div>
@@ -103,9 +103,44 @@ qs('#btn-fix-all-recon').addEventListener('click', async () => {
 // other pending-count badge in this app.
 loadReconFlags();
 qs('#btn-export-cards').addEventListener('click', () => downloadAuthed('/cards/export?' + new URLSearchParams({ search: state.search, status: state.status }), 'cards.xlsx'));
+// Spend Audit: reconciles disccardpromos' live per-customer data against what
+// is stored here and says exactly where any gap in Total Spent comes from.
+qs('#btn-spend-audit').addEventListener('click', async () => {
+  const btn = qs('#btn-spend-audit'); btn.disabled = true; btn.textContent = 'Auditing…';
+  try {
+    const r = await api('/cards/spend-audit');
+    if (r.mock) return toast(r.message, true);
+    const s = r.summary, m = fmtMoney;
+    const line = (label, val, note = '') => `<tr><td>${label}${note ? `<div class="small-muted">${note}</div>` : ''}</td><td style="text-align:right;white-space:nowrap"><strong>${val}</strong></td></tr>`;
+    const gap = s.missingNet, feed = s.feedGapNet;
+    const verdict = Math.abs(gap) < 0.01 && Math.abs(feed) < 0.01 ? 'Everything disccardpromos lists is stored here, and its balances agree with its charge list.'
+      : [Math.abs(gap) >= 0.01 ? `<strong>${m(gap)}</strong> of charges that disccardpromos lists are NOT stored here (${s.missingCount} charge${s.missingCount === 1 ? '' : 's'}) — click Sync All Now; if they come back, look at the rows below.` : '',
+         Math.abs(feed) >= 0.01 ? `<strong>${m(feed)}</strong> of spend reduced customers' balances on disccardpromos but is NOT in the charge list it sends (${s.feedGapCustomers} customer${s.feedGapCustomers === 1 ? '' : 's'}) — nothing synced from the charge list can ever include it.` : '',
+         s.malformedCount ? `${s.malformedCount} charge entr${s.malformedCount === 1 ? 'y' : 'ies'} could not be read (no id or amount).` : ''].filter(Boolean).join('<br>');
+    openModal('Spend Audit — disccardpromos vs this app', `
+      <p class="small-muted">Pulled ${r.pulledCustomers} customer(s) live${r.reportedTotal != null ? ` (disccardpromos says it has ${r.reportedTotal})` : ''}. Read-only.</p>
+      <div class="card" style="margin-bottom:12px"><div>${verdict}</div></div>
+      <table><tbody>
+        ${line('Total Spent here (Dashboard)', m(s.ourTotalSpent))}
+        ${line('Net charges disccardpromos lists', m(s.providerListedNet), `${s.providerListedCount} charges across ${s.customersWithCharges} customer(s)`)}
+        ${line('…of which NOT stored here', m(s.missingNet), `${s.missingCount} charge(s)`)}
+        ${line('Spend implied by disccardpromos balances', m(s.balanceImpliedSpend), `committed amount minus current balance${s.customersWithoutAmount ? `; ${s.customersWithoutAmount} customer(s) report no amount` : ''}`)}
+        ${line('Balance-implied spend NOT in the charge list', m(s.feedGapNet))}
+        ${line('Stored here but no longer in disccardpromos\' list', m(s.storedNotInFeed), 'history of deleted / merged accounts, or charges outside what the list returns')}
+      </tbody></table>
+      ${r.rows.length ? `<h4 style="margin:14px 0 6px">Customers with a difference${r.totalRows > r.rows.length ? ` (top ${r.rows.length} of ${r.totalRows}; Export has all)` : ''}</h4>
+      <div style="overflow-x:auto"><table><thead><tr><th>Customer</th><th>Linked to</th><th>Listed</th><th>Not stored</th><th>Balance-implied</th><th>Not in list</th></tr></thead><tbody>
+        ${r.rows.map(x => `<tr><td>${esc(x.name || '—')}<div class="small-muted">#${esc(x.customerId)}${x.externalId ? ` · ext ${esc(x.externalId)}` : ''}</div></td><td>${x.linkedTo ? esc(x.linkedTo) : '<span class="small-muted">not linked</span>'}</td>
+          <td>${x.listedCount} · ${m(x.listedNet)}</td><td>${x.missingCount ? `${x.missingCount} · ${m(x.missingNet)}` : '—'}${x.malformed ? `<div class="small-muted">${x.malformed} unreadable</div>` : ''}</td>
+          <td>${x.balanceSpent == null ? '—' : m(x.balanceSpent)}</td><td>${x.feedGap != null && Math.abs(x.feedGap) >= 0.01 ? m(x.feedGap) : '—'}</td></tr>`).join('')}
+      </tbody></table></div>` : ''}`,
+      `<button class="btn btn-outline btn-sm" onclick="downloadAuthed('/cards/spend-audit?export=1', 'spend-audit.xlsx')">Export all rows (Excel)</button>`, { wide: true });
+  } catch (err) { toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = 'Spend Audit'; }
+});
 qs('#btn-sync-all').addEventListener('click', async () => {
   const btn = qs('#btn-sync-all'); btn.disabled = true; btn.textContent = 'Syncing…';
-  try { const r = await api('/cards/sync-all', { method: 'POST' }); toast(`Checked ${r.cardsChecked} card(s), synced ${r.transactionsSynced} new transaction(s)${r.cardsDiscovered ? `, found ${r.cardsDiscovered} card(s) activated directly on disccardpromos` : ''}${r.cardsRemoved ? `, deactivated ${r.cardsRemoved} card(s) removed on disccardpromos` : ''}${r.reconciliationFlags ? `, ${r.reconciliationFlags} balance mismatch(es) flagged` : ''}${r.unattributed ? `, ${r.unattributed} transaction(s) couldn't be matched to a card (counted in totals as unattributed spend)` : ''}${r.unlinkedTransactions ? `, recorded ${r.unlinkedTransactions} new charge(s) from ${r.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant (counted in totals — link them under Applicants > Disccardpromos Sync)` : ''}${r.malformed ? `, ${r.malformed} malformed transaction(s) skipped` : ''}${r.failed ? `, ${r.failed} applicant(s) FAILED to sync` : ''}${r.indexPullsFailed ? `, ${r.indexPullsFailed} season customer-list pull(s) FAILED (fell back to per-applicant reads)` : ''}`, !!(r.failed || r.indexPullsFailed)); loadCards(); loadReconFlags(); }
+  try { const r = await api('/cards/sync-all', { method: 'POST' }); toast(`Checked ${r.cardsChecked} card(s), synced ${r.transactionsSynced} new transaction(s)${r.cardsDiscovered ? `, found ${r.cardsDiscovered} card(s) activated directly on disccardpromos` : ''}${r.cardsRemoved ? `, deactivated ${r.cardsRemoved} card(s) removed on disccardpromos` : ''}${r.reconciliationFlags ? `, ${r.reconciliationFlags} balance mismatch(es) flagged` : ''}${r.unattributed ? `, ${r.unattributed} transaction(s) couldn't be matched to a card (counted in totals as unattributed spend)` : ''}${r.unlinkedTransactions ? `, recorded ${r.unlinkedTransactions} new charge(s) from ${r.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant (counted in totals — link them under Applicants > Disccardpromos Sync)` : ''}${(r.malformed || r.unlinkedMalformed) ? `, ${(r.malformed || 0) + (r.unlinkedMalformed || 0)} malformed transaction(s) skipped (they have no id or amount — run Spend Audit)` : ''}${r.mirror?.archived ? `, took ${r.mirror.archived} stored charge(s) worth ${fmtMoney(r.mirror.archivedNet)} out of Total Spent because disccardpromos no longer lists them` : ''}${r.mirror?.restored ? `, restored ${r.mirror.restored} charge(s) disccardpromos lists again` : ''}${r.mirror?.skipped && !r.indexPullsFailed && r.mirror.skipped.startsWith('would move') ? `, left Total Spent alone: ${r.mirror.skipped}` : ''}${r.failed ? `, ${r.failed} applicant(s) FAILED to sync` : ''}${r.indexPullsFailed ? `, ${r.indexPullsFailed} season customer-list pull(s) FAILED (fell back to per-applicant reads)` : ''}`, !!(r.failed || r.indexPullsFailed)); loadCards(); loadReconFlags(); }
   catch (err) { toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = 'Sync All Now'; }
 });
@@ -141,7 +176,8 @@ async function loadTxns() {
           <div class="small-muted">Purchases on cards ${fmtMoney(summary.purchases)} &minus; refunds ${fmtMoney(summary.refunds)} + unattributed spend ${fmtMoney(summary.unattributedNet)}</div></div></div>
         <div class="divider" style="margin:10px 0"></div>
         <div><strong>Unattributed spend &mdash; INCLUDED in Total spent above:</strong> ${fmtMoney(summary.unattributedNet)}
-          <span class="small-muted">(${summary.unattributedCount} charge(s)${summary.unlinkedCustomers ? ` from ${summary.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant` : ''}). These are charges disccardpromos has but that belong to no card of ours; link those customers under Applicants &gt; Disccardpromos Sync to attach them to a person.</span></div>`;
+          <span class="small-muted">(${summary.unattributedCount} charge(s)${summary.unlinkedCustomers ? ` from ${summary.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant` : ''}). These are charges disccardpromos has but that belong to no card of ours; link those customers under Applicants &gt; Disccardpromos Sync to attach them to a person.</span></div>
+        ${summary.notOnProvider?.count ? `<div style="margin-top:8px"><strong>Not counted:</strong> ${summary.notOnProvider.count} stored charge(s) worth ${fmtMoney(summary.notOnProvider.net)} that disccardpromos no longer lists (their customer or the charge was deleted there). They are kept but left out of every total so Total spent matches disccardpromos; they come back automatically if disccardpromos lists them again.</div>` : ''}`;
     }
     qs('#tbody-txns').innerHTML = transactions.length ? transactions.map(t => {
       const person = t.first_name || t.last_name ? `${esc(t.first_name || '')} ${esc(t.last_name || '')}`
