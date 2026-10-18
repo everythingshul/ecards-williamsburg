@@ -1,5 +1,4 @@
 import { db } from '../db.js';
-import { getActiveSeasonId } from '../utils/formSchedule.js';
 
 // Net spend convention used everywhere in this app: a purchase is stored as a
 // negative amount, a refund as a positive row with type='refund' — so net =
@@ -59,25 +58,5 @@ export function attributedNet(orgId, seasonId) {
 export function totalSpend(orgId, seasonId) {
   const attributed = attributedNet(orgId, seasonId);
   const unattributed = unattributedNet(orgId, { seasonId }).net;
-  const ledger = round2(attributed + unattributed);
-  // The headline figure IS disccardpromos' own number whenever a sync has
-  // stored one (every customer's committed amount minus its live balance —
-  // see cardSync.js's recordProviderSpend). The ledger above is what the
-  // transaction feed gave us; anything the feed left out (a charge type it
-  // doesn't list, an older customer, a pagination gap) shows up as
-  // `difference`, so the two can never silently disagree again. The provider
-  // figure carries no season, so it answers "all seasons" and the ACTIVE
-  // season (where all current spend happens — the Dashboard's default view);
-  // a past season still uses the ledger.
-  const provider = !seasonId || seasonId === getActiveSeasonId(orgId) ? providerReportedSpend(orgId) : null;
-  if (provider) return { attributed, unattributed, ledger, total: provider.total, source: 'disccardpromos', syncedAt: provider.syncedAt, customers: provider.customers, difference: round2(provider.total - ledger) };
-  return { attributed, unattributed, ledger, total: ledger, source: 'ledger', syncedAt: null, customers: 0, difference: 0 };
-}
-
-// Sum of what disccardpromos reports as spent across every customer in the
-// account, from the last successful sync; null until one has run.
-export function providerReportedSpend(orgId) {
-  const r = db.prepare(`SELECT COALESCE(SUM(spent), 0) total, COALESCE(SUM(loaded), 0) loaded, COUNT(*) customers, MAX(synced_at) synced_at FROM provider_spend_snapshot WHERE org_id = ?`).get(orgId);
-  if (!r || !r.customers) return null;
-  return { total: round2(r.total), loaded: round2(r.loaded), customers: r.customers, syncedAt: r.synced_at };
+  return { attributed, unattributed, total: round2(attributed + unattributed) };
 }

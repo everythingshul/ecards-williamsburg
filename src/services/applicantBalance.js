@@ -141,8 +141,7 @@ export function orgFundsSummary(orgId, seasonId) {
   // merge spend adjustments, and (before charges by unlinked disccardpromos
   // customers were included) could never reach disccardpromos' own figure.
   const spend = totalSpend(orgId, seasonId);
-  const spendMeta = { totalSpent: spend.total, unattributedSpend: spend.unattributed, ledgerSpent: spend.ledger, spendSource: spend.source, spendSyncedAt: spend.syncedAt, spendDifference: spend.difference };
-  if (!approved.length) return { approvedFunds: 0, ...spendMeta };
+  if (!approved.length) return { approvedFunds: 0, totalSpent: spend.total, unattributedSpend: spend.unattributed };
   const balances = getApplicantBalances(orgId, approved.map(a => a.id));
   const seenGroups = new Set();
   let approvedFunds = 0;
@@ -152,7 +151,7 @@ export function orgFundsSummary(orgId, seasonId) {
     seenGroups.add(groupKey);
     approvedFunds += balances.get(a.id)?.loaded || 0;
   }
-  return { approvedFunds: Math.round(approvedFunds * 100) / 100, ...spendMeta };
+  return { approvedFunds: Math.round(approvedFunds * 100) / 100, totalSpent: spend.total, unattributedSpend: spend.unattributed };
 }
 
 // Dashboard KPI: "X of Y loaded accounts are active" — Y is every real

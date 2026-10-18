@@ -107,19 +107,12 @@ function renderCapacityBanner(seasonId) {
 // A long figure (a big dollar amount) shrinks/wraps inside its card rather
 // than overflowing — see exec-dashboard.css's .exec-kpi-num clamp() and the
 // flex (not grid) .exec-kpi-grid.
-function kpiCard(label, num, accent, icon, sub = '') {
+function kpiCard(label, num, accent, icon) {
   return `<div class="exec-kpi-card" style="--kpi-accent:${accent}">
     <div class="exec-kpi-icon">${icon}</div>
     <div class="exec-kpi-num">${typeof num === 'string' ? esc(num) : num.toLocaleString()}</div>
     <div class="exec-kpi-label">${esc(label)}</div>
-    ${sub ? `<div class="small-muted" style="font-size:11px;margin-top:2px">${esc(sub)}</div>` : ''}
   </div>`;
-}
-// Where the Total Spent figure comes from: disccardpromos' own reported
-// total once a sync has stored one, else this app's transaction ledger.
-function spendSourceNote(f) {
-  if (f.spendSource === 'disccardpromos') return `as reported by disccardpromos (whole account)${f.spendSyncedAt ? ` · synced ${fmtDateTime(f.spendSyncedAt)}` : ''}`;
-  return 'from synced transactions — run Cards › Sync All Now for disccardpromos\' own total';
 }
 
 async function loadStats() {
@@ -147,7 +140,7 @@ async function loadStats() {
     // with this one under the same "Total Loaded" label).
     if (stats.funds) tiles.push(
       kpiCard('Total Loaded', fmtMoney(stats.funds.approvedFunds), 'var(--brand-gold-dark)', EXEC_ICONS.coin),
-      kpiCard('Total Spent', fmtMoney(stats.funds.totalSpent), 'var(--viz-2)', EXEC_ICONS.coin, spendSourceNote(stats.funds)),
+      kpiCard('Total Spent', fmtMoney(stats.funds.totalSpent), 'var(--viz-2)', EXEC_ICONS.coin),
       kpiCard('Remaining', fmtMoney(Math.round((stats.funds.approvedFunds - stats.funds.totalSpent) * 100) / 100), 'var(--viz-good)', EXEC_ICONS.coin));
     // "Loaded Accounts Active" — of every real account (a merged group
     // counts once) that's had money loaded onto it, how many have at
