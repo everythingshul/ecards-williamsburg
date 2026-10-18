@@ -419,74 +419,6 @@ export function syncUnlinkedCustomers(orgId, indexes, coveredIds = null) {
   return { unlinkedCustomers, unlinkedTransactions, unlinkedMalformed };
 }
 
-// MIRROR disccardpromos: once a sweep has pulled the COMPLETE customer list
-// with every customer's charges, any charge stored here that disccardpromos no
-// longer lists (its customer or the charge itself was deleted / merged away on
-// their side) is MOVED to excluded_transactions — kept whole, restorable — so
-// it stops counting in Total Spent and every store / shul / applicant total,
-// and those totals equal what disccardpromos itself lists. A charge that
-// reappears in a later pull is restored. Fail-safe: nothing moves unless the
-// pull is verifiably complete (page count matches the provider's own `count`,
-// charges actually returned), only rows stored BEFORE this sweep started are
-// considered, and it refuses to move more than a quarter of all spend in one
-// go (that would mean a broken pull, not deleted data). Rows with no provider
-// id (manual entries) are never touched.
-export function archiveUnlistedTransactions(orgId, indexes, sweepStartedAt) {
-  const live = (indexes || []).filter(Boolean);
-  const skip = (reason) => ({ archived: 0, archivedNet: 0, restored: 0, skipped: reason });
-  if (!live.length) return skip('no live customer list this sweep');
-  const listed = new Set(); let customersWithCharges = 0;
-  for (const index of live) {
-    if (index.list?.reportedTotal != null && index.list.length < index.list.reportedTotal) return skip(`pulled ${index.list.length} of ${index.list.reportedTotal} customers`);
-    for (const c of index.list || []) {
-      const hasArray = Array.isArray(c.transactions) || (Array.isArray(c.packages) && c.packages.some(p => Array.isArray(p.transactions)));
-      if (hasArray) customersWithCharges++;
-      for (const t of embeddedTxns(c)) if (t?.id != null) listed.add(cleanProviderId(t.id));
-    }
-  }
-  if (!customersWithCharges || !listed.size) return skip('the customer list came back without charges');
-  const netOf = (r) => (r.type === 'refund' ? -r.amount : (r.amount < 0 ? -r.amount : 0));
-  const cands = [];
-  for (const r of db.prepare(`SELECT t.* FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? AND t.provider_txn_id IS NOT NULL AND t.created_at < ?`).all(orgId, sweepStartedAt)) {
-    if (!listed.has(cleanProviderId(r.provider_txn_id))) cands.push({ source: 'card', row: r });
-  }
-  for (const r of db.prepare(`SELECT * FROM unattributed_transactions WHERE org_id = ? AND provider_txn_id IS NOT NULL AND created_at < ?`).all(orgId, sweepStartedAt)) {
-    if (!listed.has(cleanProviderId(r.provider_txn_id))) cands.push({ source: 'unattributed', row: r });
-  }
-  const candNet = cands.reduce((s, c) => s + netOf(c.row), 0);
-  const total = totalSpend(orgId).total;
-  if (cands.length && total > 0 && Math.abs(candNet) > 0.25 * total) return skip(`would move ${cands.length} charges ($${Math.round(candNet)}) — over a quarter of all spend, so the pull is not trusted`);
-  const ins = db.prepare(`INSERT OR REPLACE INTO excluded_transactions (id, org_id, source, provider_txn_id, net, row_json, reason) VALUES (?,?,?,?,?,?, 'not_on_provider')`);
-  const delCard = db.prepare('DELETE FROM card_transactions WHERE id = ?');
-  const delUn = db.prepare('DELETE FROM unattributed_transactions WHERE id = ?');
-  let restored = 0;
-  db.transaction(() => {
-    for (const c of cands) {
-      ins.run(c.row.id, orgId, c.source, c.row.provider_txn_id, Math.round(netOf(c.row) * 100) / 100, JSON.stringify(c.row));
-      (c.source === 'card' ? delCard : delUn).run(c.row.id);
-    }
-    // anything archived earlier that disccardpromos lists again goes back
-    for (const a of db.prepare(`SELECT * FROM excluded_transactions WHERE org_id = ? AND reason = 'not_on_provider'`).all(orgId)) {
-      if (!listed.has(cleanProviderId(a.provider_txn_id))) continue;
-      const row = JSON.parse(a.row_json);
-      try {
-        if (a.source === 'card') {
-          if (!db.prepare('SELECT 1 FROM cards WHERE id = ?').get(row.card_id)) continue;
-          db.prepare(`INSERT OR IGNORE INTO card_transactions (id, card_id, provider_txn_id, type, amount, balance_after, store_name, store_id, occurred_at, raw_payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-            .run(row.id, row.card_id, row.provider_txn_id, row.type, row.amount, row.balance_after, row.store_name, row.store_id, row.occurred_at, row.raw_payload, row.created_at);
-        } else {
-          db.prepare(`INSERT OR IGNORE INTO unattributed_transactions (id, org_id, applicant_id, provider_txn_id, type, amount, store_name, store_id, occurred_at, raw_payload, customer_id, customer_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .run(row.id, row.org_id, row.applicant_id, row.provider_txn_id, row.type, row.amount, row.store_name, row.store_id, row.occurred_at, row.raw_payload, row.customer_id, row.customer_name, row.created_at);
-        }
-        db.prepare('DELETE FROM excluded_transactions WHERE id = ?').run(a.id); restored++;
-      } catch (e) { console.warn('[cardSync] could not restore an archived charge:', e.message); }
-    }
-  })();
-  const archivedNet = Math.round(candNet * 100) / 100;
-  if (cands.length) console.log(`[cardSync] ${cands.length} stored charge(s) ($${archivedNet}) no longer on disccardpromos moved out of Total Spent (kept in excluded_transactions)`);
-  return { archived: cands.length, archivedNet, restored, skipped: null };
-}
-
 // SPEND AUDIT — reconciles what disccardpromos itself returns right now
 // against what is stored here, customer by customer, so a gap between our
 // Total Spent and theirs is NAMED instead of guessed at. Takes the same bulk
@@ -577,7 +509,6 @@ export function auditProviderSpend(orgId, indexes) {
 // one live call per applicant (see customerFor below for the incident that
 // rule comes from).
 export async function syncAllCards(orgId) {
-  const sweepStartedAt = db.prepare(`SELECT datetime('now') d`).get().d;
   const applicants = db.prepare(`SELECT * FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0`).all(orgId);
   const seasonIds = [...new Set(applicants.map(a => a.season_id))];
   const indexBySeason = new Map();
@@ -617,14 +548,6 @@ export async function syncAllCards(orgId) {
   let unlinked = { unlinkedCustomers: 0, unlinkedTransactions: 0 };
   try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean), coveredCustomerIds); }
   catch (e) { console.error('[cardSync] unlinked-customer sync failed:', e.message); }
-  // Only a sweep in which EVERY season's customer list pulled cleanly may move
-  // anything out of the totals (a failed pull would otherwise look like
-  // "disccardpromos deleted everything").
-  let mirror = { archived: 0, archivedNet: 0, restored: 0, skipped: 'a customer-list pull failed this sweep' };
-  if (!indexPullsFailed) {
-    try { mirror = archiveUnlistedTransactions(orgId, [...indexBySeason.values()], sweepStartedAt); }
-    catch (e) { console.error('[cardSync] mirroring disccardpromos failed:', e.message); mirror = { archived: 0, archivedNet: 0, restored: 0, skipped: e.message }; }
-  }
   // Reconciliation runs once per merge-group funding ANCHOR (the primary,
   // or a standalone applicant — never a merge-group secondary, which shares
   // its group's one real disccardpromos customer and would just re-check
@@ -642,5 +565,5 @@ export async function syncAllCards(orgId) {
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
-  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked, mirror };
+  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
 }
