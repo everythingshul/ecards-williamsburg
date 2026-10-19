@@ -1,4 +1,5 @@
 import { db, uuid } from '../db.js';
+import { invalidateAggregates } from './aggCache.js';
 import {
   hardDeleteShul, hardDeleteApplicant, hardDeleteStore,
   restoreShulSnapshot, restoreApplicantSnapshot, restoreStoreSnapshot,
@@ -60,6 +61,9 @@ export function logAudit(orgId, userId, action, entityType, entityId, before, af
   const id = uuid();
   db.prepare(`INSERT INTO audit_log (id, org_id, user_id, action, entity_type, entity_id, before_json, after_json, ip_address)
     VALUES (?,?,?,?,?,?,?,?,?)`).run(id, orgId, userId, action, entityType, entityId, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, ip || null);
+  // Every audited change (approve, give, undo, merge, delete, link...) drops the
+  // short-lived dashboard/totals cache so the next page load shows it at once.
+  invalidateAggregates();
   return id;
 }
 

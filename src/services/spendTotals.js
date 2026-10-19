@@ -1,4 +1,5 @@
 import { db } from '../db.js';
+import { memo } from './aggCache.js';
 
 // Net spend convention used everywhere in this app: a purchase is stored as a
 // negative amount, a refund as a positive row with type='refund' — so net =
@@ -43,9 +44,12 @@ export function unattributedByStore(orgId, seasonId) {
 // their approval status is now. A season is applied through the card the
 // charge was made on, like every other store-spend query.
 export function attributedNet(orgId, seasonId) {
-  const r = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END), 0) net
-    FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ?${seasonId ? ' AND c.season_id = ?' : ''}`).get(orgId, ...(seasonId ? [seasonId] : []));
-  return round2(r.net);
+  // whole-table scan: cached briefly (see aggCache.js)
+  return memo(`attributedNet:${orgId}:${seasonId || ''}`, () => {
+    const r = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END), 0) net
+      FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ?${seasonId ? ' AND c.season_id = ?' : ''}`).get(orgId, ...(seasonId ? [seasonId] : []));
+    return round2(r.net);
+  });
 }
 
 // THE definition of "Total Spent": everything customers actually spent at

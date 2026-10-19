@@ -9,14 +9,14 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js?v=20261017"></script>
+<script src="/js/app.js?v=20261019"></script>
 <script>
 Auth.requireAdmin();
 // Kept in sync with PERMISSION_RESOURCES (src/middleware/permissions.js) —
 // every resource that can be gated at all gets a row here. Recent Actions
 // ('audit') is deliberately absent — it's hardcoded to super_admin only
 // (routes/audit.js), never a grantable permission, so no row for it here.
-const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','store_billing','shul_payments','shul_payment_transfer','shul_payment_soft_undo','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','portal_impersonation'];
+const RESOURCES = ['dashboard','donor_dashboard','shuls','applicants','cards','stores','store_billing','shul_payments','shul_payment_transfer','shul_payment_soft_undo','fund_return','seasons','forms','tasks','emails','sms','updates','documents','site_content','contract_settings','users','settings','portal_impersonation'];
 const RESOURCE_LABELS = {
   dashboard: 'Dashboard', donor_dashboard: "Donor's Dash", shuls: 'Shuls', applicants: 'Applicants', cards: 'Cards & Transactions', stores: 'Stores', store_billing: 'Store Billing',
   shul_payments: 'Shul Transactions & Allocations',
@@ -26,6 +26,7 @@ const RESOURCE_LABELS = {
   portal_impersonation: 'Enter Shul/Store Portal',
   shul_payment_transfer: 'Move Shul Transactions Between Shuls',
   shul_payment_soft_undo: 'Soft Undo (Skip Disccardpromos)',
+  fund_return: 'Return Funds on Untouched Accounts (mass)',
 };
 const HIDABLE_FIELDS = {
   shuls: ['name_en','name_he','address','ruv_first_name','ruv_last_name','ruv_phone','gabai_first_name','gabai_last_name','gabai_cell','gabai_email'],
@@ -124,6 +125,7 @@ function permRow(resource, p) {
     </div>
     ${resource === 'shul_payment_transfer' ? '<p class="small-muted" style="margin:6px 0 0">Only "Edit" matters here — it shows the "Move to another shul" option inside Edit Transaction on Shul Transactions (card payments included) and lets it be used. Nothing else about the transaction can be changed through it.</p>' : ''}
     ${resource === 'portal_impersonation' ? '<p class="small-muted" style="margin:6px 0 0">Only "View" matters here — it\'s what shows the "Enter Portal" button on a shul/store\'s profile and lets it be used. This signs the admin into that shul or store\'s own portal, seeing and doing exactly what they can, with no separate password.</p>' : ''}
+    ${resource === 'fund_return' ? '<p class="small-muted" style="margin:6px 0 0">Only "Edit" matters here — it shows the "Return Funds on Untouched Accounts" button in Settings &gt; Organization. That button reverses every give on every account that has had no transaction yet, in one run (each shul\'s money back to that shul, the org\'s match back to the org). Grant it only to someone who should be able to do that.</p>' : ''}
     ${resource === 'shul_payment_soft_undo' ? '<p class="small-muted" style="margin:6px 0 0">Only "Edit" matters here — it shows the "Soft Undo" option inside Undo Payment on Shul Transactions. Soft Undo restores the shul\'s balance the same way a normal Undo does, but never writes anything to disccardpromos — for when the real account is already known-inactive and a second write would be wrong. Requires a note and the disccardpromos account ID every time, for the audit trail.</p>' : ''}
     <label style="margin-top:10px">Scope</label>
     <select class="p-scope"><option value="all" ${p.scope==='all'?'selected':''}>All records</option><option value="assigned" ${p.scope==='assigned'?'selected':''}>Only assigned records</option></select>
@@ -147,7 +149,7 @@ async function openUser(id) {
     // access to everything), simply opening their profile and hitting Save
     // would silently downgrade them to view-only across the entire app.
     const defaultPermFor = (r, role) => {
-      if (r === 'portal_impersonation' || r === 'shul_payment_transfer' || r === 'shul_payment_soft_undo') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
+      if (r === 'portal_impersonation' || r === 'shul_payment_transfer' || r === 'shul_payment_soft_undo' || r === 'fund_return') return { can_view: 0, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
       if (role === 'super_admin' || role === 'org_admin') return { can_view: 1, can_edit: 1, can_export: 1, scope: 'all', hidden_fields: [] };
       return { can_view: 1, can_edit: 0, can_export: 0, scope: 'all', hidden_fields: [] };
     };

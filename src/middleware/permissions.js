@@ -31,7 +31,7 @@ const PORTAL_DENIED = { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: 
 // mechanism portal_impersonation still uses below); moved out entirely so
 // there's no Users & Permissions toggle that could ever hand a full
 // cross-entity activity feed with undo power to an org_admin/staff member.
-export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'store_billing', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'shul_payment_soft_undo', 'portal_impersonation'];
+export const PERMISSION_RESOURCES = ['dashboard', 'donor_dashboard', 'shuls', 'applicants', 'cards', 'stores', 'store_billing', 'seasons', 'forms', 'tasks', 'emails', 'sms', 'updates', 'documents', 'site_content', 'contract_settings', 'users', 'settings', 'shul_payments', 'shul_payment_transfer', 'shul_payment_soft_undo', 'fund_return', 'portal_impersonation'];
 
 // Per-resource overrides to ROLE_DEFAULTS, applied only when the user has no
 // explicit permissions row for that resource.
@@ -55,6 +55,11 @@ const RESOURCE_DEFAULT_OVERRIDES = {
   // required note + disccard-id fields are the safeguard, not a substitute
   // for gating who can even reach the button).
   shul_payment_soft_undo: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
+  // Mass "return funds on untouched accounts" (Settings > Organization, see
+  // services/fundReturn.js) — reverses every give on every account that has had
+  // no transaction yet, in one run. Explicit-grant-only (super_admin always has
+  // it): it moves real money for many accounts at once.
+  fund_return: { can_view: 0, can_edit: 0, can_export: 0, hidden_fields: [], scope: 'all' },
 };
 
 // One user's can_view/can_edit/can_export/scope for every resource above —

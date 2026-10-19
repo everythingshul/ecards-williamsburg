@@ -611,18 +611,28 @@ router.post('/:id/reject', requirePermission('shul_payments', 'can_edit'), (req,
 
 router.get('/allocations', (req, res) => {
   if (req.user.role === 'shul') return res.status(403).json({ error: 'Not permitted' });
-  const { shul_id, applicant_id, season_id } = req.query;
+  const { shul_id, applicant_id, season_id, active, pageSize } = req.query;
   let where = 'WHERE sa.org_id = ?';
   const params = [req.user.org_id];
   if (shul_id) { where += ' AND sa.shul_id = ?'; params.push(shul_id); }
   if (applicant_id) { where += ' AND sa.applicant_id = ?'; params.push(applicant_id); }
   if (season_id) { where += ' AND sa.season_id = ?'; params.push(season_id); }
+  // active=1: only gives still standing (not undone, not themselves a reversal row)
+  if (active) where += ' AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL';
   // Admin gets the real, full breakdown — actual match, actual rate, actual
   // giftcard result — never the shul-facing hypothetical view.
-  const rows = db.prepare(`SELECT sa.*, s.name_en as shul_name, a.first_name, a.last_name, u.first_name as created_by_first, u.last_name as created_by_last
+  const select = `SELECT sa.*, s.name_en as shul_name, a.first_name, a.last_name, u.first_name as created_by_first, u.last_name as created_by_last
     FROM shul_allocations sa LEFT JOIN shuls s ON s.id = sa.shul_id LEFT JOIN applicants a ON a.id = sa.applicant_id LEFT JOIN users u ON u.id = sa.created_by
-    ${where} ORDER BY sa.created_at DESC`).all(...params);
-  res.json({ allocations: rows });
+    ${where} ORDER BY sa.created_at DESC`;
+  // Paged when the caller asks for it (the org-wide list on Shul Transactions —
+  // every allocation ever made is tens of thousands of rows / many MB);
+  // filtered per-shul/per-applicant callers still get everything.
+  if (pageSize) {
+    const size = Math.min(500, Math.max(1, +pageSize || 100)), page = Math.max(1, +req.query.page || 1);
+    const total = db.prepare(`SELECT COUNT(*) c FROM shul_allocations sa ${where}`).get(...params).c;
+    return res.json({ allocations: db.prepare(`${select} LIMIT ? OFFSET ?`).all(...params, size, (page - 1) * size), total, page, pageSize: size });
+  }
+  res.json({ allocations: db.prepare(select).all(...params) });
 });
 
 // Export of the Allocations tab — every give (reversals included, marked

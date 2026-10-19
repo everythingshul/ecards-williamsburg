@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js?v=20261017"></script>
+<script src="/js/app.js?v=20261019"></script>
 <script>
 Auth.requireAdmin();
 renderShell('/admin/cards', `
@@ -169,7 +169,8 @@ function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTi
 
 async function loadTxns() {
   try {
-    const { transactions, summary } = await api('/cards/transactions/all?page=' + txnPage);
+    const { transactions, summary, total: txnTotal, pageSize: txnPageSize } = await api('/cards/transactions/all?page=' + txnPage);
+    renderSimplePager('pager-txns', txnPage, txnPageSize || 100, txnTotal || 0, (p) => { txnPage = p; loadTxns(); });
     if (summary) {
       qs('#txn-summary').innerHTML = `
         <div class="flex-between" style="flex-wrap:wrap;gap:10px"><div><strong style="font-size:18px">Total spent: ${fmtMoney(summary.totalSpent)}</strong>

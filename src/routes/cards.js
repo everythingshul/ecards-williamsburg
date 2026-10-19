@@ -6,6 +6,7 @@ import * as giftcard from '../services/giftcard.js';
 import { sendXlsx } from '../services/xlsx.js';
 import { syncOneCard, syncAllCards, auditProviderSpend } from '../services/cardSync.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
+import { memo } from '../services/aggCache.js';
 import { logAudit } from '../services/audit.js';
 import { normalizePhone, isValidPhone } from '../utils/phone.js';
 import { resolveFundingAnchor } from '../services/providerAccount.js';
@@ -83,7 +84,7 @@ router.get('/by-shul', (req, res) => {
   const seasonClause = season_id ? ' AND a2.season_id = @season_id' : '';
   const params = { org_id: req.user.org_id };
   if (season_id) params.season_id = season_id;
-  const rows = db.prepare(`
+  const rows = memo(`byShul:${req.user.org_id}:${season_id || ''}`, () => db.prepare(`
     SELECT s.id AS shul_id, s.name_en AS shul_name,
       COALESCE((SELECT SUM(a2.card_amount) FROM applicants a2
         WHERE a2.shul_id = s.id AND a2.approval_status = 'approved'${seasonClause}), 0)
@@ -103,7 +104,7 @@ router.get('/by-shul', (req, res) => {
     WHERE s.org_id = @org_id
     GROUP BY s.id
     HAVING allocated > 0
-    ORDER BY allocated DESC`).all(params);
+    ORDER BY allocated DESC`).all(params));
   // Charges by disccardpromos customers not linked to any applicant belong to
   // no shul — returned separately so this tab's total still adds up to Total Spent.
   const unlinked = unattributedNet(req.user.org_id, { seasonId: season_id, noApplicant: true });
@@ -361,18 +362,27 @@ router.get('/transactions/all', (req, res) => {
   const total = db.prepare(`SELECT (SELECT COUNT(*) FROM card_transactions t JOIN cards c ON c.id=t.card_id ${cardWhere})
     + (SELECT COUNT(*) FROM unattributed_transactions u ${unWhere}) c`).get(...cardParams, ...unParams).c;
   const offset = (Math.max(1, +page) - 1) * +pageSize;
-  const rows = db.prepare(`SELECT * FROM (
-      SELECT t.id, t.card_id, t.provider_txn_id, t.occurred_at, t.type, t.amount, t.balance_after, t.store_name, t.store_id,
+  // Newest first across BOTH tables. Each table is read newest-first (index on
+  // occurred_at) and stopped after offset+pageSize rows, then the two short
+  // lists are merged — instead of building the union of every charge and
+  // sorting all of it just to show one page.
+  const need = offset + +pageSize;
+  const cardRows = db.prepare(`SELECT t.id, t.card_id, t.provider_txn_id, t.occurred_at, t.type, t.amount, t.balance_after, t.store_name, t.store_id,
         a.first_name, a.last_name, c.card_number_masked, a.id AS linked_applicant_id, NULL AS customer_id, NULL AS customer_name, 0 AS unattributed
       FROM card_transactions t JOIN cards c ON c.id=t.card_id LEFT JOIN applicants a ON a.id=c.applicant_id ${cardWhere}
-      UNION ALL
-      SELECT u.id, NULL, u.provider_txn_id, u.occurred_at, u.type, u.amount, NULL, u.store_name, u.store_id,
-        a.first_name, a.last_name, NULL, a.id, u.customer_id, u.customer_name, 1
+      ORDER BY t.occurred_at DESC, t.id DESC LIMIT ?`).all(...cardParams, need);
+  const unRows = db.prepare(`SELECT u.id, NULL AS card_id, u.provider_txn_id, u.occurred_at, u.type, u.amount, NULL AS balance_after, u.store_name, u.store_id,
+        a.first_name, a.last_name, NULL AS card_number_masked, a.id AS linked_applicant_id, u.customer_id, u.customer_name, 1 AS unattributed
       FROM unattributed_transactions u LEFT JOIN applicants a ON a.id=u.applicant_id ${unWhere}
-    ) ORDER BY occurred_at DESC LIMIT ? OFFSET ?`).all(...cardParams, ...unParams, +pageSize, offset);
-  const card = db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type != 'refund' AND t.amount < 0 THEN -t.amount ELSE 0 END), 0) purchases,
+      ORDER BY u.occurred_at DESC, u.id DESC LIMIT ?`).all(...unParams, need);
+  // newest first; equal timestamps broken by id so a page boundary never
+  // repeats or skips a charge between page 1 and page 2
+  const rows = [...cardRows, ...unRows]
+    .sort((x, y) => String(y.occurred_at || '').localeCompare(String(x.occurred_at || '')) || String(y.id).localeCompare(String(x.id)))
+    .slice(offset, offset + +pageSize);
+  const card = memo(`txnCardSums:${orgId}`, () => db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type != 'refund' AND t.amount < 0 THEN -t.amount ELSE 0 END), 0) purchases,
       COALESCE(SUM(CASE WHEN t.type = 'refund' THEN t.amount ELSE 0 END), 0) refunds
-    FROM card_transactions t JOIN cards c ON c.id=t.card_id WHERE c.org_id = ?`).get(orgId);
+    FROM card_transactions t JOIN cards c ON c.id=t.card_id WHERE c.org_id = ?`).get(orgId));
   const unlinkedCustomers = db.prepare(`SELECT COUNT(DISTINCT customer_id) n FROM unattributed_transactions WHERE org_id = ? AND applicant_id IS NULL AND customer_id IS NOT NULL`).get(orgId).n;
   const un = unattributedNet(orgId);
   res.json({

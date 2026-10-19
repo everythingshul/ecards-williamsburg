@@ -414,6 +414,20 @@ function spendBarHtml(percent) {
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return Array.from(document.querySelectorAll(sel)); }
 
+// Minimal "Showing 1–100 of 4,321 · Prev · Page 1 of 44 · Next" pager for a
+// server-paged list. `onPage(n)` is called with the new page number.
+function renderSimplePager(containerId, page, pageSize, total, onPage) {
+  const el = document.getElementById(containerId); if (!el) return;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (total <= pageSize) { el.innerHTML = total ? `<span class="small-muted">${total.toLocaleString()} total</span>` : ''; return; }
+  const from = (page - 1) * pageSize + 1, to = Math.min(total, page * pageSize);
+  el.innerHTML = `<span class="small-muted">Showing ${from.toLocaleString()}&ndash;${to.toLocaleString()} of ${total.toLocaleString()}</span>
+    <button class="btn btn-outline btn-sm" ${page <= 1 ? 'disabled' : ''} data-pg="${page - 1}">&lsaquo; Prev</button>
+    <span class="small-muted">Page ${page} of ${pages.toLocaleString()}</span>
+    <button class="btn btn-outline btn-sm" ${page >= pages ? 'disabled' : ''} data-pg="${page + 1}">Next &rsaquo;</button>`;
+  el.querySelectorAll('button[data-pg]').forEach(b => b.addEventListener('click', () => onPage(+b.dataset.pg)));
+}
+
 // Settings > Organization's Primary/Accent Color pickers used to only reach
 // outbound emails (services/mail.js's brandFor()) — the public site itself
 // (theme.css) never read them, so changing them there visibly did nothing.
