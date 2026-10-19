@@ -190,6 +190,12 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="addPaymentMethodRow()">+ Add Method</button>
       <button class="btn btn-sm btn-primary" style="margin-top:14px;margin-left:8px" onclick="savePaymentMethods()">Save</button>
     </div>
+    ${Auth.can('fund_return', 'can_edit') ? `<div class="card" style="margin-top:16px" id="fund-return-card">
+      <h3>Return Funds on Untouched Accounts</h3>
+      <p class="small-muted">For every account that has received money but has had <strong>no transactions yet</strong>, hand everything back to where it came from: each shul's own money back to that shul's balance, and the org's match back to the org. Example: an account holding $3,000 &mdash; $1,000 from Shul A, $1,000 matched by the org, $1,000 from Shul B &mdash; gives $1,000 to Shul A, $1,000 to Shul B and releases the org's $1,000. Accounts that already spent anything are left completely alone. Every account's live card balance is re-checked right before it is touched, and every give is undone exactly the way a single &ldquo;Undo&rdquo; does it (so it is all in the audit trail). You will see exactly what will move before anything happens, and must type a confirmation code.</p>
+      <div id="fr-last" class="small-muted"></div>
+      <button class="btn btn-sm" style="background:#b71c1c;border-color:#b71c1c;color:#fff;margin-top:10px" onclick="openFundReturn()">Return Funds on Untouched Accounts&hellip;</button>
+    </div>` : ''}
     <div class="card" style="margin-top:16px">
       <h3>Full System Export</h3>
       <p class="small-muted">Download everything: every shul, applicant, card, transaction, store, billing record, task, and note, as one Excel workbook with a separate sheet per table.</p>
@@ -637,6 +643,105 @@ window.savePaymentMethods = async () => {
   try { await api('/settings', { method: 'PUT', body: { manual_payment_methods: JSON.stringify(paymentMethods) } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
 window.downloadFullExport = () => downloadAuthed('/system-export', 'ecards-full-export.xlsx');
+
+// ===================== Return Funds on Untouched Accounts =====================
+// Preview (local, nothing moves) -> a random code the admin must retype ->
+// a background run with live progress -> a report that can be exported.
+let frPoll = null;
+function frMoney(n) { return fmtMoney(n || 0); }
+function frJobSummaryHtml(j) {
+  const label = { running: 'Running', done: 'Finished', cancelled: 'Stopped', failed: 'Failed', interrupted: 'Interrupted (server restarted)' }[j.status] || j.status;
+  return `<strong>${label}</strong> &middot; ${j.accounts_done} of ${j.accounts_total} account(s) &middot; ${j.accounts_returned} returned, ${j.accounts_skipped} skipped (already spent), ${j.accounts_failed} failed
+    <br>Returned to shuls <strong>${frMoney(j.shul_returned)}</strong> &middot; released to the org <strong>${frMoney(j.org_returned)}</strong> &middot; ${j.gives_reversed} give(s) undone`;
+}
+async function loadFundReturnLast() {
+  const el = qs('#fr-last'); if (!el) return;
+  try {
+    const { job } = await api('/fund-return/current');
+    if (!job) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div style="margin-top:8px">Last run (${fmtDateTime(job.started_at)}): ${frJobSummaryHtml(job)}
+      <a href="#" onclick="openFundReturnJob('${job.id}');return false;">view</a></div>`;
+    if (job.status === 'running') openFundReturnJob(job.id);
+  } catch { /* card only exists for permitted users */ }
+}
+window.openFundReturn = async () => {
+  let seasons = [];
+  try { seasons = (await api('/seasons')).seasons || []; } catch {}
+  const active = seasons.find(s => s.is_active);
+  openModal('Return Funds on Untouched Accounts', `
+    <p class="small-muted">Pick which season's gives to return, then preview. Nothing moves until you confirm with the code.</p>
+    <label>Season</label>
+    <select id="fr-season"><option value="all">All seasons</option>${seasons.map(s => `<option value="${s.id}" ${active && s.id === active.id ? 'selected' : ''}>${esc(s.name)}${s.is_active ? ' (active)' : ''}</option>`).join('')}</select>
+    <div id="fr-body" style="margin-top:14px"></div>`,
+    `<button class="btn btn-primary btn-sm" id="fr-preview-btn" onclick="previewFundReturn()">Preview</button>`, { wide: true });
+};
+window.previewFundReturn = async () => {
+  const btn = qs('#fr-preview-btn'); btn.disabled = true;
+  try {
+    const p = await api('/fund-return/preview', { method: 'POST', body: { season_id: qs('#fr-season').value } });
+    if (!p.eligibleAccounts) {
+      qs('#fr-body').innerHTML = `<p><strong>Nothing to return.</strong> No account with money on it is free of transactions${p.leftAloneAccounts ? ` (${p.leftAloneAccounts} account(s) have already spent something and are left alone)` : ''}.</p>`;
+      return;
+    }
+    qs('#fr-body').innerHTML = `
+      <div class="card" style="margin-bottom:12px">
+        <div style="font-size:18px"><strong>${p.eligibleAccounts.toLocaleString()}</strong> account(s) with no transactions &middot; <strong>${p.gives.toLocaleString()}</strong> give(s) will be undone</div>
+        <div style="margin-top:6px">Back to shuls: <strong>${frMoney(p.toShuls)}</strong> &nbsp;&middot;&nbsp; Released to the org (match): <strong>${frMoney(p.toOrg)}</strong> &nbsp;&middot;&nbsp; Total coming off cards: <strong>${frMoney(p.total)}</strong></div>
+        ${p.leftAloneAccounts ? `<div class="small-muted" style="margin-top:6px">Left alone: ${p.leftAloneAccounts.toLocaleString()} account(s) holding ${frMoney(p.leftAloneAmount)} that have already had transactions.</div>` : ''}
+      </div>
+      <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+        <table><thead><tr><th>Shul</th><th>Accounts</th><th>Returns to the shul</th></tr></thead>
+        <tbody>${p.shuls.map(s => `<tr><td>${esc(s.shul_name)}</td><td>${s.accounts}</td><td>${frMoney(s.base)}</td></tr>`).join('')}
+        <tr><td><strong>The org (match)</strong></td><td></td><td><strong>${frMoney(p.toOrg)}</strong></td></tr></tbody></table>
+      </div>
+      <p class="small-muted" style="margin-top:8px">This is based on this app's own records. Right before each account is touched, its live disccardpromos balance is checked again; an account whose card no longer holds everything that was loaded onto it is skipped, not partly returned.</p>
+      <div class="card" style="margin-top:12px;border-color:#b71c1c">
+        <p style="margin:0 0 8px"><strong>To confirm, type this code exactly:</strong> <span style="font-family:monospace;font-size:22px;letter-spacing:4px;background:var(--brand-panel-2);padding:4px 10px;border-radius:6px;user-select:none">${esc(p.code)}</span></p>
+        <input id="fr-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Type the code" style="max-width:220px;font-family:monospace;letter-spacing:3px;text-transform:uppercase" oninput="frCheckCode('${esc(p.code)}')">
+        <p class="small-muted" style="margin:6px 0 0">The code is good for ${p.expiresInMinutes} minutes and works once.</p>
+      </div>`;
+    qs('.modal-footer').innerHTML = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-sm" id="fr-go" disabled style="background:#b71c1c;border-color:#b71c1c;color:#fff" onclick="startFundReturn('${esc(p.seasonId)}')">Return ${frMoney(p.total)} now</button>`;
+  } catch (err) { toast(err.message, true); }
+  finally { if (qs('#fr-preview-btn')) btn.disabled = false; }
+};
+window.frCheckCode = (code) => { const go = qs('#fr-go'); if (go) go.disabled = qs('#fr-code').value.trim().toUpperCase() !== code; };
+window.startFundReturn = async (seasonId) => {
+  const go = qs('#fr-go'); go.disabled = true; go.textContent = 'Starting…';
+  try {
+    const { jobId } = await api('/fund-return/start', { method: 'POST', body: { season_id: seasonId, code: qs('#fr-code').value } });
+    openFundReturnJob(jobId);
+  } catch (err) { toast(err.message, true); go.disabled = false; go.textContent = 'Try again'; }
+};
+window.openFundReturnJob = (jobId) => {
+  clearInterval(frPoll);
+  if (!qs('#ec-modal')) openModal('Returning funds', '<div id="fr-progress"></div>', '', { wide: true });
+  else { qs('#ec-modal .modal-header h3').textContent = 'Returning funds'; qs('#ec-modal .modal-body').innerHTML = '<div id="fr-progress"></div>'; }
+  const tick = async () => {
+    let j;
+    try { j = (await api(`/fund-return/jobs/${jobId}`)).job; } catch (err) { return; }
+    const box = qs('#fr-progress'); if (!box) { clearInterval(frPoll); return; }
+    const pct = j.accounts_total ? Math.round(j.accounts_done / j.accounts_total * 100) : 100;
+    const skipped = (j.results || []).filter(r => r.status !== 'returned').slice(0, 200);
+    box.innerHTML = `
+      <div style="background:var(--border);border-radius:6px;height:12px;overflow:hidden"><div style="width:${pct}%;background:${j.status === 'failed' ? '#b71c1c' : 'var(--brand-gold-dark)'};height:100%"></div></div>
+      <p style="margin-top:10px">${frJobSummaryHtml(j)}</p>
+      ${j.error ? `<p style="color:var(--danger)">${esc(j.error)}</p>` : ''}
+      ${(j.per_shul || []).length ? `<div style="max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px"><table><thead><tr><th>Shul</th><th>Returned</th></tr></thead><tbody>${j.per_shul.sort((a, b) => b.base - a.base).map(s => `<tr><td>${esc(s.shul_name)}</td><td>${frMoney(s.base)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      ${skipped.length ? `<h4 style="margin:12px 0 4px">Skipped / needs a look (${(j.results || []).filter(r => r.status !== 'returned').length})</h4><div style="max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px"><table><thead><tr><th>Applicant</th><th>Result</th><th>Why</th></tr></thead><tbody>${skipped.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.status)}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+    const foot = qs('#ec-modal .modal-footer') || (() => { const f = document.createElement('div'); f.className = 'modal-footer'; qs('#ec-modal .modal').appendChild(f); return f; })();
+    foot.innerHTML = j.status === 'running'
+      ? `<button class="btn btn-outline btn-sm" onclick="cancelFundReturn('${jobId}')">Stop after the current account</button>`
+      : `<button class="btn btn-outline btn-sm" onclick="downloadAuthed('/fund-return/jobs/${jobId}/export', 'fund-return.xlsx')">Download report (Excel)</button><button class="btn btn-primary btn-sm" onclick="closeModal();loadFundReturnLast()">Close</button>`;
+    if (j.status !== 'running') clearInterval(frPoll);
+  };
+  tick(); frPoll = setInterval(tick, 2000);
+};
+window.cancelFundReturn = async (jobId) => {
+  if (!confirm('Stop after the account currently being returned? Accounts already returned stay returned.')) return;
+  try { await api(`/fund-return/jobs/${jobId}/cancel`, { method: 'POST' }); toast('Stopping after the current account…'); } catch (err) { toast(err.message, true); }
+};
+loadFundReturnLast();
 
 window.saveOrg = async () => {
   const body = {

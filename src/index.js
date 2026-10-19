@@ -53,6 +53,7 @@ import contactRoutes from './routes/contact.js';
 import analyticsRoutes from './routes/analytics.js';
 import migrationRoutes from './routes/migration.js';
 import shulPaymentRoutes from './routes/shulPayments.js';
+import fundReturnRoutes from './routes/fundReturn.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -182,6 +183,7 @@ app.use('/api/contact', contactRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/migration', migrationRoutes);
 app.use('/api/shul-payments', shulPaymentRoutes);
+app.use('/api/fund-return', fundReturnRoutes);
 
 // Signed/generated PDFs, uploaded logos, and update attachments.
 app.use('/uploads/contracts', express.static(join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'contracts')));

@@ -180,6 +180,22 @@ every request. Rules that keep pages fast — keep them when touching these area
 - `synchronous = NORMAL` (WAL): a commit no longer fsyncs the log; the DB can't corrupt, only a power/OS
   failure in the last instant could drop the very latest commit.
 
+## Mass fund return (Settings > Organization > "Return funds on untouched accounts")
+Reverses every give (shul money AND org match) on every account that has had **no transaction at all**,
+in one run — so $1K from shul A + $1K org match + $1K from shul B goes back as $1K / $1K / $1K.
+Logic is `services/fundReturn.js`, routes `routes/fundReturn.js` (`/api/fund-return/*`), job rows in
+`fund_return_jobs` (progress, per-shul totals, per-account results; powers the Excel report).
+- **Permission `fund_return`** (Users & Permissions): super_admin always; everyone else needs an explicit
+  grant (`RESOURCE_DEFAULT_OVERRIDES`). Every route needs `can_edit`; the Settings card is hidden without it.
+- **Random code gate**: `/preview` issues a one-time 6-char letters+digits code (10 min, per user + season);
+  `/start` refuses unless it is typed back exactly. The button stays disabled until the code matches.
+- **"Untouched" is checked twice**: locally (no stored or unattributed charge for that person) and live
+  against disccardpromos per account right before reversing (any spend / balance below what was loaded →
+  skipped whole, never partially returned). Each give is reversed through the normal `reverseAllocation()`
+  (audited, shul balance restored, card amount lowered). Approval-time `card_amount` is not reversed.
+- One run at a time; Cancel stops before the next account (already-returned stays returned); a server
+  restart marks a running job `interrupted` at boot. Re-running is safe — reversed gives are skipped.
+
 ## Email — Brevo (single platform account)
 `src/services/mail.js` sends via the Brevo transactional API
 (`https://api.brevo.com/v3/smtp/email`), using `BREVO_API_KEY` /

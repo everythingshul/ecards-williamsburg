@@ -1732,6 +1732,31 @@ try {
     if (back) console.log(`[db] restored ${back} of ${parked.length} charge(s) (net $${Math.round(backNet * 100) / 100}) that an earlier change had taken out of Total Spent`);
   }
 } catch (e) { console.error('[db] restoring excluded transactions failed:', e.message); }
+// Mass "return funds on untouched accounts" runs (services/fundReturn.js): one
+// row per run with live progress and the per-account outcome, so the admin can
+// watch it, reload the page, and review / export what happened afterwards.
+db.exec(`CREATE TABLE IF NOT EXISTS fund_return_jobs (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  started_by TEXT,
+  season_id TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  accounts_total INTEGER NOT NULL DEFAULT 0,
+  accounts_done INTEGER NOT NULL DEFAULT 0,
+  accounts_returned INTEGER NOT NULL DEFAULT 0,
+  accounts_skipped INTEGER NOT NULL DEFAULT 0,
+  accounts_failed INTEGER NOT NULL DEFAULT 0,
+  gives_reversed INTEGER NOT NULL DEFAULT 0,
+  shul_returned REAL NOT NULL DEFAULT 0,
+  org_returned REAL NOT NULL DEFAULT 0,
+  per_shul_json TEXT,
+  results_json TEXT,
+  error TEXT,
+  started_at TEXT DEFAULT (datetime('now')),
+  finished_at TEXT
+)`);
+// a restart mid-run leaves a 'running' row nobody is running any more
+db.prepare(`UPDATE fund_return_jobs SET status = 'interrupted', finished_at = datetime('now') WHERE status = 'running'`).run();
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_end TEXT`);
 // Reusable rich-text "payment is on the way" emails, with the invoice
