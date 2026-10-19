@@ -5,6 +5,7 @@ import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
 import { totalSpend } from './spendTotals.js';
+import { invalidateAggregates } from './aggCache.js';
 
 // Last 4 digits of any masked card string, whatever mask convention it uses
 // (`****1123`, `************1123`, `**** **** **** 1123`) — the only card
@@ -80,6 +81,7 @@ export async function syncOneCard(orgId, card) {
   const applicant = db.prepare('SELECT * FROM applicants WHERE id = ?').get(card.applicant_id);
   if (!applicant) return 0;
   const { transactionsSynced } = await syncApplicantCards(orgId, applicant);
+  invalidateAggregates();
   return transactionsSynced;
 }
 
@@ -159,7 +161,15 @@ export async function lockApplicantCards(orgId, applicant) {
 // Leave undefined (the default) for the old one-call-per-applicant behavior
 // — used by syncOneCard's manual "Sync Now" click, where there's no batch
 // to amortize a bulk pull across.
-export async function syncApplicantCards(orgId, applicant, customerOverride) {
+//
+// ctx (optional, supplied by syncAllCards — see its comment): { knownTxnIds,
+// batch }. knownTxnIds is the set of provider charge ids ALREADY held in
+// card_transactions, loaded once per sweep: a charge in it is skipped outright
+// (no store lookup, no payload serialising, no insert attempt) — at tens of
+// thousands of charges re-checked every minute that was most of the sweep's
+// cost and froze the whole server while it ran. batch=true leaves the
+// last_synced_at touch to one statement at the end of the sweep.
+export async function syncApplicantCards(orgId, applicant, customerOverride, ctx = {}) {
   if (!applicant.provider_account_id || applicant.provider_exempt) return { discovered: 0, removed: 0, transactionsSynced: 0 };
   let customer = customerOverride;
   if (customer === undefined) {
@@ -179,7 +189,7 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
   // again as a phantom duplicate.
   const remoteCards = Array.isArray(customer.active_cards) ? customer.active_cards.map(String) : [];
   const remoteLast4 = new Set(remoteCards.map(last4));
-  const localActive = db.prepare(`SELECT id, card_number_masked FROM cards WHERE applicant_id = ? AND status IN ('assigned','activated')`).all(applicant.id);
+  const localActive = db.prepare(`SELECT id, card_number_masked, amount FROM cards WHERE applicant_id = ? AND status IN ('assigned','activated')`).all(applicant.id);
   const knownLast4 = new Set(localActive.map(c => last4(c.card_number_masked)));
 
   // `packages[].balance` is the real, currently-spendable balance (confirmed
@@ -209,6 +219,9 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
     const updateAmount = db.prepare(`UPDATE cards SET amount = ?, last_synced_at = datetime('now') WHERE id = ?`);
     for (const local of localActive) {
       if (!remoteLast4.has(last4(local.card_number_masked))) continue; // about to be deactivated below, not refreshed
+      // Unchanged balance: nothing to write (a sweep used to rewrite every
+      // card, every minute — thousands of commits for no change at all).
+      if (ctx.batch && local.amount != null && Math.abs(Number(local.amount) - balance) < 0.005) continue;
       updateAmount.run(balance, local.id);
     }
   }
@@ -254,8 +267,11 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
     //    as-is would exclude every real purchase from every total.
     //  - each entry is its own try/catch: one malformed entry used to abort
     //    the whole array and silently drop everything after it.
+    const known = ctx.knownTxnIds;
     for (const t of rawTxns) {
       try {
+        // Already stored as a real card charge: nothing to do (see ctx above).
+        if (known && t.id != null && known.has(cleanProviderId(t.id))) continue;
         const cardId = cardIdByLast4.get(last4(t.card)) || singleCardId;
         if (!cardId) {
           unattributed++;
@@ -274,13 +290,14 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
         // convention in applicantBalance.js.
         const result = insertTxn.run(uuid(), cardId, n.providerTxnId, n.type, n.amount, null, n.storeName, resolveStoreId(orgId, n.storeName), n.occurredAt, JSON.stringify(t));
         if (result.changes) transactionsSynced++;
+        if (known) known.add(cleanProviderId(n.providerTxnId));
         dropUnattributed.run(orgId, n.providerTxnId);
       } catch (e) {
         malformed++;
         console.warn(`[cardSync] transaction insert threw for applicant ${applicant.id}: ${e.message} — raw: ${JSON.stringify(t).slice(0, 300)}`);
       }
     }
-    db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE applicant_id = ?`).run(applicant.id);
+    if (!ctx.batch) db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE applicant_id = ?`).run(applicant.id);
   }
 
   return { discovered, removed, transactionsSynced, unattributed, malformed };
@@ -310,7 +327,10 @@ export async function syncApplicantCards(orgId, applicant, customerOverride) {
 // already-fetched customer (or explicit null) to skip this function's own
 // live GET when the caller already has one bulk pull's worth of data in
 // hand (see syncAllCards). undefined falls back to the old per-anchor call.
-export async function reconcileApplicantBalance(orgId, applicant, customerOverride) {
+// balancesOverride (optional Map from getApplicantBalances for many
+// applicants at once — supplied by syncAllCards) replaces the per-applicant
+// balance query, which cost thousands of separate queries per sweep.
+export async function reconcileApplicantBalance(orgId, applicant, customerOverride, balancesOverride) {
   if (!applicant.provider_account_id || applicant.provider_exempt) return null;
   const discountId = db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'disccardpromos_discount_id'`).get(orgId)?.value;
   if (!discountId) return null;
@@ -333,7 +353,7 @@ export async function reconcileApplicantBalance(orgId, applicant, customerOverri
   // failed, higher means something outside this app's ledger added funds.
   if (customer.amount == null) return null;
   const actual = Math.round(Number(customer.amount) * 100) / 100;
-  const expected = getApplicantBalances(orgId, [applicant.id]).get(applicant.id)?.loaded ?? 0;
+  const expected = (balancesOverride || getApplicantBalances(orgId, [applicant.id])).get(applicant.id)?.loaded ?? 0;
   const diff = Math.round((actual - expected) * 100) / 100;
 
   const existing = db.prepare(`SELECT * FROM card_reconciliation_flags WHERE org_id = ? AND applicant_id = ? AND status = 'open'`).get(orgId, applicant.id);
@@ -536,15 +556,27 @@ export async function syncAllCards(orgId) {
   const indexPullsFailed = seasonIds.filter(s => !giftcard.isMockMode(s) && !indexBySeason.get(s)).length;
   let cardsDiscovered = 0, cardsRemoved = 0, totalSynced = 0, unattributed = 0, malformed = 0, failed = 0;
   const coveredCustomerIds = new Set();
+  // PERFORMANCE (a sweep took ~16s at 150K charges and froze every request for
+  // ~12s of it, once a minute): (1) every charge already stored is skipped
+  // outright via one in-memory set; (2) unchanged cards are not rewritten;
+  // (3) the loop hands control back to the event loop every few applicants, so
+  // page requests are answered between chunks instead of waiting out the
+  // whole sweep. No transaction is held open across those pauses.
+  const ctx = { batch: true, knownTxnIds: new Set(db.prepare(`SELECT provider_txn_id id FROM card_transactions WHERE provider_txn_id IS NOT NULL`).all().map(r => cleanProviderId(r.id))) };
+  const yieldNow = () => new Promise(resolve => setImmediate(resolve));
+  let sinceYield = 0;
   for (const applicant of applicants) {
     try {
       const customer = customerFor(applicant);
-      const r = await syncApplicantCards(orgId, applicant, customer);
+      const r = await syncApplicantCards(orgId, applicant, customer, ctx);
       if (customer) coveredCustomerIds.add(cleanProviderId(customer.id));
       cardsDiscovered += r.discovered || 0; cardsRemoved += r.removed || 0; totalSynced += r.transactionsSynced || 0;
       unattributed += r.unattributed || 0; malformed += r.malformed || 0;
     } catch (e) { failed++; console.error('[cardSync] sync failed for applicant', applicant.id, e.message); }
+    if (++sinceYield >= 25) { sinceYield = 0; await yieldNow(); }
   }
+  // one statement instead of one commit per applicant
+  db.prepare(`UPDATE cards SET last_synced_at = datetime('now') WHERE applicant_id IN (SELECT id FROM applicants WHERE org_id = ? AND provider_account_id IS NOT NULL AND provider_exempt = 0)`).run(orgId);
   let unlinked = { unlinkedCustomers: 0, unlinkedTransactions: 0 };
   try { unlinked = syncUnlinkedCustomers(orgId, [...indexBySeason.values()].filter(Boolean), coveredCustomerIds); }
   catch (e) { console.error('[cardSync] unlinked-customer sync failed:', e.message); }
@@ -554,16 +586,22 @@ export async function syncAllCards(orgId) {
   // the exact same two numbers under a different applicant_id).
   let reconciliationFlags = 0;
   const anchors = applicants.filter(a => !a.merge_group_id || a.merge_group_id === a.id);
+  // one balance computation for every anchor instead of one query set each
+  let anchorBalances = null;
+  try { anchorBalances = getApplicantBalances(orgId, anchors.map(a => a.id)); } catch (e) { console.error('[cardSync] batched balances failed, falling back per applicant:', e.message); }
+  sinceYield = 0;
   for (const anchor of anchors) {
     try {
-      const flag = await reconcileApplicantBalance(orgId, anchor, customerFor(anchor));
+      const flag = await reconcileApplicantBalance(orgId, anchor, customerFor(anchor), anchorBalances);
       if (flag) reconciliationFlags++;
     } catch (e) { console.error('[cardSync] balance reconciliation failed for applicant', anchor.id, e.message); }
+    if (++sinceYield >= 100) { sinceYield = 0; await yieldNow(); }
   }
   // cardsChecked is shown to the admin as "Checked N card(s)" (see
   // frontend/admin/cards.html) — computed separately from the sync loop
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
+  invalidateAggregates();
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
   return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
 }

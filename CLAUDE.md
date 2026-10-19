@@ -156,6 +156,30 @@ build environment, so the exact endpoint paths/payloads in `giftcard.js` are
 a best-guess placeholder pending confirmation with their team — once
 confirmed, only that file's request/response mapping changes.
 
+## Performance (measured on a 154K-charge / 6.6K-applicant / 250 MB database)
+The whole app is ONE Node thread and better-sqlite3 is synchronous, so any long query or loop freezes
+every request. Rules that keep pages fast — keep them when touching these areas:
+- **The sync sweep (`syncAllCards`, every 60s) must stay cheap and yield.** It used to take ~16s and froze
+  the server ~12s per minute (re-resolving, re-serialising and re-inserting every stored charge each
+  time). Now: one in-memory set of already-stored provider charge ids (`ctx.knownTxnIds`) skips them
+  outright; unchanged cards aren't rewritten; `last_synced_at` is one `UPDATE` per sweep; balances for
+  all merge-group anchors are computed once; the loops `await setImmediate` every 25/100 applicants (never
+  hold a transaction across a yield); `index.js` skips a tick while a sweep is still running.
+  `resolveStoreId` memoises vendor→store for 30s (`clearStoreMatchCache()` on link changes).
+- **Whole-table spend aggregates are cached 20s** in `services/aggCache.js` (`memo`/`invalidateAggregates`):
+  `attributedNet`, per-applicant spend (`getApplicantBalances` for >200 applicants), the dashboard's
+  per-store net, Cards totals and Spent-by-Shul. Every `logAudit()` and every sync drops the cache, so
+  approvals, gives, undos, merges and syncs show at once.
+- **Covering indexes** `idx_txn_card_cover(card_id,type,amount)` and `idx_txn_store_cover(store_id,card_id,type,amount)`
+  answer the spend sums from the index (~10x faster); `idx_txn_occurred` serves the newest-first list.
+- **Big lists are paged server-side**: Cards > All Transactions (reads each table newest-first and stops,
+  deterministic order) and Shul Transactions > Allocations (`?active=1&pageSize=&page=`, `renderSimplePager()`).
+  Never return every allocation/transaction in one response.
+- `compression` (gzip, >1 KB) is on for every response; static files: HTML `no-cache`, images 7 days,
+  JS/CSS with `?v=` (bump it whenever `app.js` changes) 1 year immutable, otherwise 5 min.
+- `synchronous = NORMAL` (WAL): a commit no longer fsyncs the log; the DB can't corrupt, only a power/OS
+  failure in the last instant could drop the very latest commit.
+
 ## Email — Brevo (single platform account)
 `src/services/mail.js` sends via the Brevo transactional API
 (`https://api.brevo.com/v3/smtp/email`), using `BREVO_API_KEY` /

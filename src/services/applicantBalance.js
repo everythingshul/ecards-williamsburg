@@ -1,5 +1,6 @@
 import { db } from '../db.js';
 import { totalSpend } from './spendTotals.js';
+import { memo } from './aggCache.js';
 
 // An applicant merged into a group (see services/duplicates.js's
 // mergeApplicants) shares exactly one real disccardpromos account with
@@ -78,9 +79,15 @@ export function getApplicantBalances(orgId, applicantIds) {
   // The same expression is used at every spend site (cards.js, dashboard.js,
   // stores.js, donorDashboard.js) so the figures agree with each other and
   // with disccardpromos' own net seasonal number.
-  const spentRows = db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
-    FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.applicant_id IN (${placeholders}) GROUP BY c.applicant_id`).all(...allMemberIds);
-  const spentById = new Map(spentRows.map(r => [r.applicant_id, r.spent]));
+  // Many applicants at once (a dashboard / sweep asking for everyone): one
+  // cached whole-org scan, instead of a fresh multi-thousand-parameter query
+  // over all charges every call. A handful (an applicant's own page): the
+  // targeted query, which is cheap and always current.
+  const spentById = allMemberIds.length > 200
+    ? memo(`spentByApplicant:${orgId}`, () => new Map(db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
+        FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? GROUP BY c.applicant_id`).all(orgId).map(r => [r.applicant_id, r.spent])))
+    : new Map(db.prepare(`SELECT c.applicant_id, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) spent
+        FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.applicant_id IN (${placeholders}) GROUP BY c.applicant_id`).all(...allMemberIds).map(r => [r.applicant_id, r.spent]));
 
   for (const idSet of idsByGroup.values()) {
     let loaded = 0, spent = 0, adjustment = 0, fundingAdjustment = 0;

@@ -15,6 +15,7 @@ import { hardDeleteStore, captureStoreSnapshot } from '../utils/entityDelete.js'
 import { generateGenericDocumentPdf } from '../services/pdf.js';
 import { resolveEntity } from './documents.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
+import { clearStoreMatchCache } from '../services/storeMatch.js';
 import { parseSpreadsheet, buildXlsxTemplate, STORE_IMPORT_COLUMNS } from '../services/importer.js';
 
 const router = Router();
@@ -284,6 +285,7 @@ router.post('/:id/provider-links', requirePermission('stores', 'can_edit'), (req
     db.prepare(`INSERT INTO store_provider_links (id, org_id, store_id, vendor_name) VALUES (?,?,?,?)`).run(uuid(), req.user.org_id, store.id, vendorName);
     logAudit(req.user.org_id, req.user.id, 'link-provider-vendor', 'store', store.id, null, { vendor_name: vendorName }, req.ip);
   }
+  clearStoreMatchCache();
   // Backfill: every already-synced transaction under this exact vendor name
   // now counts toward this store, retroactively — not just new ones from
   // the next sync. Re-points it even if a past fuzzy-name match had already
@@ -301,6 +303,7 @@ router.delete('/:id/provider-links/:linkId', requirePermission('stores', 'can_ed
   const link = db.prepare('SELECT * FROM store_provider_links WHERE id = ? AND org_id = ? AND store_id = ?').get(req.params.linkId, req.user.org_id, store.id);
   if (!link) return res.status(404).json({ error: 'Link not found' });
   db.prepare('DELETE FROM store_provider_links WHERE id = ?').run(link.id);
+  clearStoreMatchCache();
   // Un-attribute the transactions this link was responsible for, rather
   // than leaving them silently pointed at a store nothing here says they
   // belong to anymore — they go back to showing as unmatched, same as

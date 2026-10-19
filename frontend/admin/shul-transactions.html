@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/css/portal-theme.css">
 </head>
 <body>
-<script src="/js/app.js?v=20261017"></script>
+<script src="/js/app.js?v=20261019"></script>
 <script>
 Auth.requireAdmin();
 if (!Auth.can('shul_payments')) { location.href = '/admin/dashboard'; }
@@ -125,6 +125,7 @@ renderShell('/admin/shul-transactions', `
     <div class="card" style="padding:0;overflow-x:auto" id="allocations-results-card">
       <table><thead><tr><th>Shul</th><th>Applicant</th><th>Given</th><th>Match</th><th>Total</th><th>By</th><th>Date</th><th></th></tr></thead>
       <tbody id="tbody-allocations"><tr><td colspan="8" class="empty-state">Loading…</td></tr></tbody></table>
+      <div class="paginator" id="pager-allocations" style="padding:10px 14px;margin:0"></div>
     </div>
   </div>
   <div id="panel-requests" style="display:none">
@@ -656,13 +657,20 @@ window.submitPayout = async () => {
   } catch (err) { toast(err.message, true); }
 };
 
+// Paged (100 at a time, server-side): the org-wide list is every give ever made
+// — tens of thousands of rows, ~15 MB — which is what made this tab crawl.
+let alPage = 1, alFilterKey = '';
+const AL_PAGE_SIZE = 100;
 async function loadAllocations() {
-  const { allocations } = await api('/shul-payments/allocations?' + currentFilterParams());
-  // Reversal rows themselves (reversal_of set — a negative-amount credit-
-  // back entry, never itself reversed_at) must never show an Undo button:
+  const filterKey = currentFilterParams();
+  if (filterKey !== alFilterKey) { alFilterKey = filterKey; alPage = 1; }   // new filter -> back to page 1
+  const { allocations, total } = await api(`/shul-payments/allocations?${filterKey}&active=1&pageSize=${AL_PAGE_SIZE}&page=${alPage}`);
+  renderSimplePager('pager-allocations', alPage, AL_PAGE_SIZE, total, (p) => { alPage = p; loadAllocations(); });
+  // Only gives still standing arrive (active=1): reversal rows themselves
+  // (reversal_of set) and undone gives must never show an Undo button —
   // "undoing" a reversal ran negative math and silently corrupted the
-  // shul's balance — see services/matching.js's reverseAllocation, which
-  // now also refuses this server-side as a second layer of defense.
+  // shul's balance (see services/matching.js's reverseAllocation, which
+  // refuses it server-side too). The filter below stays as a second layer.
   const active = allocations.filter(a => !a.reversed_at && !a.reversal_of);
   qs('#tbody-allocations').innerHTML = active.length ? active.map(a => `<tr>
       <td>${esc(a.shul_name||'')}</td>

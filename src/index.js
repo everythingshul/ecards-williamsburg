@@ -10,6 +10,7 @@ import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -86,6 +87,10 @@ app.set('trust proxy', 1);
 // served with no auth check (the URL itself is the only gate), so relaxing
 // this adds no real exposure, just stops blocking legitimate embedding.
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: false }));
+// gzip every compressible response over 1 KB — the 160 KB app.js, every HTML
+// page and every JSON list used to go out uncompressed (xlsx / images / PDFs
+// are already-compressed types and are skipped by the library's own filter).
+app.use(compression({ threshold: 1024 }));
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || process.env.APP_URL || '*', credentials: true }));
 // verify: stashes the raw request bytes on req.rawBody alongside the normal
 // parsed body — needed by Stripe's webhook signature check (services/
@@ -197,7 +202,18 @@ app.get(/^\/(?!api\/|uploads\/).*\.html$/, (req, res, next) => {
   res.redirect(301, clean + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''));
 });
 
-app.use(express.static(FRONTEND_DIR));
+// Caching for the frontend files: pages are always revalidated (so a deploy
+// shows up at once); images are kept a week; JS/CSS referenced with a ?v=
+// version (bumped whenever the file changes) are kept for a year, the rest for
+// five minutes — so a normal page click no longer re-downloads (or even
+// re-asks for) the 160 KB app.js, the stylesheets and the logo every time.
+app.use(express.static(FRONTEND_DIR, {
+  setHeaders(res, filePath) {
+    if (/\.html?$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+    else if (/\.(png|jpe?g|gif|svg|ico|webp|woff2?)$/i.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=604800');
+    else if (/\.(js|css)$/i.test(filePath)) res.setHeader('Cache-Control', res.req?.query?.v ? 'public, max-age=31536000, immutable' : 'public, max-age=300');
+  },
+}));
 
 app.get('/', (req, res) => res.sendFile(join(FRONTEND_DIR, 'index.html')));
 
@@ -236,8 +252,20 @@ setTimeout(() => { sendDueTaskReminders().catch(e => console.error('[reminders] 
 // volume (each sweep is one API call per applicant with an account, not
 // per card).
 const CARD_SYNC_INTERVAL_MS = 60 * 1000;
-setInterval(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, CARD_SYNC_INTERVAL_MS);
-setTimeout(() => { syncAllCards(DEFAULT_ORG_ID).catch(e => console.error('[cardSync] sweep failed', e.message)); }, 20 * 1000);
+// A sweep that is still running when the next tick fires is NOT started a
+// second time (they used to pile up on top of each other whenever one ran
+// longer than the interval — each one freezing the server in turn).
+let cardSweepRunning = false;
+const runCardSweep = async () => {
+  if (cardSweepRunning) { console.warn('[cardSync] previous sweep still running — skipping this tick'); return; }
+  cardSweepRunning = true;
+  const started = Date.now();
+  try { await syncAllCards(DEFAULT_ORG_ID); }
+  catch (e) { console.error('[cardSync] sweep failed', e.message); }
+  finally { cardSweepRunning = false; const ms = Date.now() - started; if (ms > 10000) console.warn(`[cardSync] sweep took ${Math.round(ms / 1000)}s`); }
+};
+setInterval(runCardSweep, CARD_SYNC_INTERVAL_MS);
+setTimeout(runCardSweep, 20 * 1000);
 
 // Keeps disccardpromos matched to our own approval records automatically —
 // no admin should ever need to click "Make Disccardpromos Match" for this

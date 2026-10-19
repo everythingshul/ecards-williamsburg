@@ -5,6 +5,7 @@ import { getPermission, requirePermission } from '../middleware/permissions.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { orgFundsSummary, loadedAccountsActive } from '../services/applicantBalance.js';
 import { totalSpend, unattributedByStore } from '../services/spendTotals.js';
+import { memo } from '../services/aggCache.js';
 
 const router = Router();
 // Internal team only — every count below is computed org-wide (total shuls,
@@ -136,10 +137,13 @@ router.get('/stats', (req, res) => {
     // customers not linked to any applicant are added per store below, which
     // can change the ranking.
     const extraByStore = unattributedByStore(orgId, seasonId);
-    stats.topStores = db.prepare(`SELECT s.id, s.name, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total_purchases
-      FROM stores s LEFT JOIN card_transactions t ON t.store_id = s.id LEFT JOIN cards c2 ON c2.id = t.card_id
-      WHERE s.org_id = ?${storeSeasonClause} GROUP BY s.id`).all(orgId, ...seasonParams)
-      .map(s => ({ ...s, total_purchases: Math.round((s.total_purchases + (extraByStore[s.id] || 0)) * 100) / 100 }))
+    // One grouped pass over the charges (cached briefly — see aggCache.js)
+    // instead of stores x charges x cards joined together.
+    const netByStore = memo(`dashNetByStore:${orgId}:${seasonId || ''}`, () => new Map(db.prepare(`SELECT t.store_id, COALESCE(SUM(CASE WHEN t.type = 'refund' THEN -t.amount WHEN t.amount < 0 THEN -t.amount ELSE 0 END),0) total
+      FROM card_transactions t JOIN cards c2 ON c2.id = t.card_id
+      WHERE t.store_id IS NOT NULL AND c2.org_id = ?${storeSeasonClause} GROUP BY t.store_id`).all(orgId, ...seasonParams).map(r => [r.store_id, r.total])));
+    stats.topStores = db.prepare('SELECT id, name FROM stores WHERE org_id = ?').all(orgId)
+      .map(s => ({ ...s, total_purchases: Math.round(((netByStore.get(s.id) || 0) + (extraByStore[s.id] || 0)) * 100) / 100 }))
       .filter(s => s.total_purchases > 0)
       .sort((a, b) => b.total_purchases - a.total_purchases)
       .slice(0, 5);
