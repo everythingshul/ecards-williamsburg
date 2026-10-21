@@ -196,6 +196,29 @@ Logic is `services/fundReturn.js`, routes `routes/fundReturn.js` (`/api/fund-ret
 - One run at a time; Cancel stops before the next account (already-returned stays returned); a server
   restart marks a running job `interrupted` at boot. Re-running is safe — reversed gives are skipped.
 
+### Second button: "Return What's Left on Single-Shul, Matched Accounts" (`mode: 'partial'`)
+Same permission (`fund_return`), same typed-code gate (a separate code per button — one button's code never
+confirms the other), same job table (`fund_return_jobs.mode`), runner, progress popup and Excel report.
+For accounts that may already have **spent** something. Eligible only when ALL standing gives of the account
+(`findPartialCandidates`): come from ONE shul and one season; total match == total shul money to the cent
+(1:1); total received (shul + match) ≤ **2 × the applicant's match cap** (`resolveApplicantCap`: applicant
+override else season `match_cap_per_applicant`; **no cap set = skipped**). The preview names how many accounts
+were left out and why.
+- **Amount**: at run time the LIVE disccardpromos balance is read (`computeRetrievable`; local ledger only if
+  the account was never on the card). `spent = loaded − live`; `left = min(gives − spent, live)` — what was
+  spent comes off the shul/match gives (so the approval-time `card_amount` is never returned); `left` is split
+  in half in cents, **an odd cent goes to the shul**. $500 + $500 match, $100 spent → $450 shul / $450 org.
+- **Ledger**: each give is closed through `reverseAllocation()` with an explicit `shulAmount`/`orgWriteoffAmount`
+  split that sums to `left` (oldest give first; a give with nothing left is still closed for $0 so it can't be
+  returned twice) and a `reversalNoteOverride` stating the real split. The spent part stays counted as used by
+  the shul and the match cap. Nothing left on the card → skipped, nothing touched. Idempotent.
+- Preview figures are an estimate from the local spend ledger; the run uses the live balance.
+
+## Applicant profile "DiscCard" button
+`openApplicant()` footer (after View Other Seasons), only when `provider_account_id` is set: opens
+`https://disccardpromos.com/portal/org/customers/<id>/` in a new tab (id with any trailing `.0` stripped).
+Frontend only, nothing sent to our server.
+
 ## Email — Brevo (single platform account)
 `src/services/mail.js` sends via the Brevo transactional API
 (`https://api.brevo.com/v3/smtp/email`), using `BREVO_API_KEY` /

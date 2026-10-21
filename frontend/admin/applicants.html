@@ -500,6 +500,7 @@ async function openApplicant(id) {
       </div>`;
     const footer = `
       <button class="btn btn-outline btn-sm" onclick="showOtherSeasons('Applicant', '/applicants/${id}/other-seasons', 'openApplicant')">View Other Seasons</button>
+      ${a.provider_account_id ? `<button class="btn btn-outline btn-sm" onclick="window.open('https://disccardpromos.com/portal/org/customers/${encodeURIComponent(String(a.provider_account_id).replace(/\.0$/, ''))}/', '_blank')">DiscCard</button>` : ''}
       <button class="btn btn-outline btn-sm" onclick="openQuickTaskModal('applicant','${id}','${jsAttr(a.first_name+' '+a.last_name)}')">+ Add Task</button>
       ${['super_admin','org_admin'].includes(Auth.user()?.role) ? `<button class="btn btn-outline btn-sm" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteApplicant('${id}')">Delete Permanently</button>` : ''}
       ${a.approval_status !== 'pending' ? `<button class="btn btn-outline btn-sm" onclick="setApplicantPending('${id}')">Set to Pending</button>` : ''}

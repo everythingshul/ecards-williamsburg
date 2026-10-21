@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/permissions.js';
 import { sendXlsx } from '../services/xlsx.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
-import { previewReturn, issueConfirmCode, consumeConfirmCode, startReturnJob, cancelJob, currentJobId } from '../services/fundReturn.js';
+import { previewReturn, previewPartial, issueConfirmCode, consumeConfirmCode, startReturnJob, cancelJob, currentJobId, MODES } from '../services/fundReturn.js';
 
 // Mass "return funds on untouched accounts" — Settings > Organization. Gated
 // behind its own explicit-grant permission (fund_return, see
@@ -14,6 +14,11 @@ import { previewReturn, issueConfirmCode, consumeConfirmCode, startReturnJob, ca
 // click or a replayed request.
 const router = Router();
 router.use(auth, requirePermission('fund_return', 'can_edit'));
+
+// Two buttons share everything (permission, code gate, job runner, report): 'untouched' (accounts
+// with no transactions, every give reversed in full) and 'partial' (single-shul, dollar-for-dollar
+// matched accounts, what is left split half shul / half org).
+const modeOf = (v) => (MODES.includes(v) ? v : 'untouched');
 
 function jobView(j, withResults = false) {
   if (!j) return null;
@@ -27,27 +32,31 @@ function jobView(j, withResults = false) {
 // What it would do, plus the code to type to confirm. Local data only — the
 // live card balance of every account is re-checked when it actually runs.
 router.post('/preview', (req, res) => {
+  const mode = modeOf(req.body?.mode);
   const seasonId = req.body?.season_id === 'all' ? '' : (req.body?.season_id || getActiveSeasonId(req.user.org_id) || '');
-  res.json({ seasonId: seasonId || 'all', ...previewReturn(req.user.org_id, seasonId), ...issueConfirmCode(req.user.id, seasonId) });
+  const preview = mode === 'partial' ? previewPartial(req.user.org_id, seasonId) : previewReturn(req.user.org_id, seasonId);
+  res.json({ mode, seasonId: seasonId || 'all', ...preview, ...issueConfirmCode(req.user.id, seasonId, mode) });
 });
 
 router.post('/start', (req, res) => {
+  const mode = modeOf(req.body?.mode);
   const seasonId = req.body?.season_id === 'all' ? '' : (req.body?.season_id || '');
-  if (!consumeConfirmCode(req.user.id, seasonId, req.body?.code)) {
+  if (!consumeConfirmCode(req.user.id, seasonId, req.body?.code, mode)) {
     return res.status(400).json({ error: 'That confirmation code is wrong or has expired. Preview again to get a new one.' });
   }
   try {
-    const jobId = startReturnJob({ orgId: req.user.org_id, userId: req.user.id, seasonId, ip: req.ip });
+    const jobId = startReturnJob({ orgId: req.user.org_id, userId: req.user.id, seasonId, ip: req.ip, mode });
     res.status(202).json({ jobId });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
-// The running job if any, else the most recent one — lets the page pick the
+// The running job if any, else the most recent one of the asked-for type — lets the page pick the
 // progress view back up after a reload.
 router.get('/current', (req, res) => {
+  const mode = modeOf(req.query.mode);
   const running = currentJobId();
-  const j = running ? db.prepare('SELECT * FROM fund_return_jobs WHERE id = ?').get(running)
-    : db.prepare('SELECT * FROM fund_return_jobs WHERE org_id = ? ORDER BY started_at DESC LIMIT 1').get(req.user.org_id);
+  let j = running ? db.prepare('SELECT * FROM fund_return_jobs WHERE id = ?').get(running) : null;
+  if (!j) j = db.prepare('SELECT * FROM fund_return_jobs WHERE org_id = ? AND mode = ? ORDER BY started_at DESC LIMIT 1').get(req.user.org_id, mode);
   res.json({ job: jobView(j) });
 });
 

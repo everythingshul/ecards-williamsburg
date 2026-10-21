@@ -1755,6 +1755,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS fund_return_jobs (
   started_at TEXT DEFAULT (datetime('now')),
   finished_at TEXT
 )`);
+// 'untouched' = reverse every give on accounts with no transactions; 'partial' = give back what is
+// left on single-shul, dollar-for-dollar-matched accounts (half to the shul, half to the org)
+safeAlter(`ALTER TABLE fund_return_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'untouched'`);
 // a restart mid-run leaves a 'running' row nobody is running any more
 db.prepare(`UPDATE fund_return_jobs SET status = 'interrupted', finished_at = datetime('now') WHERE status = 'running'`).run();
 safeAlter(`ALTER TABLE store_bill_submissions ADD COLUMN bill_period_start TEXT`);
