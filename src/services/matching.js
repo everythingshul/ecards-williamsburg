@@ -17,7 +17,7 @@ function resolveRate(applicant, shul, season) {
 // The per-applicant cap is the only tier an applicant-level override can
 // touch; the per-shul and season-total caps are separate, independent
 // ceilings (see db.js's schema comment) and are never applicant-specific.
-function resolveApplicantCap(applicant, season) {
+export function resolveApplicantCap(applicant, season) {
   return applicant.match_cap_override ?? season.match_cap_per_applicant ?? null;
 }
 function resolveShulCap(shul, season) {
@@ -503,7 +503,9 @@ function resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmou
   return { creditToShul, writeoffAmount, totalPulled, reversalBase, reversalMatch };
 }
 
-export async function reverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, adminReversalNote }) {
+// reversalNoteOverride (optional): a caller that sets its own split (the mass partial fund return)
+// supplies the sentence shown on the reversal row, because the stock one describes a full return.
+export async function reverseAllocation({ orgId, userId, allocationId, ip, shulAmount, orgWriteoffAmount, adminReversalNote, reversalNoteOverride }) {
   const { original, applicant, fundingAnchor, fundingExternalId, discountId, neverLoaded, retrievable, shortfall, rawDiagnostic } = await computeRetrievable(orgId, allocationId);
   const hasOverride = shulAmount != null || orgWriteoffAmount != null;
   const { totalPulled, reversalBase, reversalMatch } = resolveReversalSplit(retrievable, original, shulAmount, orgWriteoffAmount);
@@ -519,7 +521,7 @@ export async function reverseAllocation({ orgId, userId, allocationId, ip, shulA
   // ledger read either fully includes this reversal or hasn't started yet
   // — never half-applied.
   const id = uuid();
-  const reversalNote = buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
+  const reversalNote = reversalNoteOverride || buildReversalNote({ neverLoaded, total: original.total_amount, retrievable, shortfall, rawDiagnostic });
   db.prepare(`INSERT INTO shul_allocations (id, org_id, shul_id, applicant_id, season_id, base_amount, match_amount, total_amount, match_rate_used, is_admin_override, created_by, giftcard_status, giftcard_error, reversal_of, reversal_note, admin_reversal_note)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(id, orgId, original.shul_id, original.applicant_id, original.season_id, -reversalBase, -reversalMatch, -totalPulled, original.match_rate_used, original.is_admin_override, userId, 'pending', null, original.id, reversalNote, hasOverride ? (adminReversalNote || null) : null);

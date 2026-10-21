@@ -194,7 +194,13 @@ renderShell('/admin/settings', `
       <h3>Return Funds on Untouched Accounts</h3>
       <p class="small-muted">For every account that has received money but has had <strong>no transactions yet</strong>, hand everything back to where it came from: each shul's own money back to that shul's balance, and the org's match back to the org. Example: an account holding $3,000 &mdash; $1,000 from Shul A, $1,000 matched by the org, $1,000 from Shul B &mdash; gives $1,000 to Shul A, $1,000 to Shul B and releases the org's $1,000. Accounts that already spent anything are left completely alone. Every account's live card balance is re-checked right before it is touched, and every give is undone exactly the way a single &ldquo;Undo&rdquo; does it (so it is all in the audit trail). You will see exactly what will move before anything happens, and must type a confirmation code.</p>
       <div id="fr-last" class="small-muted"></div>
-      <button class="btn btn-sm" style="background:#b71c1c;border-color:#b71c1c;color:#fff;margin-top:10px" onclick="openFundReturn()">Return Funds on Untouched Accounts&hellip;</button>
+      <button class="btn btn-sm" style="background:#b71c1c;border-color:#b71c1c;color:#fff;margin-top:10px" onclick="openFundReturn('untouched')">Return Funds on Untouched Accounts&hellip;</button>
+    </div>
+    <div class="card" style="margin-top:16px" id="fund-return-partial-card">
+      <h3>Return What&rsquo;s Left on Single-Shul, Matched Accounts</h3>
+      <p class="small-muted">For accounts that got money from <strong>only one shul</strong>, matched by the org <strong>dollar for dollar</strong>, and received <strong>no more than double the match cap</strong> (cap $1,000 &rarr; $2,000 total is fine, $2,001 is skipped; an applicant with no cap set is skipped): take back whatever is still on the card and split it in half &mdash; half back to the shul, half released to the org; an odd cent goes to the shul. Example: $500 from the shul + $500 matched, $100 spent, $900 left &rarr; $450 to the shul and $450 to the org. Accounts that got money from two shuls, or that were not matched 1:1, are left completely alone. Each account&rsquo;s live card balance is read right before it is touched, every give is closed through the normal Undo (full audit trail), and you must type a confirmation code.</p>
+      <div id="fr-last-partial" class="small-muted"></div>
+      <button class="btn btn-sm" style="background:#b71c1c;border-color:#b71c1c;color:#fff;margin-top:10px" onclick="openFundReturn('partial')">Return What&rsquo;s Left on Matched Accounts&hellip;</button>
     </div>` : ''}
     <div class="card" style="margin-top:16px">
       <h3>Full System Export</h3>
@@ -648,27 +654,33 @@ window.downloadFullExport = () => downloadAuthed('/system-export', 'ecards-full-
 // Preview (local, nothing moves) -> a random code the admin must retype ->
 // a background run with live progress -> a report that can be exported.
 let frPoll = null;
+let frMode = 'untouched';   // which of the two buttons the open popup belongs to: 'untouched' | 'partial'
+const FR_TITLE = { untouched: 'Return Funds on Untouched Accounts', partial: 'Return What\u2019s Left on Matched Accounts' };
 function frMoney(n) { return fmtMoney(n || 0); }
 function frJobSummaryHtml(j) {
   const label = { running: 'Running', done: 'Finished', cancelled: 'Stopped', failed: 'Failed', interrupted: 'Interrupted (server restarted)' }[j.status] || j.status;
-  return `<strong>${label}</strong> &middot; ${j.accounts_done} of ${j.accounts_total} account(s) &middot; ${j.accounts_returned} returned, ${j.accounts_skipped} skipped (already spent), ${j.accounts_failed} failed
-    <br>Returned to shuls <strong>${frMoney(j.shul_returned)}</strong> &middot; released to the org <strong>${frMoney(j.org_returned)}</strong> &middot; ${j.gives_reversed} give(s) undone`;
+  const skippedWhy = j.mode === 'partial' ? 'skipped (nothing left)' : 'skipped (already spent)';
+  return `<strong>${label}</strong> &middot; ${j.accounts_done} of ${j.accounts_total} account(s) &middot; ${j.accounts_returned} returned, ${j.accounts_skipped} ${skippedWhy}, ${j.accounts_failed} failed
+    <br>Returned to shuls <strong>${frMoney(j.shul_returned)}</strong> &middot; released to the org <strong>${frMoney(j.org_returned)}</strong> &middot; ${j.gives_reversed} give(s) closed`;
 }
 async function loadFundReturnLast() {
-  const el = qs('#fr-last'); if (!el) return;
-  try {
-    const { job } = await api('/fund-return/current');
-    if (!job) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div style="margin-top:8px">Last run (${fmtDateTime(job.started_at)}): ${frJobSummaryHtml(job)}
-      <a href="#" onclick="openFundReturnJob('${job.id}');return false;">view</a></div>`;
-    if (job.status === 'running') openFundReturnJob(job.id);
-  } catch { /* card only exists for permitted users */ }
+  for (const mode of ['untouched', 'partial']) {
+    const el = qs(mode === 'partial' ? '#fr-last-partial' : '#fr-last'); if (!el) continue;
+    try {
+      const { job } = await api('/fund-return/current?mode=' + mode);
+      if (!job) { el.innerHTML = ''; continue; }
+      el.innerHTML = job.mode === mode ? `<div style="margin-top:8px">Last run (${fmtDateTime(job.started_at)}): ${frJobSummaryHtml(job)}
+        <a href="#" onclick="openFundReturnJob('${job.id}');return false;">view</a></div>` : '';
+      if (job.status === 'running' && job.mode === mode) openFundReturnJob(job.id);
+    } catch { /* card only exists for permitted users */ }
+  }
 }
-window.openFundReturn = async () => {
+window.openFundReturn = async (mode = 'untouched') => {
+  frMode = mode;
   let seasons = [];
   try { seasons = (await api('/seasons')).seasons || []; } catch {}
   const active = seasons.find(s => s.is_active);
-  openModal('Return Funds on Untouched Accounts', `
+  openModal(FR_TITLE[mode], `
     <p class="small-muted">Pick which season's gives to return, then preview. Nothing moves until you confirm with the code.</p>
     <label>Season</label>
     <select id="fr-season"><option value="all">All seasons</option>${seasons.map(s => `<option value="${s.id}" ${active && s.id === active.id ? 'selected' : ''}>${esc(s.name)}${s.is_active ? ' (active)' : ''}</option>`).join('')}</select>
@@ -678,30 +690,36 @@ window.openFundReturn = async () => {
 window.previewFundReturn = async () => {
   const btn = qs('#fr-preview-btn'); btn.disabled = true;
   try {
-    const p = await api('/fund-return/preview', { method: 'POST', body: { season_id: qs('#fr-season').value } });
+    const partial = frMode === 'partial';
+    const p = await api('/fund-return/preview', { method: 'POST', body: { season_id: qs('#fr-season').value, mode: frMode } });
+    const skippedHtml = (p.skipped || []).length ? `<div class="small-muted" style="margin-top:6px">Left alone: ${p.skipped.map(x => `${x.accounts.toLocaleString()} ${esc(x.label)}`).join(' &middot; ')}.</div>` : '';
     if (!p.eligibleAccounts) {
-      qs('#fr-body').innerHTML = `<p><strong>Nothing to return.</strong> No account with money on it is free of transactions${p.leftAloneAccounts ? ` (${p.leftAloneAccounts} account(s) have already spent something and are left alone)` : ''}.</p>`;
+      qs('#fr-body').innerHTML = partial
+        ? `<p><strong>Nothing to return.</strong> No account qualifies (one shul, matched dollar for dollar, within double the cap, with something left on the card).</p>${skippedHtml}`
+        : `<p><strong>Nothing to return.</strong> No account with money on it is free of transactions${p.leftAloneAccounts ? ` (${p.leftAloneAccounts} account(s) have already spent something and are left alone)` : ''}.</p>`;
       return;
     }
     qs('#fr-body').innerHTML = `
       <div class="card" style="margin-bottom:12px">
-        <div style="font-size:18px"><strong>${p.eligibleAccounts.toLocaleString()}</strong> account(s) with no transactions &middot; <strong>${p.gives.toLocaleString()}</strong> give(s) will be undone</div>
-        <div style="margin-top:6px">Back to shuls: <strong>${frMoney(p.toShuls)}</strong> &nbsp;&middot;&nbsp; Released to the org (match): <strong>${frMoney(p.toOrg)}</strong> &nbsp;&middot;&nbsp; Total coming off cards: <strong>${frMoney(p.total)}</strong></div>
-        ${p.leftAloneAccounts ? `<div class="small-muted" style="margin-top:6px">Left alone: ${p.leftAloneAccounts.toLocaleString()} account(s) holding ${frMoney(p.leftAloneAmount)} that have already had transactions.</div>` : ''}
+        <div style="font-size:18px"><strong>${p.eligibleAccounts.toLocaleString()}</strong> account(s) ${partial ? 'qualify' : 'with no transactions'} &middot; <strong>${p.gives.toLocaleString()}</strong> give(s) will be closed</div>
+        <div style="margin-top:6px">${partial ? 'About ' : ''}Back to shuls: <strong>${frMoney(p.toShuls)}</strong> &nbsp;&middot;&nbsp; Released to the org (match): <strong>${frMoney(p.toOrg)}</strong> &nbsp;&middot;&nbsp; Total coming off cards: <strong>${frMoney(p.total)}</strong></div>
+        ${partial ? skippedHtml : (p.leftAloneAccounts ? `<div class="small-muted" style="margin-top:6px">Left alone: ${p.leftAloneAccounts.toLocaleString()} account(s) holding ${frMoney(p.leftAloneAmount)} that have already had transactions.</div>` : '')}
       </div>
       <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px">
         <table><thead><tr><th>Shul</th><th>Accounts</th><th>Returns to the shul</th></tr></thead>
         <tbody>${p.shuls.map(s => `<tr><td>${esc(s.shul_name)}</td><td>${s.accounts}</td><td>${frMoney(s.base)}</td></tr>`).join('')}
         <tr><td><strong>The org (match)</strong></td><td></td><td><strong>${frMoney(p.toOrg)}</strong></td></tr></tbody></table>
       </div>
-      <p class="small-muted" style="margin-top:8px">This is based on this app's own records. Right before each account is touched, its live disccardpromos balance is checked again; an account whose card no longer holds everything that was loaded onto it is skipped, not partly returned.</p>
+      <p class="small-muted" style="margin-top:8px">${partial
+        ? "These figures are an estimate from this app's own records of spending. Right before each account is touched, its real disccardpromos balance is read and what is left on the card is split half to the shul, half to the org (an odd cent to the shul) &mdash; so the final amounts can differ a little from this estimate. An account with nothing left is skipped."
+        : "This is based on this app's own records. Right before each account is touched, its live disccardpromos balance is checked again; an account whose card no longer holds everything that was loaded onto it is skipped, not partly returned."}</p>
       <div class="card" style="margin-top:12px;border-color:#b71c1c">
         <p style="margin:0 0 8px"><strong>To confirm, type this code exactly:</strong> <span style="font-family:monospace;font-size:22px;letter-spacing:4px;background:var(--brand-panel-2);padding:4px 10px;border-radius:6px;user-select:none">${esc(p.code)}</span></p>
         <input id="fr-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Type the code" style="max-width:220px;font-family:monospace;letter-spacing:3px;text-transform:uppercase" oninput="frCheckCode('${esc(p.code)}')">
         <p class="small-muted" style="margin:6px 0 0">The code is good for ${p.expiresInMinutes} minutes and works once.</p>
       </div>`;
     qs('.modal-footer').innerHTML = `<button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-sm" id="fr-go" disabled style="background:#b71c1c;border-color:#b71c1c;color:#fff" onclick="startFundReturn('${esc(p.seasonId)}')">Return ${frMoney(p.total)} now</button>`;
+      <button class="btn btn-sm" id="fr-go" disabled style="background:#b71c1c;border-color:#b71c1c;color:#fff" onclick="startFundReturn('${esc(p.seasonId)}')">${partial ? 'Return about' : 'Return'} ${frMoney(p.total)} now</button>`;
   } catch (err) { toast(err.message, true); }
   finally { if (qs('#fr-preview-btn')) btn.disabled = false; }
 };
@@ -709,7 +727,7 @@ window.frCheckCode = (code) => { const go = qs('#fr-go'); if (go) go.disabled = 
 window.startFundReturn = async (seasonId) => {
   const go = qs('#fr-go'); go.disabled = true; go.textContent = 'Starting…';
   try {
-    const { jobId } = await api('/fund-return/start', { method: 'POST', body: { season_id: seasonId, code: qs('#fr-code').value } });
+    const { jobId } = await api('/fund-return/start', { method: 'POST', body: { season_id: seasonId, code: qs('#fr-code').value, mode: frMode } });
     openFundReturnJob(jobId);
   } catch (err) { toast(err.message, true); go.disabled = false; go.textContent = 'Try again'; }
 };
@@ -717,9 +735,11 @@ window.openFundReturnJob = (jobId) => {
   clearInterval(frPoll);
   if (!qs('#ec-modal')) openModal('Returning funds', '<div id="fr-progress"></div>', '', { wide: true });
   else { qs('#ec-modal .modal-header h3').textContent = 'Returning funds'; qs('#ec-modal .modal-body').innerHTML = '<div id="fr-progress"></div>'; }
+  let jobMode = frMode;
   const tick = async () => {
     let j;
     try { j = (await api(`/fund-return/jobs/${jobId}`)).job; } catch (err) { return; }
+    jobMode = j.mode || jobMode;
     const box = qs('#fr-progress'); if (!box) { clearInterval(frPoll); return; }
     const pct = j.accounts_total ? Math.round(j.accounts_done / j.accounts_total * 100) : 100;
     const skipped = (j.results || []).filter(r => r.status !== 'returned').slice(0, 200);
@@ -732,7 +752,7 @@ window.openFundReturnJob = (jobId) => {
     const foot = qs('#ec-modal .modal-footer') || (() => { const f = document.createElement('div'); f.className = 'modal-footer'; qs('#ec-modal .modal').appendChild(f); return f; })();
     foot.innerHTML = j.status === 'running'
       ? `<button class="btn btn-outline btn-sm" onclick="cancelFundReturn('${jobId}')">Stop after the current account</button>`
-      : `<button class="btn btn-outline btn-sm" onclick="downloadAuthed('/fund-return/jobs/${jobId}/export', 'fund-return.xlsx')">Download report (Excel)</button><button class="btn btn-primary btn-sm" onclick="closeModal();loadFundReturnLast()">Close</button>`;
+      : `<button class="btn btn-outline btn-sm" onclick="downloadAuthed('/fund-return/jobs/${jobId}/export', 'fund-return-${jobMode}.xlsx')">Download report (Excel)</button><button class="btn btn-primary btn-sm" onclick="closeModal();loadFundReturnLast()">Close</button>`;
     if (j.status !== 'running') clearInterval(frPoll);
   };
   tick(); frPoll = setInterval(tick, 2000);

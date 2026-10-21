@@ -17,7 +17,7 @@
 // of them touches the account).
 import { randomInt } from 'crypto';
 import { db, uuid } from '../db.js';
-import { reverseAllocation, computeRetrievable } from './matching.js';
+import { reverseAllocation, computeRetrievable, resolveApplicantCap } from './matching.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { logAudit } from './audit.js';
 
@@ -27,7 +27,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // A preview issues a random code the admin must retype to start. Held in
 // memory per user, single use, 15 minutes.
 const CODE_TTL_MS = 15 * 60 * 1000;
-const pending = new Map(); // userId -> { code, seasonId, expires }
+const pending = new Map(); // `${userId}:${mode}` -> { code, seasonId, expires }
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I to retype
 function newCode() {
   for (;;) {
@@ -36,17 +36,19 @@ function newCode() {
     if (/[A-Z]/.test(c) && /[2-9]/.test(c)) return c;   // always letters AND numbers
   }
 }
-export function issueConfirmCode(userId, seasonId) {
+// The two buttons keep separate codes, so previewing one can't confirm the other.
+export const MODES = ['untouched', 'partial'];
+export function issueConfirmCode(userId, seasonId, mode = 'untouched') {
   const code = newCode();
-  pending.set(userId, { code, seasonId: seasonId || '', expires: Date.now() + CODE_TTL_MS });
+  pending.set(`${userId}:${mode}`, { code, seasonId: seasonId || '', expires: Date.now() + CODE_TTL_MS });
   return { code, expiresInMinutes: CODE_TTL_MS / 60000 };
 }
 // true only for the exact code issued to this user for this scope; consumed on success
-export function consumeConfirmCode(userId, seasonId, typed) {
-  const p = pending.get(userId);
+export function consumeConfirmCode(userId, seasonId, typed, mode = 'untouched') {
+  const p = pending.get(`${userId}:${mode}`);
   if (!p || p.expires < Date.now() || p.seasonId !== (seasonId || '')) return false;
   if (String(typed || '').trim().toUpperCase() !== p.code) return false;
-  pending.delete(userId);
+  pending.delete(`${userId}:${mode}`);
   return true;
 }
 
@@ -120,6 +122,89 @@ export function previewReturn(orgId, seasonId) {
   };
 }
 
+// ---- partial return: single shul, dollar-for-dollar match ------------------
+// For accounts that may already have spent something. Eligible only when ALL of:
+//   * every give still standing came from ONE shul (and one season), so the money can only
+//     go back to that shul and the org;
+//   * the org matched it dollar for dollar (total match == total shul money, to the cent);
+//   * the total received (shul + match) is not more than DOUBLE the applicant's match cap
+//     (cap $1,000 -> $2,001 is skipped). No cap set at all = skipped (nothing to compare to).
+// What is left on the card is split in half: half back to the shul, half released to the org;
+// an odd cent goes to the shul. Whatever was spent is treated as spent half from each side.
+const cents = (n) => Math.round((Number(n) || 0) * 100);
+const splitHalf = (rc) => { const org = Math.floor(rc / 2); return { shul: rc - org, org }; };
+
+export const PARTIAL_SKIP_REASONS = {
+  nothingLeft: 'nothing left on the card',
+};
+// how the preview words each group of accounts that is left alone
+const PARTIAL_SKIP_LABELS = {
+  multiShul: 'account(s) got money from more than one shul',
+  multiSeason: 'account(s) have gives from more than one season',
+  notOneToOne: 'account(s) were not matched dollar for dollar',
+  noCap: 'account(s) have no match cap set for their season/applicant',
+  overCap: 'account(s) received more than double the match cap',
+  nothingLeft: 'account(s) have nothing left on the card',
+};
+
+export function findPartialCandidates(orgId, seasonId) {
+  const gives = db.prepare(`SELECT sa.id, sa.shul_id, sa.applicant_id, sa.season_id, sa.base_amount, sa.match_amount, sa.total_amount, sa.created_at,
+      a.provider_account_id, a.merge_group_id, a.first_name, a.last_name, a.external_id, a.match_cap_override, sh.name_en AS shul_name
+    FROM shul_allocations sa JOIN applicants a ON a.id = sa.applicant_id LEFT JOIN shuls sh ON sh.id = sa.shul_id
+    WHERE sa.org_id = ? AND sa.reversed_at IS NULL AND sa.reversal_of IS NULL AND sa.total_amount > 0
+    ORDER BY sa.created_at`).all(orgId);
+  const seasons = new Map(db.prepare('SELECT * FROM seasons WHERE org_id = ?').all(orgId).map(s => [s.id, s]));
+
+  const accounts = new Map();
+  for (const g of gives) {
+    const key = g.provider_account_id ? `p:${String(g.provider_account_id).replace(/\.0+$/, '')}` : (g.merge_group_id ? `m:${g.merge_group_id}` : `a:${g.applicant_id}`);
+    let acc = accounts.get(key);
+    if (!acc) { acc = { key, name: `${g.first_name || ''} ${g.last_name || ''}`.trim() || `#${g.external_id}`, externalId: g.external_id, applicantId: g.applicant_id, gives: [] }; accounts.set(key, acc); }
+    acc.gives.push(g);
+  }
+
+  const skipped = {};
+  const bump = (r) => { skipped[r] = (skipped[r] || 0) + 1; };
+  const eligible = [];
+  for (const acc of accounts.values()) {
+    if (seasonId && !acc.gives.some(g => g.season_id === seasonId)) continue;   // not in the chosen season
+    const first = acc.gives[0];
+    if (new Set(acc.gives.map(g => g.shul_id)).size > 1) { bump('multiShul'); continue; }
+    if (new Set(acc.gives.map(g => g.season_id)).size > 1) { bump('multiSeason'); continue; }
+    const baseC = acc.gives.reduce((s, g) => s + cents(g.base_amount), 0);
+    const matchC = acc.gives.reduce((s, g) => s + cents(g.match_amount), 0);
+    if (baseC <= 0 || baseC !== matchC) { bump('notOneToOne'); continue; }
+    const cap = resolveApplicantCap({ match_cap_override: first.match_cap_override }, seasons.get(first.season_id) || {});
+    if (cap == null) { bump('noCap'); continue; }
+    if (baseC + matchC > cents(cap) * 2) { bump('overCap'); continue; }
+    eligible.push({ ...acc, shulId: first.shul_id, shulName: first.shul_name || '(unknown shul)', totalC: baseC + matchC });
+  }
+  return { eligible, skipped };
+}
+
+// Local estimate only (this app's own ledger); every account's real card balance is read live when it runs.
+export function previewPartial(orgId, seasonId) {
+  const { eligible, skipped } = findPartialCandidates(orgId, seasonId);
+  const bals = eligible.length ? getApplicantBalances(orgId, eligible.map(a => a.applicantId)) : new Map();
+  const perShul = new Map();
+  let shulC = 0, orgC = 0, accounts = 0, gives = 0;
+  for (const acc of eligible) {
+    const spentC = cents(bals.get(acc.applicantId)?.spent);
+    const left = Math.max(0, acc.totalC - spentC);
+    if (left <= 0) { skipped.nothingLeft = (skipped.nothingLeft || 0) + 1; continue; }
+    const h = splitHalf(left);
+    shulC += h.shul; orgC += h.org; accounts++; gives += acc.gives.length;
+    const s = perShul.get(acc.shulId) || { shul_id: acc.shulId, shul_name: acc.shulName, base: 0, accounts: 0 };
+    s.base += h.shul / 100; s.accounts++; perShul.set(acc.shulId, s);
+  }
+  const shuls = [...perShul.values()].map(s => ({ ...s, base: round2(s.base) })).sort((a, b) => b.base - a.base);
+  return {
+    eligibleAccounts: accounts, gives, toShuls: round2(shulC / 100), toOrg: round2(orgC / 100), total: round2((shulC + orgC) / 100), shuls,
+    skipped: Object.entries(skipped).map(([k, n]) => ({ reason: k, label: PARTIAL_SKIP_LABELS[k] || k, accounts: n })),
+    estimate: true,
+  };
+}
+
 // ---- running it ---------------------------------------------------------
 const cancelFlags = new Set();
 let runningJobId = null;
@@ -127,23 +212,52 @@ export const currentJobId = () => runningJobId;
 export function cancelJob(jobId) { cancelFlags.add(jobId); }
 const yieldNow = () => new Promise(resolve => setImmediate(resolve));
 
-// A server restart mid-run leaves a 'running' row nobody is running any more.
-export function markInterruptedJobs() {
-  db.prepare(`UPDATE fund_return_jobs SET status = 'interrupted', finished_at = datetime('now') WHERE status = 'running'`).run();
-}
-
-export function startReturnJob({ orgId, userId, seasonId, ip }) {
+export function startReturnJob({ orgId, userId, seasonId, ip, mode = 'untouched' }) {
+  if (!MODES.includes(mode)) throw Object.assign(new Error('Unknown fund return type.'), { status: 400 });
   if (runningJobId) throw Object.assign(new Error('A fund return is already running. Wait for it to finish (or cancel it).'), { status: 409 });
-  const accounts = findCandidates(orgId, seasonId).filter(a => !a.touched);
+  const accounts = mode === 'partial' ? findPartialCandidates(orgId, seasonId).eligible : findCandidates(orgId, seasonId).filter(a => !a.touched);
   const id = uuid();
-  db.prepare(`INSERT INTO fund_return_jobs (id, org_id, started_by, season_id, status, accounts_total) VALUES (?,?,?,?, 'running', ?)`).run(id, orgId, userId, seasonId || null, accounts.length);
-  logAudit(orgId, userId, 'mass_fund_return_start', 'fund_return', id, null, { season_id: seasonId || null, accounts: accounts.length }, ip);
+  db.prepare(`INSERT INTO fund_return_jobs (id, org_id, started_by, season_id, status, accounts_total, mode) VALUES (?,?,?,?, 'running', ?, ?)`).run(id, orgId, userId, seasonId || null, accounts.length, mode);
+  logAudit(orgId, userId, 'mass_fund_return_start', 'fund_return', id, null, { mode, season_id: seasonId || null, accounts: accounts.length }, ip);
   runningJobId = id;
-  runJob({ jobId: id, orgId, userId, accounts, ip }).catch(e => console.error('[fundReturn] job crashed:', e));
+  runJob({ jobId: id, orgId, userId, accounts, ip, mode }).catch(e => console.error('[fundReturn] job crashed:', e));
   return id;
 }
 
-async function runJob({ jobId, orgId, userId, accounts, ip }) {
+// One account of a partial run. Reads the LIVE card balance, works out how much of the shul/match
+// money is still there (what was spent comes off the gives, half from each side, so the leftover is
+// split half / half), then reverses every give with an explicit shul/org split that adds up to that
+// leftover: shul gets the odd cent. A give with nothing left to return is still closed (reversed for $0)
+// so it can't be returned a second time.
+async function returnPartialAccount({ orgId, userId, ip, acc, res, perShul }) {
+  const first = acc.gives[0];
+  const live = await computeRetrievable(orgId, first.id);      // throws if disccardpromos can't be read
+  const bal = getApplicantBalances(orgId, [first.applicant_id]).get(first.applicant_id) || { loaded: 0, remaining: 0 };
+  const liveBalance = live.rawDiagnostic?.liveBalance ?? bal.remaining;   // no live card (never loaded) -> own ledger
+  const spentC = Math.max(0, cents(bal.loaded) - cents(liveBalance));
+  const giveTotalC = acc.gives.reduce((s, g) => s + cents(g.total_amount), 0);
+  const leftC = Math.max(0, Math.min(giveTotalC - spentC, cents(liveBalance)));
+  if (leftC <= 0) { res.status = 'skipped'; res.reason = PARTIAL_SKIP_REASONS.nothingLeft; return; }
+  const half = splitHalf(leftC);
+  let shulRem = half.shul, orgRem = half.org;
+  const note = `Mass partial return: ${fmtC(leftC)} was left on the card, split ${fmtC(half.shul)} back to the shul and ${fmtC(half.org)} released to the org (matched dollar for dollar; ${fmtC(spentC)} had been spent).`;
+  for (const g of acc.gives) {
+    const s = Math.min(shulRem, cents(g.base_amount)), o = Math.min(orgRem, cents(g.match_amount));
+    shulRem -= s; orgRem -= o;
+    const r = await reverseAllocation({ orgId, userId, allocationId: g.id, ip, shulAmount: s / 100, orgWriteoffAmount: o / 100, adminReversalNote: 'Mass partial fund return', reversalNoteOverride: note });
+    res.gives++;
+    const base = -Number(r.base_amount || 0), match = -Number(r.match_amount || 0);
+    res.toShuls += base; res.toOrg += match;
+    const ps = perShul.get(g.shul_id) || { shul_id: g.shul_id, shul_name: g.shul_name || '(unknown shul)', base: 0 };
+    ps.base += base; perShul.set(g.shul_id, ps);
+    if (r.giftcard_status === 'failed') res.reason = "disccardpromos wasn't updated yet (it retries automatically)";
+  }
+  if (shulRem > 0 || orgRem > 0) { res.status = 'partial'; res.reason = `${fmtC(shulRem + orgRem)} could not be placed on a give`; }
+  else if (!res.reason) res.reason = `${fmtC(spentC)} spent; ${fmtC(leftC)} left`;
+}
+const fmtC = (c) => `$${(c / 100).toFixed(2)}`;
+
+async function runJob({ jobId, orgId, userId, accounts, ip, mode = 'untouched' }) {
   const results = [];
   const perShul = new Map();
   const t = { done: 0, returned: 0, skipped: 0, failed: 0, partial: 0, gives: 0, shul: 0, org: 0 };
@@ -157,6 +271,8 @@ async function runJob({ jobId, orgId, userId, accounts, ip }) {
       if (cancelFlags.has(jobId)) { finalStatus = 'cancelled'; break; }
       const res = { name: acc.name, externalId: acc.externalId, status: 'returned', reason: '', gives: 0, toShuls: 0, toOrg: 0 };
       try {
+        if (mode === 'partial') await returnPartialAccount({ orgId, userId, ip, acc, res, perShul });
+        else {
         const first = acc.gives[0];
         // LIVE re-check, before anything is touched: the card must still hold
         // everything that was loaded onto it (nothing spent). computeRetrievable
@@ -178,6 +294,7 @@ async function runJob({ jobId, orgId, userId, accounts, ip }) {
             if (r.giftcard_status === 'failed') res.reason = (res.reason ? res.reason + '; ' : '') + "disccardpromos wasn't updated yet (it retries automatically)";
           }
         }
+        }
       } catch (e) { res.status = 'failed'; res.reason = e.message; }
       res.toShuls = round2(res.toShuls); res.toOrg = round2(res.toOrg);
       t.done++; t.gives += res.gives; t.shul += res.toShuls; t.org += res.toOrg;
@@ -188,7 +305,7 @@ async function runJob({ jobId, orgId, userId, accounts, ip }) {
     }
   } catch (e) { finalStatus = 'failed'; console.error('[fundReturn] run failed:', e); save('failed', e.message); }
   if (finalStatus !== 'failed') save(finalStatus);
-  logAudit(orgId, userId, 'mass_fund_return_finish', 'fund_return', jobId, null, { status: finalStatus, accounts: t.done, returned: t.returned, skipped: t.skipped, failed: t.failed, gives: t.gives, toShuls: round2(t.shul), toOrg: round2(t.org) }, ip);
+  logAudit(orgId, userId, 'mass_fund_return_finish', 'fund_return', jobId, null, { mode, status: finalStatus, accounts: t.done, returned: t.returned, skipped: t.skipped, failed: t.failed, gives: t.gives, toShuls: round2(t.shul), toOrg: round2(t.org) }, ip);
   cancelFlags.delete(jobId);
   runningJobId = null;
 }
