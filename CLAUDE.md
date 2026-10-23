@@ -187,7 +187,7 @@ Logic is `services/fundReturn.js`, routes `routes/fundReturn.js` (`/api/fund-ret
 `fund_return_jobs` (progress, per-shul totals, per-account results; powers the Excel report).
 - **Permission `fund_return`** (Users & Permissions): super_admin always; everyone else needs an explicit
   grant (`RESOURCE_DEFAULT_OVERRIDES`). Every route needs `can_edit`; the Settings card is hidden without it.
-- **Random code gate**: `/preview` issues a one-time 6-char letters+digits code (10 min, per user + season);
+- **Random code gate**: `/preview` issues a one-time 6-char letters+digits code (15 min, per user + season);
   `/start` refuses unless it is typed back exactly. The button stays disabled until the code matches.
 - **"Untouched" is checked twice**: locally (no stored or unattributed charge for that person) and live
   against disccardpromos per account right before reversing (any spend / balance below what was loaded →
