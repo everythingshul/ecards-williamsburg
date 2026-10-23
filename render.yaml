@@ -3,7 +3,7 @@ services:
     name: ecards-kupeshair
     runtime: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: node src/index.js
     disk:
       name: ecards-data
