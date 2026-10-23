@@ -576,6 +576,10 @@ back to plain text if it isn't.
 patched release — 22.23.4 or later (Render's Oct 2026 advisory: eMudhra CA compromise, TLS hostname-check and
 Brotli flaws; patched lines are 22.23.4 / 24.22.1 / 26.12.1). It was 20.11.0 (no patched 20.x was listed).
 `package.json` `engines` is `22.x`. Changing it only takes effect on the next deploy.
+After changing the Node version, Render's restored build cache keeps the OLD `node_modules`; `npm install` says
+"up to date" and never recompiles `better-sqlite3`, so the server dies with `NODE_MODULE_VERSION 115 ... requires 127`.
+Fix: deploy with **Clear build cache & deploy**, and use `npm ci` as the build command (render.yaml, and the dashboard's
+Build Command if it overrides) so `node_modules` is always rebuilt from the lockfile for the running Node.
 
 ## Sanity checks worth re-running after any frontend/backend edit
 ```bash
