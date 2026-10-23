@@ -572,6 +572,11 @@ back to plain text if it isn't.
    DISCCARDPROMOS_API_BASE/KEY, GOOGLE_MAPS_API_KEY, etc.)
 3. `npm start` (or `render.yaml` on Render — same pattern as the Mamudem service)
 
+**Node version**: Render's `NODE_VERSION` env var (dashboard > Environment, mirrored in `render.yaml`) must be a
+patched release — 22.23.4 or later (Render's Oct 2026 advisory: eMudhra CA compromise, TLS hostname-check and
+Brotli flaws; patched lines are 22.23.4 / 24.22.1 / 26.12.1). It was 20.11.0 (no patched 20.x was listed).
+`package.json` `engines` is `22.x`. Changing it only takes effect on the next deploy.
+
 ## Sanity checks worth re-running after any frontend/backend edit
 ```bash
 # Backend syntax
