@@ -578,8 +578,10 @@ Brotli flaws; patched lines are 22.23.4 / 24.22.1 / 26.12.1). It was 20.11.0 (no
 `package.json` `engines` is `22.x`. Changing it only takes effect on the next deploy.
 After changing the Node version, Render's restored build cache keeps the OLD `node_modules`; `npm install` says
 "up to date" and never recompiles `better-sqlite3`, so the server dies with `NODE_MODULE_VERSION 115 ... requires 127`.
-Fix: deploy with **Clear build cache & deploy**, and use `npm ci` as the build command (render.yaml, and the dashboard's
-Build Command if it overrides) so `node_modules` is always rebuilt from the lockfile for the running Node.
+Fix (in the repo, independent of the dashboard's Build Command and cache): `package.json` has a `postinstall` that
+tries to open a `better-sqlite3` in-memory DB and runs `npm rebuild better-sqlite3` only if that fails (a stale
+binary built for another Node). Root `postinstall` runs even when `npm install` reports "up to date". "Clear build
+cache & deploy" and `npm ci` also work.
 
 ## Sanity checks worth re-running after any frontend/backend edit
 ```bash

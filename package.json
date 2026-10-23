@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
+    "postinstall": "node -e \"new (require('better-sqlite3'))(':memory:')\" 2>/dev/null || npm rebuild better-sqlite3",
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
