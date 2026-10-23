@@ -72,6 +72,17 @@ frontend/
   and shul/applicant actions are rejected until an admin resolves or bypasses
   the flag. Shuls/Applicants > Duplicates panel can open a **full side-by-side
   comparison** (`renderCompareTable()` in `app.js`) before deciding.
+- **One disccardpromos account per person** (`services/duplicates.js`
+  `findProviderAccountConflict` / `flagProviderAccountConflict` / `sweepProviderAccountConflicts`):
+  the same person legitimately spans several applicant rows (merge group, season carry-forward,
+  same `external_id`) and shares one account by design; two *different* people must never.
+  disccardpromos can return an existing customer at approval, so every auto-link in
+  `services/providerAccount.js` (`ensureProviderAccount`, which the enforce job also uses, and the
+  audit's relink-by-external-id) checks first: on a conflict nothing is linked, both applicants
+  are paused, and a normal Duplicates flag "Same disccardpromos account (#id)" is opened
+  (surfaced as `providerAccountError` on approve). **Recheck All** also sweeps existing bad data
+  (manual only — deliberately not run at boot, since it pauses applicants and deactivates cards);
+  a pair the admin bypassed for that exact account is not re-flagged.
 - **Field-level RBAC** (`middleware/permissions.js`): each internal user gets a
   `permissions` row per resource (`shuls`, `applicants`, `cards`, `stores`,
   `forms`, `users`, `settings`, `dashboard`) with `can_view`/`can_edit`/
@@ -107,10 +118,106 @@ pushes the applicant's internal ID as `external_ref` when a card is created —
 disccardpromos only ever learns the card/applicant *reference*, not personal
 details; **this app remains the system of record for all applicant data**.
 
+**Unattributed spend.** Card sync only reads customers linked to an applicant, so charges by
+disccardpromos customers that *aren't* linked (and charges on a card we couldn't match) used to
+be dropped, leaving Total Spent below disccardpromos' own figure. `syncUnlinkedCustomers()`
+(run by every `syncAllCards`, from the bulk customer indexes it already pulls) stores them in
+`unattributed_transactions` (customer id/name, vendor resolved to a store, same negative-purchase
+/ positive-refund convention). A customer is skipped only if the per-applicant sync actually
+processed it this sweep (it finds customers by `external_id`, so "some applicant holds this
+account id" isn't enough), and a charge already in `card_transactions` is never also recorded
+here — every charge is counted in exactly one table.
+
+**"Total Spent" has ONE definition**: `totalSpend()` in `services/spendTotals.js` = net
+(purchases minus refunds) of *every* card transaction — any applicant, whatever their status now,
+no merge adjustments — plus the unattributed charges. The Dashboard Total Spent tile
+(`orgFundsSummary`), its Live Store Spend total, and Donor's Dash all read it, so they cannot
+disagree, and it matches disccardpromos' own total. (It used to sum only *approved* applicants'
+own spend, which silently dropped anyone later rejected/removed and any merge adjustment, so it
+never reached disccardpromos' figure. Remaining = Total Loaded − Total Spent, as before.)
+**Spend Audit** (Cards > Spend Audit, `GET /cards/spend-audit`, `auditProviderSpend()` in `cardSync.js`;
+`?export=1` = Excel): one live pull of every disccardpromos customer (balances + charges) reconciled
+against what is stored, per customer — charges disccardpromos lists that are NOT stored here
+(`missing`: run Sync All Now), spend implied by its own balances (`amount` − `packages[].balance`)
+that is NOT in the charge list it sends (`feedGap`: nothing a sync can ever add), unreadable entries
+(no id/amount; also counted as `unlinkedMalformed` by the sweep instead of being dropped silently),
+and what we hold that its list no longer returns. Read-only and audited; use it to name any gap
+between Total Spent and disccardpromos' own total.
+`unattributedByStore` feeds `topStores`, the donor Stores panel and the Stores list/export/
+profile/history; Cards > All Transactions lists the unattributed rows (labelled with the
+disccardpromos customer) with a Total spent summary and an "Unattributed spend — INCLUDED"
+line, and Spent by Shul shows a "Not linked to any applicant" row. Season totals window
+unattributed rows by the season's date range (they have no card to carry a season). When such a
+customer is later linked, `syncApplicantCards` records the same `provider_txn_id`s as real card
+transactions and deletes the unattributed copies (`dropUnattributed`) so nothing is counted twice.
+
 Their docs host (docs.disccardpromos.com) blocked automated fetching from the
 build environment, so the exact endpoint paths/payloads in `giftcard.js` are
 a best-guess placeholder pending confirmation with their team — once
 confirmed, only that file's request/response mapping changes.
+
+## Performance (measured on a 154K-charge / 6.6K-applicant / 250 MB database)
+The whole app is ONE Node thread and better-sqlite3 is synchronous, so any long query or loop freezes
+every request. Rules that keep pages fast — keep them when touching these areas:
+- **The sync sweep (`syncAllCards`, every 60s) must stay cheap and yield.** It used to take ~16s and froze
+  the server ~12s per minute (re-resolving, re-serialising and re-inserting every stored charge each
+  time). Now: one in-memory set of already-stored provider charge ids (`ctx.knownTxnIds`) skips them
+  outright; unchanged cards aren't rewritten; `last_synced_at` is one `UPDATE` per sweep; balances for
+  all merge-group anchors are computed once; the loops `await setImmediate` every 25/100 applicants (never
+  hold a transaction across a yield); `index.js` skips a tick while a sweep is still running.
+  `resolveStoreId` memoises vendor→store for 30s (`clearStoreMatchCache()` on link changes).
+- **Whole-table spend aggregates are cached 20s** in `services/aggCache.js` (`memo`/`invalidateAggregates`):
+  `attributedNet`, per-applicant spend (`getApplicantBalances` for >200 applicants), the dashboard's
+  per-store net, Cards totals and Spent-by-Shul. Every `logAudit()` and every sync drops the cache, so
+  approvals, gives, undos, merges and syncs show at once.
+- **Covering indexes** `idx_txn_card_cover(card_id,type,amount)` and `idx_txn_store_cover(store_id,card_id,type,amount)`
+  answer the spend sums from the index (~10x faster); `idx_txn_occurred` serves the newest-first list.
+- **Big lists are paged server-side**: Cards > All Transactions (reads each table newest-first and stops,
+  deterministic order) and Shul Transactions > Allocations (`?active=1&pageSize=&page=`, `renderSimplePager()`).
+  Never return every allocation/transaction in one response.
+- `compression` (gzip, >1 KB) is on for every response; static files: HTML `no-cache`, images 7 days,
+  JS/CSS with `?v=` (bump it whenever `app.js` changes) 1 year immutable, otherwise 5 min.
+- `synchronous = NORMAL` (WAL): a commit no longer fsyncs the log; the DB can't corrupt, only a power/OS
+  failure in the last instant could drop the very latest commit.
+
+## Mass fund return (Settings > Organization > "Return funds on untouched accounts")
+Reverses every give (shul money AND org match) on every account that has had **no transaction at all**,
+in one run — so $1K from shul A + $1K org match + $1K from shul B goes back as $1K / $1K / $1K.
+Logic is `services/fundReturn.js`, routes `routes/fundReturn.js` (`/api/fund-return/*`), job rows in
+`fund_return_jobs` (progress, per-shul totals, per-account results; powers the Excel report).
+- **Permission `fund_return`** (Users & Permissions): super_admin always; everyone else needs an explicit
+  grant (`RESOURCE_DEFAULT_OVERRIDES`). Every route needs `can_edit`; the Settings card is hidden without it.
+- **Random code gate**: `/preview` issues a one-time 6-char letters+digits code (15 min, per user + season);
+  `/start` refuses unless it is typed back exactly. The button stays disabled until the code matches.
+- **"Untouched" is checked twice**: locally (no stored or unattributed charge for that person) and live
+  against disccardpromos per account right before reversing (any spend / balance below what was loaded →
+  skipped whole, never partially returned). Each give is reversed through the normal `reverseAllocation()`
+  (audited, shul balance restored, card amount lowered). Approval-time `card_amount` is not reversed.
+- One run at a time; Cancel stops before the next account (already-returned stays returned); a server
+  restart marks a running job `interrupted` at boot. Re-running is safe — reversed gives are skipped.
+
+### Second button: "Return What's Left on Single-Shul, Matched Accounts" (`mode: 'partial'`)
+Same permission (`fund_return`), same typed-code gate (a separate code per button — one button's code never
+confirms the other), same job table (`fund_return_jobs.mode`), runner, progress popup and Excel report.
+For accounts that may already have **spent** something. Eligible only when ALL standing gives of the account
+(`findPartialCandidates`): come from ONE shul and one season; total match == total shul money to the cent
+(1:1); total received (shul + match) ≤ **2 × the applicant's match cap** (`resolveApplicantCap`: applicant
+override else season `match_cap_per_applicant`; **no cap set = skipped**). The preview names how many accounts
+were left out and why.
+- **Amount**: at run time the LIVE disccardpromos balance is read (`computeRetrievable`; local ledger only if
+  the account was never on the card). `spent = loaded − live`; `left = min(gives − spent, live)` — what was
+  spent comes off the shul/match gives (so the approval-time `card_amount` is never returned); `left` is split
+  in half in cents, **an odd cent goes to the shul**. $500 + $500 match, $100 spent → $450 shul / $450 org.
+- **Ledger**: each give is closed through `reverseAllocation()` with an explicit `shulAmount`/`orgWriteoffAmount`
+  split that sums to `left` (oldest give first; a give with nothing left is still closed for $0 so it can't be
+  returned twice) and a `reversalNoteOverride` stating the real split. The spent part stays counted as used by
+  the shul and the match cap. Nothing left on the card → skipped, nothing touched. Idempotent.
+- Preview figures are an estimate from the local spend ledger; the run uses the live balance.
+
+## Applicant profile "DiscCard" button
+`openApplicant()` footer (after View Other Seasons), only when `provider_account_id` is set: opens
+`https://disccardpromos.com/portal/org/customers/<id>/` in a new tab (id with any trailing `.0` stripped).
+Frontend only, nothing sent to our server.
 
 ## Email — Brevo (single platform account)
 `src/services/mail.js` sends via the Brevo transactional API
@@ -297,6 +404,59 @@ call). Admin > Stores shows source, onboarding progress, and **live spend**
 transactions on every request — not cached). Dashboard has a "Live Store
 Spend" panel with total spend + top-5 breakdown.
 
+## Store Billing (`/admin/store-billing`, `routes/storeBilling.js`)
+Stores bill the fund back (not the other way round). Admin issues a **billing period**
+("please submit your invoice" email to chosen stores); a store may submit one invoice per
+period it was invited to (store portal Billing tab, email-code verified); admin reviews it.
+- **Approve for payment**: a pending invoice can be ticked "approved" with an editable
+  amount (`approved_for_payment`/`approved_amount`/`approved_by`/`approved_at`); only pending
+  invoices can be (un)approved. Mark Payment Sent prefills the approved amount, else the net
+  payable. The page's four tiles come from `GET /invoices/summary` (registered before
+  `/invoices/:id`): Paid, Outstanding (approved invoices count at their approved amount, others
+  at net payable), Approved Awaiting Payment, Pending Review. The list has search + sortable
+  headers, and the store name links to `/admin/stores?id=`.
+- **Processing fee**: setting `store_billing_fee_percent` (Settings > Store Billing) is deducted
+  at read time (`withPayable()`: `fee_amount`, `payable_amount`), so changing it re-prices every
+  unpaid invoice. Per invoice it can be waived (`POST /invoices/:id/fee-waiver`, who/when
+  recorded; an approval that equalled the old payable follows the change). The invoice popup's
+  `renderInvoiceCalculator()` in `app.js` shows invoice / fee / total to pay.
+- **Bank list**: the store portal's bank picker comes from `GET /store-billing/banks` — the
+  admin's list (`store_billing_banks`, Settings > Store Billing > Bank List) or the bundled
+  `frontend/js/usbanks.js`; "Other / Not Listed" is always forced last.
+- **Download Store Bank Details (Excel)**: `GET /store-billing/stores/payment-info/export`,
+  super_admin/org_admin only (like the per-store Reveal), audited as `export_payment_info`.
+- Internal columns (`admin_notes`, approval and fee-override fields) are stripped from the
+  store-facing `GET /my/invoices`.
+- **Mark Payment Sent** (`openStoreCompletePayment(id)`): amount, date, **billing period dates** (a
+  per-invoice correction in `bill_period_start/_end`, read everywhere as `COALESCE(b.bill_period_*,
+  bp.*)`; the shared `billing_periods` row is never touched; `period` text is rewritten), an
+  "email the store" checkbox, a **template picker**, and a rich-text message that already contains
+  the real figures (`POST /invoices/:id/payment-email-preview`; auto-refreshes on amount/date/period
+  unless the admin edited it, then a hint offers Reload). `POST /complete` takes
+  `period_start/period_end`, `email_subject/email_body`, `send_email` and returns
+  `email: {sent,to,error,skipped}`; no bank on file no longer blocks it. **Delete Payment**
+  (`DELETE /invoices/:id/payment`, super_admin/org_admin, audited) returns a completed invoice to
+  Pending and clears payment fields (approval, fee override, attachment, corrected period stay).
+- **Payment emails** are rich-text templates (`payment_email_templates`, partial unique index = one
+  default per org; Store Billing > Payment Emails tab). Fields: breakdown, storeName, amount,
+  invoiceAmount, feePercent, feeAmount, period, paymentDate, bankName, last4, sentTo. The
+  **breakdown** table (`buildBreakdown`) shows invoice − fee = total and says "Not deducted" /
+  "Processing fee / adjustments" when the amount sent isn't invoice − policy fee. The old
+  `storeInvoicePaymentSent` auto-email is gone from `SYSTEM_EMAIL_TEMPLATES`; a customized override
+  row is only read once, to seed the first template.
+- **Rich text, never HTML**: `createRichTextEditor(id, html, { fields })` turns `{{key}}` into
+  non-editable pills (`.rte-field`) and adds an Insert-field menu; `renderFieldChips()` renders the
+  same pills read-only. Used by Issue Billing Email, payment templates and Settings > Auto Emails.
+  `utils/sanitizeEmailHtml.js` cleans saved/sent rich text (templates, system email templates,
+  billing-period body, composed payment email).
+- **Enter Portal admin bypass**: the impersonation redeem (`POST /auth/impersonate/:token`) signs the
+  JWT with `impersonatedBy`; `auth()` sets `req.impersonatedBy` only while that admin is still an
+  active internal user. In the store billing routes that skips email verification, required payment
+  fields (blank fields keep what is on file), the attachment, the confirmation checkbox, the
+  invited-to-period and one-invoice-per-period rules (any period or none; amount still required);
+  `/my/status` returns every period with an `invited` flag and `impersonating`. A store's own login
+  is unchanged. `closeModal()` now closes the topmost stacked modal (`closeAllModals()` closes all).
+
 ## Address autocomplete (Google Places)
 `attachPlacesAutocomplete(inputId, fields)` in app.js is a from-scratch
 fetch-and-render dropdown built on the new Places API's
@@ -411,6 +571,17 @@ back to plain text if it isn't.
 2. Set env vars from `render.yaml` (BREVO_API_KEY, JWT_SECRET, APP_URL,
    DISCCARDPROMOS_API_BASE/KEY, GOOGLE_MAPS_API_KEY, etc.)
 3. `npm start` (or `render.yaml` on Render — same pattern as the Mamudem service)
+
+**Node version**: Render's `NODE_VERSION` env var (dashboard > Environment, mirrored in `render.yaml`) must be a
+patched release — 22.23.4 or later (Render's Oct 2026 advisory: eMudhra CA compromise, TLS hostname-check and
+Brotli flaws; patched lines are 22.23.4 / 24.22.1 / 26.12.1). It was 20.11.0 (no patched 20.x was listed).
+`package.json` `engines` is `22.x`. Changing it only takes effect on the next deploy.
+After changing the Node version, Render's restored build cache keeps the OLD `node_modules`; `npm install` says
+"up to date" and never recompiles `better-sqlite3`, so the server dies with `NODE_MODULE_VERSION 115 ... requires 127`.
+Fix (in the repo, independent of the dashboard's Build Command and cache): `package.json` has a `postinstall` that
+tries to open a `better-sqlite3` in-memory DB and runs `npm rebuild better-sqlite3` only if that fails (a stale
+binary built for another Node). Root `postinstall` runs even when `npm install` reports "up to date". "Clear build
+cache & deploy" and `npm ci` also work.
 
 ## Sanity checks worth re-running after any frontend/backend edit
 ```bash
