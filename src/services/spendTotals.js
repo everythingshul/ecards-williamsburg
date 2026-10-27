@@ -52,15 +52,51 @@ export function attributedNet(orgId, seasonId) {
   });
 }
 
-// THE definition of "Total Spent": everything customers actually spent at
-// stores (purchases minus refunds) = every card transaction + charges by
-// disccardpromos customers not linked to any applicant. It must not be
-// narrowed to approved applicants or adjusted for merges — an applicant who
-// spent and was later rejected still spent that money, and disccardpromos'
-// own total includes it. The Dashboard tile, its Live Store Spend panel and
-// the Donor's Dash all read this, so they cannot disagree.
+// The last complete balance snapshot (see cardSync.js recordSpendSnapshot), or null.
+export function getSpendSnapshot(orgId) {
+  return db.prepare(`SELECT spent, customers, unreadable, taken_at, (strftime('%s','now') - strftime('%s', taken_at)) AS age_seconds
+    FROM provider_spend_snapshot WHERE org_id = ?`).get(orgId) || null;
+}
+
+// Replace the snapshot whole (one statement — readers see the old or the new figure, never a mix).
+export function saveSpendSnapshot(orgId, { spent, customers, unreadable }) {
+  db.prepare(`INSERT INTO provider_spend_snapshot (org_id, spent, customers, unreadable, taken_at) VALUES (?,?,?,?, datetime('now'))
+    ON CONFLICT(org_id) DO UPDATE SET spent = excluded.spent, customers = excluded.customers, unreadable = excluded.unreadable, taken_at = excluded.taken_at`)
+    .run(orgId, round2(spent), customers, unreadable);
+}
+
+// A snapshot older than this is not trusted (the sync has been failing for hours): fall back to the ledger.
+const SNAPSHOT_MAX_AGE_SECONDS = 6 * 3600;
+
+// Settings > Organization > "Total Spent source": 'provider' (default) or 'ledger'.
+function spentSource(orgId) {
+  return memo(`spentSource:${orgId}`, () => db.prepare(`SELECT value FROM settings WHERE org_id = ? AND key = 'total_spent_source'`).get(orgId)?.value === 'ledger' ? 'ledger' : 'provider', 10000);
+}
+
+// THE definition of "Total Spent" = what customers actually spent at stores
+// (purchases minus refunds).
+//   * Org-wide (no season filter, the default everywhere): disccardpromos' OWN
+//     figure — the sum over every customer of loaded `amount` minus current
+//     package balance, from the last COMPLETE bulk pull (the snapshot). It cannot
+//     disagree with their total, does not depend on their charge list being
+//     complete, and cannot flicker: it is replaced whole, and only by a pull that
+//     passed every completeness check.
+//   * Per-season views, or if no fresh snapshot exists / the admin chose
+//     'ledger': the ledger = every card transaction (any applicant, whatever
+//     their status now, no merge adjustments) + charges by disccardpromos
+//     customers not linked to any applicant.
+// `attributed`/`unattributed`/`ledger` are always the ledger parts, so a screen
+// can show how far the transaction list is from the headline (`difference`).
+// The Dashboard tile, its Live Store Spend panel and the Donor's Dash all read
+// this, so they cannot disagree.
 export function totalSpend(orgId, seasonId) {
   const attributed = attributedNet(orgId, seasonId);
   const unattributed = unattributedNet(orgId, { seasonId }).net;
-  return { attributed, unattributed, total: round2(attributed + unattributed) };
+  const ledger = round2(attributed + unattributed);
+  let total = ledger, source = 'ledger', asOf = null;
+  if (!seasonId && spentSource(orgId) === 'provider') {
+    const snap = getSpendSnapshot(orgId);
+    if (snap && snap.age_seconds <= SNAPSHOT_MAX_AGE_SECONDS) { total = round2(snap.spent); source = 'provider'; asOf = snap.taken_at; }
+  }
+  return { attributed, unattributed, ledger, total, source, asOf, difference: round2(ledger - total) };
 }

@@ -4,7 +4,7 @@ import { resolveStoreId } from './storeMatch.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
-import { totalSpend } from './spendTotals.js';
+import { totalSpend, getSpendSnapshot, saveSpendSnapshot } from './spendTotals.js';
 import { invalidateAggregates } from './aggCache.js';
 
 // Last 4 digits of any masked card string, whatever mask convention it uses
@@ -495,11 +495,58 @@ export function auditProviderSpend(orgId, indexes) {
       }
     }
   }
-  const ours = totalSpend(orgId).total;
+  const ours = totalSpend(orgId).ledger;   // the transaction ledger, not the balance-based headline
   const storedInFeed = sum.providerListedNet - sum.missingNet;
   for (const k of ['providerListedNet', 'missingNet', 'balanceImpliedSpend', 'feedGapNet']) sum[k] = r2(sum[k]);
   rows.sort((a, b) => Math.max(Math.abs(b.missingNet), Math.abs(b.feedGap || 0)) - Math.max(Math.abs(a.missingNet), Math.abs(a.feedGap || 0)));
   return { summary: { ...sum, ourTotalSpent: ours, storedNotInFeed: r2(ours - storedInFeed) }, rows };
+}
+
+// TOTAL SPENT SNAPSHOT. From the same bulk customer pull the sweep already made
+// (balances included), sums what disccardpromos itself implies was spent:
+// per customer, loaded `amount` minus the current package balance(s) — exactly
+// their own arithmetic, so it does not depend on their charge list being
+// complete (it is not: see Spend Audit's feedGap) and cannot drift the way a
+// running tally of charges can. Stored whole (services/spendTotals.js) and read
+// by totalSpend(). It is replaced ONLY by a pull that passes every check below;
+// otherwise the previous snapshot stands (and goes stale after 6 hours, when
+// totalSpend() falls back to the ledger). Returns { ok, reason?, ... }.
+let lastSnapshotReason = null;
+export function recordSpendSnapshot(orgId, indexes) {
+  const fail = (reason) => {
+    if (reason !== lastSnapshotReason) console.warn(`[cardSync] spend snapshot NOT updated: ${reason}`);
+    lastSnapshotReason = reason;
+    return { ok: false, reason };
+  };
+  if (!indexes.length || indexes.some(i => !i || !Array.isArray(i.list))) return fail('a customer pull failed or is unavailable (mock mode)');
+  for (const i of indexes) {
+    const rt = i.list.reportedTotal;
+    if (typeof rt === 'number' && i.list.length < rt) return fail(`pull incomplete: collected ${i.list.length} of ${rt} customers`);
+  }
+  const seen = new Set();
+  let spent = 0, customers = 0, unreadable = 0, anyReported = false;
+  for (const i of indexes) {
+    if (typeof i.list.reportedTotal === 'number') anyReported = true;
+    for (const c of i.list) {
+      const id = cleanProviderId(c?.id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id); customers++;
+      const amount = c.amount != null && c.amount !== '' ? Number(c.amount) : NaN;
+      const pkgs = Array.isArray(c.packages) ? c.packages : [];
+      const withBalance = pkgs.filter(p => p && p.balance != null && p.balance !== '' && Number.isFinite(Number(p.balance)));
+      if (!Number.isFinite(amount) || (amount !== 0 && !withBalance.length)) { unreadable++; continue; }
+      const balance = withBalance.reduce((t, p) => t + Number(p.balance), 0);
+      spent += Math.max(0, amount - balance);
+    }
+  }
+  if (!customers) return fail('the pull contained no customers');
+  if (unreadable > Math.max(2, customers * 0.05)) return fail(`${unreadable} of ${customers} customers have no readable amount/balance`);
+  const prev = getSpendSnapshot(orgId);
+  // A truncated pull that does not say so: far fewer customers than last time.
+  if (prev && !anyReported && customers < prev.customers * 0.95) return fail(`only ${customers} customers vs ${prev.customers} last time and disccardpromos did not report a total`);
+  saveSpendSnapshot(orgId, { spent, customers, unreadable });
+  lastSnapshotReason = null;
+  return { ok: true, spent: Math.round(spent * 100) / 100, customers, unreadable };
 }
 
 // Sweeps every applicant with a disccardpromos account — cards, transactions,
@@ -601,7 +648,12 @@ export async function syncAllCards(orgId) {
   // frontend/admin/cards.html) — computed separately from the sync loop
   // above (which iterates applicants, not cards) purely so that toast still
   // reads as a card count.
+  let spendSnapshot = { ok: false, reason: 'not attempted' };
+  try {
+    // only when EVERY season's pull succeeded this sweep
+    spendSnapshot = indexPullsFailed ? { ok: false, reason: `${indexPullsFailed} customer pull(s) failed` } : recordSpendSnapshot(orgId, seasonIds.map(sid => indexBySeason.get(sid)));
+  } catch (e) { console.error('[cardSync] spend snapshot failed:', e.message); }
   invalidateAggregates();
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
-  return { cardsChecked, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
+  return { cardsChecked, spendSnapshot, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };
 }

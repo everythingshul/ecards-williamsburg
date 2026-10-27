@@ -190,6 +190,12 @@ renderShell('/admin/settings', `
       <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="addPaymentMethodRow()">+ Add Method</button>
       <button class="btn btn-sm btn-primary" style="margin-top:14px;margin-left:8px" onclick="savePaymentMethods()">Save</button>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Total Spent source</h3>
+      <p class="small-muted"><strong>disccardpromos balances (recommended):</strong> the Dashboard / Donor&rsquo;s Dash Total Spent is what disccardpromos itself implies &mdash; every customer&rsquo;s loaded amount minus their current balance, from the last complete customer pull (refreshed every minute; it is never replaced by a partial pull). It matches disccardpromos&rsquo; own total and does not depend on their charge list being complete. <strong>Transaction list:</strong> adds up the charges synced into this app instead. Per-store and per-shul breakdowns always use the synced charges. A single-season view always uses the charges.</p>
+      <select id="total-spent-source" style="max-width:360px"><option value="provider">disccardpromos balances (recommended)</option><option value="ledger">Synced transaction list</option></select>
+      <button class="btn btn-sm btn-primary" style="margin-left:8px" onclick="saveTotalSpentSource()">Save</button>
+    </div>
     ${Auth.can('fund_return', 'can_edit') ? `<div class="card" style="margin-top:16px" id="fund-return-card">
       <h3>Return Funds on Untouched Accounts</h3>
       <p class="small-muted">For every account that has received money but has had <strong>no transactions yet</strong>, hand everything back to where it came from: each shul's own money back to that shul's balance, and the org's match back to the org. Example: an account holding $3,000 &mdash; $1,000 from Shul A, $1,000 matched by the org, $1,000 from Shul B &mdash; gives $1,000 to Shul A, $1,000 to Shul B and releases the org's $1,000. Accounts that already spent anything are left completely alone. Every account's live card balance is re-checked right before it is touched, and every give is undone exactly the way a single &ldquo;Undo&rdquo; does it (so it is all in the audit trail). You will see exactly what will move before anything happens, and must type a confirmation code.</p>
@@ -310,6 +316,13 @@ window.saveDocSignedNotifyEmail = async () => {
     } });
     toast('Saved');
   } catch (err) { toast(err.message, true); }
+};
+async function loadTotalSpentSource() {
+  const { settings } = await api('/settings');
+  qs('#total-spent-source').value = settings.total_spent_source === 'ledger' ? 'ledger' : 'provider';
+}
+window.saveTotalSpentSource = async () => {
+  try { await api('/settings', { method: 'PUT', body: { total_spent_source: qs('#total-spent-source').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
 };
 async function loadSmsOwnNumber() {
   const { settings } = await api('/settings');
@@ -898,7 +911,7 @@ async function loadStoreLinks() {
     </tbody></table>`;
   } catch (err) { qs('#store-links-list').innerHTML = `<p class="small-muted">${esc(err.message)}</p>`; }
 }
-loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulCardStatusVisible(); loadShulSpendProgressVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks(); loadStoreBillingSettings();
+loadOrg(); loadZipRestriction(); loadDefaultReplyTo(); loadNewSignupNotifyEmails(); loadDocSignedNotifyEmail(); loadPaymentMethodRequestNotifyEmail(); loadSmsOwnNumber(); loadTotalSpentSource(); loadDiscountId(); loadPushFields(); loadPopup(); loadShulCardAmountVisible(); loadShulCardStatusVisible(); loadShulSpendProgressVisible(); loadShulBanners(); loadStoreBanners(); loadRequiredFields(); loadImportTemplates(); loadSolaEnabledDefault(); loadPaymentMethods(); loadStoreLinks(); loadStoreBillingSettings();
 </script>
 </body>
 </html>

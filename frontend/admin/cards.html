@@ -174,7 +174,7 @@ async function loadTxns() {
     if (summary) {
       qs('#txn-summary').innerHTML = `
         <div class="flex-between" style="flex-wrap:wrap;gap:10px"><div><strong style="font-size:18px">Total spent: ${fmtMoney(summary.totalSpent)}</strong>
-          <div class="small-muted">Purchases on cards ${fmtMoney(summary.purchases)} &minus; refunds ${fmtMoney(summary.refunds)} + unattributed spend ${fmtMoney(summary.unattributedNet)}</div></div></div>
+          <div class="small-muted">Purchases on cards ${fmtMoney(summary.purchases)} &minus; refunds ${fmtMoney(summary.refunds)} + unattributed spend ${fmtMoney(summary.unattributedNet)} = ${fmtMoney(summary.ledgerSpent)} in the transaction list${summary.spentSource === 'provider' && Math.abs(summary.totalSpent - summary.ledgerSpent) >= 0.01 ? `; the headline above is disccardpromos&rsquo; own figure from balances (${summary.totalSpent > summary.ledgerSpent ? '+' : '−'}${fmtMoney(Math.abs(summary.totalSpent - summary.ledgerSpent))} vs. the list)` : ''}</div></div></div>
         <div class="divider" style="margin:10px 0"></div>
         <div><strong>Unattributed spend &mdash; INCLUDED in Total spent above:</strong> ${fmtMoney(summary.unattributedNet)}
           <span class="small-muted">(${summary.unattributedCount} charge(s)${summary.unlinkedCustomers ? ` from ${summary.unlinkedCustomers} disccardpromos customer(s) not linked to any applicant` : ''}). These are charges disccardpromos has but that belong to no card of ours; link those customers under Applicants &gt; Disccardpromos Sync to attach them to a person.</span></div>`;

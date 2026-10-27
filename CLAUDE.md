@@ -128,6 +128,20 @@ processed it this sweep (it finds customers by `external_id`, so "some applicant
 account id" isn't enough), and a charge already in `card_transactions` is never also recorded
 here — every charge is counted in exactly one table.
 
+**Total Spent = disccardpromos' own figure (balance snapshot).** A running tally of the charges their feed lists can
+never be trusted to equal their total: the feed is sometimes short (Spend Audit `feedGap`), voided/removed charges
+stay in our table, and ledger tallies drift. So org-wide (no season filter, the default) `totalSpend()` returns the
+**snapshot**: each sweep, from the bulk customer pull it already makes (`balances=true`), `recordSpendSnapshot()`
+(`cardSync.js`) sums per customer `max(0, amount − Σ packages[].balance)` and stores one row in
+`provider_spend_snapshot`. It is replaced whole and ONLY by a pull that passes every check — all seasons' pulls
+succeeded, `listAllCustomers` collected every customer disccardpromos reported (`reportedTotal`), ≤5% of customers
+lack a readable amount/balance, and (if no total is reported) not <95% of last time's customer count; otherwise
+the previous snapshot stands. A snapshot older than 6 h is ignored (ledger fallback). Per-season views always use
+the ledger (a customer can span seasons, so balances can't be split by season); the dashboard note shows the
+all-seasons provider figure next to a season's ledger figure. Settings > Organization > "Total Spent source"
+(`total_spent_source` = `provider` | `ledger`) is the escape hatch. `totalSpend()` always also returns `ledger`,
+`difference`, `source`, `asOf`; store/shul breakdowns, Cards > All Transactions and the Spend Audit stay on the
+ledger. The sections below describe the ledger (still the detail, and the fallback).
 **"Total Spent" has ONE definition**: `totalSpend()` in `services/spendTotals.js` = net
 (purchases minus refunds) of *every* card transaction — any applicant, whatever their status now,
 no merge adjustments — plus the unattributed charges. The Dashboard Total Spent tile

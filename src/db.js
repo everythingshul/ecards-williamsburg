@@ -1755,6 +1755,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS fund_return_jobs (
   started_at TEXT DEFAULT (datetime('now')),
   finished_at TEXT
 )`);
+// One row per org: the total disccardpromos itself implies it has been spent, summed from every customer's
+// loaded `amount` minus current package balance(s) in the last COMPLETE bulk pull (see cardSync.js
+// recordSpendSnapshot). It is replaced whole, only by a complete pull, so it cannot flicker or drift.
+db.exec(`CREATE TABLE IF NOT EXISTS provider_spend_snapshot (
+  org_id TEXT PRIMARY KEY,
+  spent REAL NOT NULL,
+  customers INTEGER NOT NULL DEFAULT 0,
+  unreadable INTEGER NOT NULL DEFAULT 0,
+  taken_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
 // 'untouched' = reverse every give on accounts with no transactions; 'partial' = give back what is
 // left on single-shul, dollar-for-dollar-matched accounts (half to the shul, half to the org)
 safeAlter(`ALTER TABLE fund_return_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'untouched'`);
