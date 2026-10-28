@@ -385,12 +385,13 @@ router.get('/transactions/all', (req, res) => {
     FROM card_transactions t JOIN cards c ON c.id=t.card_id WHERE c.org_id = ?`).get(orgId));
   const unlinkedCustomers = db.prepare(`SELECT COUNT(DISTINCT customer_id) n FROM unattributed_transactions WHERE org_id = ? AND applicant_id IS NULL AND customer_id IS NOT NULL`).get(orgId).n;
   const un = unattributedNet(orgId);
+  const spendNow = totalSpend(orgId);
   res.json({
     transactions: rows, total, page: +page, pageSize: +pageSize,
     summary: {
       purchases: Math.round(card.purchases * 100) / 100, refunds: Math.round(card.refunds * 100) / 100,
       unattributedNet: un.net, unattributedCount: un.count, unlinkedCustomers,
-      totalSpent: totalSpend(orgId).total,
+      totalSpent: spendNow.total, ledgerSpent: spendNow.ledger, spentSource: spendNow.source,
     },
   });
 });

@@ -1,3 +1,4 @@
+import { invalidateAggregates } from '../services/aggCache.js';
 import { Router } from 'express';
 import { db, uuid } from '../db.js';
 import { auth, requireRole } from '../middleware/auth.js';
@@ -31,6 +32,7 @@ router.put('/', requirePermission('settings', 'can_edit'), (req, res) => {
   const upsert = db.prepare(`INSERT INTO settings (org_id, key, value) VALUES (?,?,?)
     ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value`);
   for (const [key, value] of Object.entries(req.body || {})) upsert.run(req.user.org_id, key, String(value ?? ''));
+  invalidateAggregates();   // e.g. Total Spent source changes the headline at once
   res.json({ ok: true });
 });
 

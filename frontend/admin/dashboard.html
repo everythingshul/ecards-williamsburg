@@ -43,6 +43,7 @@ renderShell('/admin/dashboard', `
     <div class="exec-asof" id="exec-asof"></div>
   </div>
   <div class="exec-kpi-grid" id="stats"><div class="small-muted">Loading…</div></div>
+  <div class="small-muted" id="spend-note" style="margin:6px 2px 0"></div>
   <div id="capacity-banner"></div>
   <div class="exec-chart-card" id="sms-notif-panel" style="display:none;margin-bottom:16px;border-left:4px solid var(--brand-gold-dark)">
     <div class="flex-between"><h3 style="margin:0">New Messages</h3><a href="/admin/sms?tab=inbox" class="btn btn-sm btn-outline">Open Inbox</a></div>
@@ -151,6 +152,11 @@ async function loadStats() {
       kpiCard('Loaded Accounts Active', `${stats.loadedAccounts.active} / ${stats.loadedAccounts.total}`,
         stats.loadedAccounts.active < stats.loadedAccounts.total ? 'var(--viz-warning)' : 'var(--viz-good)', EXEC_ICONS.card));
     qs('#stats').innerHTML = tiles.join('');
+    // Where Total Spent comes from: disccardpromos' own balances (default), or the transaction ledger
+    const si = stats.funds?.spendInfo;
+    qs('#spend-note').innerHTML = !si ? '' : si.source === 'provider'
+      ? `Total Spent is disccardpromos&rsquo; own figure (loaded amount minus current balances), updated ${esc(fmtDateTime(String(si.asOf).replace(' ', 'T') + 'Z'))}.${Math.abs(si.difference) >= 0.01 ? ` The synced transaction list adds up to ${fmtMoney(si.ledger)} (${si.difference > 0 ? '+' : '−'}${fmtMoney(Math.abs(si.difference))} vs. the headline) &mdash; store breakdowns use that list.` : ''}`
+      : (seasonId ? `Total Spent for this season is added up from the synced transactions.${si.allSeasons?.source === 'provider' ? ` <strong>All seasons, disccardpromos&rsquo; own total: ${fmtMoney(si.allSeasons.total)}</strong> (updated ${esc(fmtDateTime(String(si.allSeasons.asOf).replace(' ', 'T') + 'Z'))}) &mdash; choose &ldquo;All Seasons&rdquo; above to see it as the tile.` : ''}` : 'Total Spent is added up from the synced transactions (no recent complete disccardpromos balance snapshot).');
     qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
     if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;
     if (stats.topStores) {
