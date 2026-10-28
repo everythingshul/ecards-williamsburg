@@ -55,12 +55,12 @@ export function attributedNet(orgId, seasonId) {
 // The last complete balance snapshot (see cardSync.js recordSpendSnapshot), or null.
 export function getSpendSnapshot(orgId) {
   return db.prepare(`SELECT spent, customers, unreadable, taken_at, (strftime('%s','now') - strftime('%s', taken_at)) AS age_seconds
-    FROM provider_spend_snapshot WHERE org_id = ?`).get(orgId) || null;
+    FROM provider_spend_total WHERE org_id = ?`).get(orgId) || null;
 }
 
 // Replace the snapshot whole (one statement — readers see the old or the new figure, never a mix).
 export function saveSpendSnapshot(orgId, { spent, customers, unreadable }) {
-  db.prepare(`INSERT INTO provider_spend_snapshot (org_id, spent, customers, unreadable, taken_at) VALUES (?,?,?,?, datetime('now'))
+  db.prepare(`INSERT INTO provider_spend_total (org_id, spent, customers, unreadable, taken_at) VALUES (?,?,?,?, datetime('now'))
     ON CONFLICT(org_id) DO UPDATE SET spent = excluded.spent, customers = excluded.customers, unreadable = excluded.unreadable, taken_at = excluded.taken_at`)
     .run(orgId, round2(spent), customers, unreadable);
 }
@@ -95,8 +95,13 @@ export function totalSpend(orgId, seasonId) {
   const ledger = round2(attributed + unattributed);
   let total = ledger, source = 'ledger', asOf = null;
   if (!seasonId && spentSource(orgId) === 'provider') {
-    const snap = getSpendSnapshot(orgId);
-    if (snap && snap.age_seconds <= SNAPSHOT_MAX_AGE_SECONDS) { total = round2(snap.spent); source = 'provider'; asOf = snap.taken_at; }
+    try {
+      const snap = getSpendSnapshot(orgId);
+      if (snap && snap.age_seconds <= SNAPSHOT_MAX_AGE_SECONDS) { total = round2(snap.spent); source = 'provider'; asOf = snap.taken_at; }
+    } catch (e) {
+      // never let the snapshot take a page down: fall back to the ledger
+      console.error('[spendTotals] snapshot unreadable, using the transaction ledger:', e.message);
+    }
   }
   return { attributed, unattributed, ledger, total, source, asOf, difference: round2(ledger - total) };
 }
