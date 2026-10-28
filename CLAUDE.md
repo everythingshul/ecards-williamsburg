@@ -133,7 +133,7 @@ never be trusted to equal their total: the feed is sometimes short (Spend Audit 
 stay in our table, and ledger tallies drift. So org-wide (no season filter, the default) `totalSpend()` returns the
 **snapshot**: each sweep, from the bulk customer pull it already makes (`balances=true`), `recordSpendSnapshot()`
 (`cardSync.js`) sums per customer `max(0, amount − Σ packages[].balance)` and stores one row in
-`provider_spend_snapshot`. It is replaced whole and ONLY by a pull that passes every check — all seasons' pulls
+`provider_spend_total`. It is replaced whole and ONLY by a pull that passes every check — all seasons' pulls
 succeeded, `listAllCustomers` collected every customer disccardpromos reported (`reportedTotal`), ≤5% of customers
 lack a readable amount/balance, and (if no total is reported) not <95% of last time's customer count; otherwise
 the previous snapshot stands. A snapshot older than 6 h is ignored (ledger fallback). Per-season views always use
