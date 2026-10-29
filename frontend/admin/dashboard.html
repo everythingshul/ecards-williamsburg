@@ -152,11 +152,15 @@ async function loadStats() {
       kpiCard('Loaded Accounts Active', `${stats.loadedAccounts.active} / ${stats.loadedAccounts.total}`,
         stats.loadedAccounts.active < stats.loadedAccounts.total ? 'var(--viz-warning)' : 'var(--viz-good)', EXEC_ICONS.card));
     qs('#stats').innerHTML = tiles.join('');
-    // Where Total Spent comes from: disccardpromos' own balances (default), or the transaction ledger
+    // Where Total Spent comes from. All three candidate figures are shown side by side (org-wide), so the one that
+    // equals disccardpromos' own total is obvious; Settings > Total Spent source picks which one the tile uses.
     const si = stats.funds?.spendInfo;
-    qs('#spend-note').innerHTML = !si ? '' : si.source === 'provider'
-      ? `Total Spent is disccardpromos&rsquo; own figure (loaded amount minus current balances), updated ${esc(fmtDateTime(String(si.asOf).replace(' ', 'T') + 'Z'))}.${Math.abs(si.difference) >= 0.01 ? ` The synced transaction list adds up to ${fmtMoney(si.ledger)} (${si.difference > 0 ? '+' : '−'}${fmtMoney(Math.abs(si.difference))} vs. the headline) &mdash; store breakdowns use that list.` : ''}`
-      : (seasonId ? `Total Spent for this season is added up from the synced transactions.${si.allSeasons?.source === 'provider' ? ` <strong>All seasons, disccardpromos&rsquo; own total: ${fmtMoney(si.allSeasons.total)}</strong> (updated ${esc(fmtDateTime(String(si.allSeasons.asOf).replace(' ', 'T') + 'Z'))}) &mdash; choose &ldquo;All Seasons&rdquo; above to see it as the tile.` : ''}` : 'Total Spent is added up from the synced transactions (no recent complete disccardpromos balance snapshot).');
+    const cand = si ? (seasonId ? si.allSeasons?.candidates : si.candidates) : null;
+    const asOf = si ? (seasonId ? si.allSeasons?.asOf : si.asOf) : null;
+    const SRC = { provider: 'disccardpromos balances', listed: 'charges disccardpromos lists', ledger: 'synced in this app' };
+    qs('#spend-note').innerHTML = !si ? '' : (cand && cand.provider != null
+      ? `<strong>Total Spent, three ways</strong> (org-wide, updated ${esc(fmtDateTime(String(asOf).replace(' ', 'T') + 'Z'))}): ${SRC.provider} <strong>${fmtMoney(cand.provider)}</strong> &middot; ${SRC.listed} <strong>${cand.listed == null ? '—' : fmtMoney(cand.listed)}</strong> &middot; ${SRC.ledger} <strong>${fmtMoney(cand.ledger)}</strong>. ${seasonId ? 'This season&rsquo;s tile adds up the synced charges; choose &ldquo;All Seasons&rdquo; above for the org-wide tile.' : `The tile uses <em>${SRC[si.source]}</em>.`} Pick the one that equals disccardpromos&rsquo; own total in Settings &rsaquo; Total Spent source.`
+      : 'Total Spent is added up from the synced transactions (no recent complete disccardpromos snapshot yet).');
     qs('#dup-panel').style.display = stats.duplicates?.open > 0 ? 'block' : 'none';
     if (stats.duplicates?.open > 0) qs('#dup-text').textContent = `${stats.duplicates.open} record(s) are flagged as possible duplicates and paused pending review.`;
     if (stats.topStores) {

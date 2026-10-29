@@ -524,13 +524,14 @@ export function recordSpendSnapshot(orgId, indexes) {
     if (typeof rt === 'number' && i.list.length < rt) return fail(`pull incomplete: collected ${i.list.length} of ${rt} customers`);
   }
   const seen = new Set();
-  let spent = 0, customers = 0, unreadable = 0, anyReported = false;
+  let spent = 0, listedNet = 0, customers = 0, unreadable = 0, anyReported = false;
   for (const i of indexes) {
     if (typeof i.list.reportedTotal === 'number') anyReported = true;
     for (const c of i.list) {
       const id = cleanProviderId(c?.id);
       if (!id || seen.has(id)) continue;
       seen.add(id); customers++;
+      for (const t of embeddedTxns(c)) { const n = normalizeTxn(t); if (n) listedNet += -n.amount; }   // purchases are stored negative, refunds positive
       const amount = c.amount != null && c.amount !== '' ? Number(c.amount) : NaN;
       const pkgs = Array.isArray(c.packages) ? c.packages : [];
       const withBalance = pkgs.filter(p => p && p.balance != null && p.balance !== '' && Number.isFinite(Number(p.balance)));
@@ -544,9 +545,9 @@ export function recordSpendSnapshot(orgId, indexes) {
   const prev = getSpendSnapshot(orgId);
   // A truncated pull that does not say so: far fewer customers than last time.
   if (prev && !anyReported && customers < prev.customers * 0.95) return fail(`only ${customers} customers vs ${prev.customers} last time and disccardpromos did not report a total`);
-  saveSpendSnapshot(orgId, { spent, customers, unreadable });
+  saveSpendSnapshot(orgId, { spent, listedNet, customers, unreadable });
   lastSnapshotReason = null;
-  return { ok: true, spent: Math.round(spent * 100) / 100, customers, unreadable };
+  return { ok: true, spent: Math.round(spent * 100) / 100, listedNet: Math.round(listedNet * 100) / 100, customers, unreadable };
 }
 
 // Sweeps every applicant with a disccardpromos account — cards, transactions,

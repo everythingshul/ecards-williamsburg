@@ -1767,6 +1767,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS provider_spend_total (
   unreadable INTEGER NOT NULL DEFAULT 0,
   taken_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`);
+safeAlter(`ALTER TABLE provider_spend_total ADD COLUMN listed_net REAL`);
 // 'untouched' = reverse every give on accounts with no transactions; 'partial' = give back what is
 // left on single-shul, dollar-for-dollar-matched accounts (half to the shul, half to the org)
 safeAlter(`ALTER TABLE fund_return_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'untouched'`);
