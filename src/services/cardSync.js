@@ -31,7 +31,7 @@ function normalizeTxn(t) {
       .some(v => typeof v === 'string' && REFUND_WORD.test(v));
   const storeName = t.vendor || t.store_name || t.merchant || '';
   return {
-    providerTxnId: String(t.id),
+    providerTxnId: cleanProviderId(String(t.id)),   // never store a ".0" form: it would count the same charge twice
     type: isRefund ? 'refund' : 'purchase',
     amount: isRefund ? Math.abs(paid) : -Math.abs(paid),
     storeName,
@@ -48,7 +48,7 @@ function insertUnattributed(orgId, applicantId, t, customer = null) {
   if (!n) return 0;
   // A charge is counted in exactly ONE table: if it's already a real card
   // transaction, it must never also be recorded as unattributed spend.
-  if (db.prepare('SELECT 1 FROM card_transactions WHERE provider_txn_id = ?').get(n.providerTxnId)) return 0;
+  if (db.prepare('SELECT 1 FROM card_transactions WHERE provider_txn_id IN (?, ?)').get(n.providerTxnId, n.providerTxnId + '.0')) return 0;
   const customerName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null;
   return db.prepare(`INSERT OR IGNORE INTO unattributed_transactions
     (id, org_id, applicant_id, provider_txn_id, type, amount, store_name, store_id, occurred_at, raw_payload, customer_id, customer_name)
@@ -251,7 +251,8 @@ export async function syncApplicantCards(orgId, applicant, customerOverride, ctx
     // counting as an unattributed one (it was recorded there earlier, while
     // its customer wasn't linked to this applicant yet) — otherwise every
     // total would count it twice.
-    const dropUnattributed = db.prepare(`DELETE FROM unattributed_transactions WHERE org_id = ? AND provider_txn_id = ?`);
+    const dropUnattributedStmt = db.prepare(`DELETE FROM unattributed_transactions WHERE org_id = ? AND provider_txn_id IN (?, ?)`);
+    const dropUnattributed = { run: (org, id) => dropUnattributedStmt.run(org, id, id + '.0') };
     // CONFIRMED transaction shape (STORE-TRANSACTIONS-INSTRUCTIONS.md §3) —
     // the ONLY fields that exist: id (bare number), timestamp, disccardPaid
     // (always positive; the amount charged to the card), cartAmount, card

@@ -4,7 +4,7 @@ import { auth } from '../middleware/auth.js';
 import { getPermission, requirePermission } from '../middleware/permissions.js';
 import { getActiveSeasonId } from '../utils/formSchedule.js';
 import { orgFundsSummary, loadedAccountsActive } from '../services/applicantBalance.js';
-import { totalSpend, unattributedByStore } from '../services/spendTotals.js';
+import { totalSpend, unattributedByStore, ledgerCheck } from '../services/spendTotals.js';
 import { memo } from '../services/aggCache.js';
 
 const router = Router();
@@ -43,6 +43,11 @@ router.get('/pending-counts', (req, res) => {
     counts.stores = db.prepare(`SELECT COUNT(*) c FROM stores WHERE org_id = ? AND setup_status = 'pending'`).get(orgId).c;
   }
   res.json({ counts });
+});
+
+// Read-only: looks for double-counted / mis-signed synced charges (see spendTotals.js ledgerCheck).
+router.get('/ledger-check', requirePermission('dashboard'), (req, res) => {
+  res.json(ledgerCheck(req.user.org_id));
 });
 
 router.get('/stats', (req, res) => {

@@ -44,6 +44,7 @@ renderShell('/admin/dashboard', `
   </div>
   <div class="exec-kpi-grid" id="stats"><div class="small-muted">Loading…</div></div>
   <div class="small-muted" id="spend-note" style="margin:6px 2px 0"></div>
+  <div class="small-muted" style="margin:4px 2px 0"><a href="#" onclick="openLedgerCheck();return false;">Check the synced charges for double-counting&hellip;</a></div>
   <div id="capacity-banner"></div>
   <div class="exec-chart-card" id="sms-notif-panel" style="display:none;margin-bottom:16px;border-left:4px solid var(--brand-gold-dark)">
     <div class="flex-between"><h3 style="margin:0">New Messages</h3><a href="/admin/sms?tab=inbox" class="btn btn-sm btn-outline">Open Inbox</a></div>
@@ -115,6 +116,18 @@ function kpiCard(label, num, accent, icon) {
     <div class="exec-kpi-label">${esc(label)}</div>
   </div>`;
 }
+
+window.openLedgerCheck = async () => {
+  try {
+    const r = await api('/dashboard/ledger-check');
+    const rows = r.findings.map(f => `<tr><td>${esc(f.label)}<div class="small-muted">${esc(f.note || '')}${f.sample.length ? ` Examples: ${f.sample.map(x => esc(String(x))).join(', ')}` : ''}</div></td>
+      <td style="text-align:right">${f.count.toLocaleString()}</td><td style="text-align:right;white-space:nowrap"><strong>${fmtMoney(f.net)}</strong></td></tr>`).join('');
+    openModal('Synced charges — double-count check', `
+      <p class="small-muted">Read-only. Total Spent from the synced charges is ${fmtMoney(r.ledgerTotal)}. These are the ways that number can be MORE than disccardpromos&rsquo; own total.</p>
+      <table><thead><tr><th>What was checked</th><th>Rows</th><th>Effect on Total Spent</th></tr></thead><tbody>${rows}</tbody></table>
+      <p style="margin-top:10px"><strong>Certain extra (same charge stored twice): ${fmtMoney(r.certainExtra)}</strong></p>`, '', { wide: true });
+  } catch (err) { toast(err.message, true); }
+};
 
 async function loadStats() {
   const seasonId = qs('#dash-season').value;

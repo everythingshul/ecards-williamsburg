@@ -145,6 +145,17 @@ all-seasons provider figure next to a season's ledger figure. Settings > Organiz
 (`total_spent_source`) chooses the definition. `totalSpend()` always also returns `ledger`,
 `difference`, `source`, `asOf`; store/shul breakdowns, Cards > All Transactions and the Spend Audit stay on the
 ledger. The sections below describe the ledger (still the detail, and the fallback).
+**Measured on the live account (Oct 2026): the bulk customer list is NOT a full history** — it listed only ~$2.66M of
+charges while the synced ledger holds ~$5.89M (≈ disccardpromos' own figure, still 5–6K apart), and 3,718 of 3,987
+customers carry no loaded `amount`/balance at all (balances figure = $0). So the balance snapshot is unusable there and
+the ledger is the number to tune. **Double counts the ledger can hold, and their guards**: the same charge in
+`card_transactions` and `unattributed_transactions`, or twice in either, when ids differ only by a ".0" suffix.
+`normalizeTxn` now stores `cleanProviderId(id)`, `insertUnattributed` / `dropUnattributed` match both spellings, and
+`db.js` repairs history on every boot (idempotent): ".0" copies in unattributed are dropped/normalized and any
+unattributed row whose id already exists on a card is removed — each saved whole in `removed_duplicate_charges`
+(never reuse `excluded_transactions`: the boot restore puts everything in it back). **Dashboard > "Check the synced
+charges for double-counting"** (`GET /api/dashboard/ledger-check`, `ledgerCheck()` in spendTotals.js, read-only)
+lists those cases plus look-alike rows and mis-signed rows with the exact dollar effect.
 **"Total Spent" has ONE definition**: `totalSpend()` in `services/spendTotals.js` = net
 (purchases minus refunds) of *every* card transaction — any applicant, whatever their status now,
 no merge adjustments — plus the unattributed charges. The Dashboard Total Spent tile
