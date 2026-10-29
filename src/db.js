@@ -1226,6 +1226,42 @@ try {
   db.prepare(`UPDATE card_transactions SET amount = -amount WHERE provider_txn_id IS NOT NULL AND type = 'refund' AND amount < 0`).run();
 } catch (e) { console.error('[db] card_transactions repair migration failed:', e.message); }
 
+// Same repair for unattributed_transactions, plus the one thing neither table could see: the SAME charge held in
+// both (a charge stored as unattributed while its customer was unlinked, then recorded on a card once linked —
+// the cleanup matched the id as an exact string, so a ".0"-suffixed copy survived and was counted twice).
+// Any copy removed is first saved whole in removed_duplicate_charges (so it can be put back); a charge's
+// identity is its provider id with any ".0" stripped. Idempotent; a no-op once clean.
+db.exec(`CREATE TABLE IF NOT EXISTS removed_duplicate_charges (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  provider_txn_id TEXT,
+  net REAL NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL,
+  row_json TEXT NOT NULL,
+  removed_at TEXT DEFAULT (datetime('now'))
+)`);
+try {
+  const parkAndDrop = (rows, reason) => {
+    const park = db.prepare(`INSERT OR IGNORE INTO removed_duplicate_charges (id, source, provider_txn_id, net, reason, row_json) VALUES (?,?,?,?,?,?)`);
+    const drop = db.prepare('DELETE FROM unattributed_transactions WHERE id = ?');
+    let n = 0, net = 0;
+    for (const r of rows) {
+      const spend = r.type === 'refund' ? -r.amount : (r.amount < 0 ? -r.amount : 0);
+      park.run(r.id, 'unattributed', r.provider_txn_id, spend, reason, JSON.stringify(r));
+      drop.run(r.id); n++; net += spend;
+    }
+    return { n, net };
+  };
+  db.transaction(() => {
+    const sameInTable = parkAndDrop(db.prepare(`SELECT * FROM unattributed_transactions WHERE provider_txn_id LIKE '%.0'
+      AND SUBSTR(provider_txn_id, 1, LENGTH(provider_txn_id) - 2) IN (SELECT provider_txn_id FROM unattributed_transactions WHERE provider_txn_id NOT LIKE '%.0')`).all(), 'same charge twice in unattributed (.0 copy)');
+    db.prepare(`UPDATE unattributed_transactions SET provider_txn_id = SUBSTR(provider_txn_id, 1, LENGTH(provider_txn_id) - 2) WHERE provider_txn_id LIKE '%.0'`).run();
+    const alsoOnCard = parkAndDrop(db.prepare(`SELECT u.* FROM unattributed_transactions u WHERE u.provider_txn_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM card_transactions t WHERE t.provider_txn_id = u.provider_txn_id)`).all(), 'same charge already on a card');
+    if (sameInTable.n || alsoOnCard.n) console.log(`[db] removed ${sameInTable.n + alsoOnCard.n} double-counted charge(s) from unattributed_transactions (${sameInTable.n} .0 copies, ${alsoOnCard.n} also on a card; net $${Math.round((sameInTable.net + alsoOnCard.net) * 100) / 100}) — saved in removed_duplicate_charges`);
+  })();
+} catch (e) { console.error('[db] unattributed duplicate repair failed:', e.message); }
+
 // The reasons an admin bypassed a duplicate pair for (JSON array) — see
 // services/duplicates.js's bypassedReasonsFor: a bypassed pair is only ever
 // re-flagged for a reason NOT in this list, so an unrelated edit or a

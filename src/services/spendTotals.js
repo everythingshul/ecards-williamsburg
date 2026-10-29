@@ -121,3 +121,48 @@ export function totalSpend(orgId, seasonId) {
   const total = candidates[source];
   return { attributed, unattributed, ledger, total, source, asOf, candidates, snapshotMeta: meta, snapshotProblem: candidates.provider == null ? snapshotStatus : null, difference: round2(ledger - total) };
 }
+
+// LEDGER CHECK — read-only. Looks for the ways the synced charges can add up to MORE than disccardpromos' own
+// total: the same charge stored twice (ids that differ only by a ".0" suffix, or one copy in the card table and
+// one in the unattributed table), look-alike rows with different ids, and rows whose sign makes them count
+// the wrong way. Each finding says how many rows and how much Total Spent they would change by.
+export function ledgerCheck(orgId) {
+  const CLEAN = (col) => `(CASE WHEN ${col} LIKE '%.0' THEN substr(${col}, 1, length(${col}) - 2) ELSE ${col} END)`;
+  const findings = [];
+  const add = (key, label, rows, note) => {
+    const count = rows.reduce((s, r) => s + (r.n - (r.keep ?? 1)), 0);
+    const net = round2(rows.reduce((s, r) => s + (r.extra ?? 0), 0));
+    findings.push({ key, label, count, net, groups: rows.length, note, sample: rows.slice(0, 5).map(r => r.sample).filter(Boolean) });
+  };
+  // 1) the same charge twice in the card table (id differs only by ".0")
+  add('dup_card_id', 'Same charge stored twice on cards (ids differ only by a ".0")',
+    db.prepare(`SELECT ${CLEAN('t.provider_txn_id')} cid, COUNT(*) n, SUM(${NET_SQL.replace(/\b(type|amount)\b/g, 't.$1')}) total,
+        MIN(${NET_SQL.replace(/\b(type|amount)\b/g, 't.$1')}) one, MIN(t.provider_txn_id) sample
+      FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? AND t.provider_txn_id IS NOT NULL
+      GROUP BY cid HAVING n > 1`).all(orgId).map(r => ({ n: r.n, extra: r.total - r.one, sample: r.sample })),
+    'One copy is real, the rest are extra.');
+  // 2) the same charge twice in the unattributed table
+  add('dup_unattributed_id', 'Same charge stored twice as unattributed (ids differ only by a ".0")',
+    db.prepare(`SELECT ${CLEAN('provider_txn_id')} cid, COUNT(*) n, SUM(${NET_SQL}) total, MIN(${NET_SQL}) one, MIN(provider_txn_id) sample
+      FROM unattributed_transactions WHERE org_id = ? AND provider_txn_id IS NOT NULL GROUP BY cid HAVING n > 1`).all(orgId).map(r => ({ n: r.n, extra: r.total - r.one, sample: r.sample })),
+    'One copy is real, the rest are extra.');
+  // 3) one copy on a card AND one in the unattributed table
+  const both = db.prepare(`SELECT u.provider_txn_id sample, ${NET_SQL.replace(/\b(type|amount)\b/g, 'u.$1')} net
+      FROM unattributed_transactions u WHERE u.org_id = ? AND u.provider_txn_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = u.org_id
+          AND ${CLEAN('t.provider_txn_id')} = ${CLEAN('u.provider_txn_id')})`).all(orgId);
+  add('both_tables', 'Same charge on a card AND in the unattributed list', both.map(r => ({ n: 2, extra: r.net, sample: r.sample })), 'The unattributed copy is the extra one.');
+  // 4) look-alike rows (same card, time, amount and store) with different ids
+  add('lookalike', 'Look-alike charges (same card, time, amount, store; different ids)',
+    db.prepare(`SELECT COUNT(*) n, SUM(${NET_SQL.replace(/\b(type|amount)\b/g, 't.$1')}) total, MIN(${NET_SQL.replace(/\b(type|amount)\b/g, 't.$1')}) one, MIN(t.provider_txn_id) sample
+      FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? AND t.type != 'load'
+      GROUP BY t.card_id, t.occurred_at, t.amount, t.store_name HAVING n > 1`).all(orgId).map(r => ({ n: r.n, extra: r.total - r.one, sample: r.sample })),
+    'POSSIBLE duplicates — two identical purchases in the same second are unusual but can be real.');
+  // 5) sign problems
+  const neg = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(-t.amount), 0) net FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? AND t.type = 'refund' AND t.amount < 0`).get(orgId);
+  findings.push({ key: 'refund_negative', label: 'Refunds stored with a negative amount (they ADD to spend instead of reducing it)', count: neg.n, groups: neg.n, net: round2(neg.net), note: 'Each should have reduced spend; the effect shown is what they add today.', sample: [] });
+  const pos = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(t.amount), 0) net FROM card_transactions t JOIN cards c ON c.id = t.card_id WHERE c.org_id = ? AND t.type != 'refund' AND t.type != 'load' AND t.amount > 0`).get(orgId);
+  findings.push({ key: 'purchase_positive', label: 'Purchases stored with a positive amount (ignored by Total Spent)', count: pos.n, groups: pos.n, net: 0, note: `These are NOT counted in Total Spent today (their amounts add up to ${round2(pos.net)}).`, sample: [] });
+  const totalExtra = round2(findings.filter(f => ['dup_card_id', 'dup_unattributed_id', 'both_tables'].includes(f.key)).reduce((s, f) => s + f.net, 0));
+  return { findings, certainExtra: totalExtra, ledgerTotal: totalSpend(orgId).ledger };
+}
