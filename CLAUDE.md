@@ -136,10 +136,13 @@ stay in our table, and ledger tallies drift. So org-wide (no season filter, the 
 `provider_spend_total`. It is replaced whole and ONLY by a pull that passes every check — all seasons' pulls
 succeeded, `listAllCustomers` collected every customer disccardpromos reported (`reportedTotal`), ≤5% of customers
 lack a readable amount/balance, and (if no total is reported) not <95% of last time's customer count; otherwise
-the previous snapshot stands. A snapshot older than 6 h is ignored (ledger fallback). Per-season views always use
+the previous snapshot stands. The same complete pull also yields `listed_net` (net of every charge disccardpromos lists), so
+three candidate figures exist — `provider` (balances), `listed`, `ledger` — all returned in `totalSpend().candidates`, shown side by side
+in the Dashboard note, and the setting `total_spent_source` (`provider`|`listed`|`ledger`) picks the one the tile uses (pick whichever
+equals disccardpromos' own total). A snapshot older than 6 h is ignored (ledger fallback). Per-season views always use
 the ledger (a customer can span seasons, so balances can't be split by season); the dashboard note shows the
 all-seasons provider figure next to a season's ledger figure. Settings > Organization > "Total Spent source"
-(`total_spent_source` = `provider` | `ledger`) is the escape hatch. `totalSpend()` always also returns `ledger`,
+(`total_spent_source`) chooses the definition. `totalSpend()` always also returns `ledger`,
 `difference`, `source`, `asOf`; store/shul breakdowns, Cards > All Transactions and the Spend Audit stay on the
 ledger. The sections below describe the ledger (still the detail, and the fallback).
 **"Total Spent" has ONE definition**: `totalSpend()` in `services/spendTotals.js` = net

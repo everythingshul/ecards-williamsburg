@@ -148,10 +148,10 @@ export function orgFundsSummary(orgId, seasonId) {
   // merge spend adjustments, and (before charges by unlinked disccardpromos
   // customers were included) could never reach disccardpromos' own figure.
   const spend = totalSpend(orgId, seasonId);
-  const spendInfo = { source: spend.source, asOf: spend.asOf, ledger: spend.ledger, difference: spend.difference };
+  const spendInfo = { source: spend.source, asOf: spend.asOf, ledger: spend.ledger, difference: spend.difference, candidates: spend.candidates };
   if (seasonId) {   // a single-season figure can't come from balances; also give the org-wide one to compare with disccardpromos' own total
     const all = totalSpend(orgId);
-    spendInfo.allSeasons = { total: all.total, source: all.source, asOf: all.asOf };
+    spendInfo.allSeasons = { total: all.total, source: all.source, asOf: all.asOf, candidates: all.candidates };
   }
   if (!approved.length) return { approvedFunds: 0, totalSpent: spend.total, unattributedSpend: spend.unattributed, spendInfo };
   const balances = getApplicantBalances(orgId, approved.map(a => a.id));

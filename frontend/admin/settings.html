@@ -192,8 +192,13 @@ renderShell('/admin/settings', `
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Total Spent source</h3>
-      <p class="small-muted"><strong>disccardpromos balances (recommended):</strong> the Dashboard / Donor&rsquo;s Dash Total Spent is what disccardpromos itself implies &mdash; every customer&rsquo;s loaded amount minus their current balance, from the last complete customer pull (refreshed every minute; it is never replaced by a partial pull). It matches disccardpromos&rsquo; own total and does not depend on their charge list being complete. <strong>Transaction list:</strong> adds up the charges synced into this app instead. Per-store and per-shul breakdowns always use the synced charges. A single-season view always uses the charges.</p>
-      <select id="total-spent-source" style="max-width:360px"><option value="provider">disccardpromos balances (recommended)</option><option value="ledger">Synced transaction list</option></select>
+      <p class="small-muted">Which figure the Dashboard / Donor&rsquo;s Dash <strong>Total Spent</strong> shows (org-wide; a single-season view always adds up the synced charges). The Dashboard shows all three side by side &mdash; choose the one that equals disccardpromos&rsquo; own total. All three come from the same complete customer pull, refreshed every minute, and a partial or failed pull never replaces them.</p>
+      <ul class="small-muted" style="margin:6px 0 10px 18px">
+        <li><strong>disccardpromos balances:</strong> every customer&rsquo;s loaded amount minus their current balance.</li>
+        <li><strong>Charges disccardpromos lists:</strong> the net (purchases minus refunds) of every charge in their customer list.</li>
+        <li><strong>Synced in this app:</strong> the charges stored here (can drift from disccardpromos).</li>
+      </ul>
+      <select id="total-spent-source" style="max-width:360px"><option value="provider">disccardpromos balances</option><option value="listed">Charges disccardpromos lists</option><option value="ledger">Synced in this app</option></select>
       <button class="btn btn-sm btn-primary" style="margin-left:8px" onclick="saveTotalSpentSource()">Save</button>
     </div>
     ${Auth.can('fund_return', 'can_edit') ? `<div class="card" style="margin-top:16px" id="fund-return-card">
@@ -319,7 +324,7 @@ window.saveDocSignedNotifyEmail = async () => {
 };
 async function loadTotalSpentSource() {
   const { settings } = await api('/settings');
-  qs('#total-spent-source').value = settings.total_spent_source === 'ledger' ? 'ledger' : 'provider';
+  qs('#total-spent-source').value = ['provider', 'listed', 'ledger'].includes(settings.total_spent_source) ? settings.total_spent_source : 'provider';
 }
 window.saveTotalSpentSource = async () => {
   try { await api('/settings', { method: 'PUT', body: { total_spent_source: qs('#total-spent-source').value } }); toast('Saved'); } catch (err) { toast(err.message, true); }
