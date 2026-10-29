@@ -549,7 +549,12 @@ export function recordSpendSnapshot(orgId, indexes) {
     }
   }
   if (!customers) return fail('the pull contained no customers');
-  if (unreadable > customers * 0.05) return fail(`${unreadable} of ${customers} customers have no readable amount/balance (${noAmount} with no top-level amount, ${noBalance} with an amount but no package balance). Example of one: ${sample}`);
+  // Customers with no amount / no balance (never loaded, or not reported) are IGNORED for the balance figure — not
+  // every disccardpromos customer has one. Guard only against a pull that suddenly lost most of the readable ones.
+  const readable = customers - unreadable;
+  if (readable <= 0) return fail(`none of the ${customers} customers has a readable amount/balance. Example: ${sample}`);
+  const prevForReadable = getSpendSnapshot(orgId);
+  if (prevForReadable && readable < (prevForReadable.customers - prevForReadable.unreadable) * 0.8) return fail(`only ${readable} customers have a readable amount/balance vs ${prevForReadable.customers - prevForReadable.unreadable} last time`);
   const prev = getSpendSnapshot(orgId);
   // A truncated pull that does not say so: far fewer customers than last time.
   if (prev && !anyReported && customers < prev.customers * 0.95) return fail(`only ${customers} customers vs ${prev.customers} last time and disccardpromos did not report a total`);

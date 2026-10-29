@@ -101,7 +101,7 @@ export function totalSpend(orgId, seasonId) {
   const unattributed = unattributedNet(orgId, { seasonId }).net;
   const ledger = round2(attributed + unattributed);
   const candidates = { provider: null, listed: null, ledger };
-  let asOf = null;
+  let asOf = null, meta = null;
   if (!seasonId) {
     try {
       const snap = getSpendSnapshot(orgId);
@@ -109,6 +109,7 @@ export function totalSpend(orgId, seasonId) {
         candidates.provider = round2(snap.spent);
         candidates.listed = snap.listed_net == null ? null : round2(snap.listed_net);
         asOf = snap.taken_at;
+        meta = { customers: snap.customers, unreadable: snap.unreadable };
       }
     } catch (e) {
       // never let the snapshot take a page down: fall back to the ledger
@@ -118,5 +119,5 @@ export function totalSpend(orgId, seasonId) {
   let source = spentSource(orgId);
   if (candidates[source] == null) source = 'ledger';
   const total = candidates[source];
-  return { attributed, unattributed, ledger, total, source, asOf, candidates, snapshotProblem: candidates.provider == null ? snapshotStatus : null, difference: round2(ledger - total) };
+  return { attributed, unattributed, ledger, total, source, asOf, candidates, snapshotMeta: meta, snapshotProblem: candidates.provider == null ? snapshotStatus : null, difference: round2(ledger - total) };
 }
