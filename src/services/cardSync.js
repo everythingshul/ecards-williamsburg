@@ -526,6 +526,7 @@ export function recordSpendSnapshot(orgId, indexes) {
   }
   const seen = new Set();
   let spent = 0, listedNet = 0, customers = 0, unreadable = 0, anyReported = false;
+  let noAmount = 0, noBalance = 0, sample = null;   // why customers are unreadable (shown on the Dashboard)
   for (const i of indexes) {
     if (typeof i.list.reportedTotal === 'number') anyReported = true;
     for (const c of i.list) {
@@ -536,13 +537,19 @@ export function recordSpendSnapshot(orgId, indexes) {
       const amount = c.amount != null && c.amount !== '' ? Number(c.amount) : NaN;
       const pkgs = Array.isArray(c.packages) ? c.packages : [];
       const withBalance = pkgs.filter(p => p && p.balance != null && p.balance !== '' && Number.isFinite(Number(p.balance)));
-      if (!Number.isFinite(amount) || (amount !== 0 && !withBalance.length)) { unreadable++; continue; }
+      if (!Number.isFinite(amount) || (amount !== 0 && !withBalance.length)) {
+        unreadable++;
+        if (!Number.isFinite(amount)) noAmount++; else noBalance++;
+        // one redacted example of the shape (field names + numbers only, never names/contact details)
+        if (!sample) sample = JSON.stringify({ fields: Object.keys(c).slice(0, 30), amount: c.amount ?? null, packages: pkgs.slice(0, 3).map(p => ({ fields: Object.keys(p || {}).slice(0, 12), id: p?.id ?? null, amount: p?.amount ?? null, balance: p?.balance ?? null })) });
+        continue;
+      }
       const balance = withBalance.reduce((t, p) => t + Number(p.balance), 0);
       spent += Math.max(0, amount - balance);
     }
   }
   if (!customers) return fail('the pull contained no customers');
-  if (unreadable > Math.max(2, customers * 0.05)) return fail(`${unreadable} of ${customers} customers have no readable amount/balance`);
+  if (unreadable > customers * 0.05) return fail(`${unreadable} of ${customers} customers have no readable amount/balance (${noAmount} with no top-level amount, ${noBalance} with an amount but no package balance). Example of one: ${sample}`);
   const prev = getSpendSnapshot(orgId);
   // A truncated pull that does not say so: far fewer customers than last time.
   if (prev && !anyReported && customers < prev.customers * 0.95) return fail(`only ${customers} customers vs ${prev.customers} last time and disccardpromos did not report a total`);
