@@ -4,7 +4,7 @@ import { resolveStoreId } from './storeMatch.js';
 import { getApplicantBalances } from './applicantBalance.js';
 import { sendMailChecked } from './mail.js';
 import { scheduleProviderEnforceSoon } from './providerAccount.js';
-import { totalSpend, getSpendSnapshot, saveSpendSnapshot } from './spendTotals.js';
+import { totalSpend, getSpendSnapshot, saveSpendSnapshot, setSnapshotStatus } from './spendTotals.js';
 import { invalidateAggregates } from './aggCache.js';
 
 // Last 4 digits of any masked card string, whatever mask convention it uses
@@ -516,6 +516,7 @@ export function recordSpendSnapshot(orgId, indexes) {
   const fail = (reason) => {
     if (reason !== lastSnapshotReason) console.warn(`[cardSync] spend snapshot NOT updated: ${reason}`);
     lastSnapshotReason = reason;
+    setSnapshotStatus(reason);
     return { ok: false, reason };
   };
   if (!indexes.length || indexes.some(i => !i || !Array.isArray(i.list))) return fail('a customer pull failed or is unavailable (mock mode)');
@@ -547,6 +548,7 @@ export function recordSpendSnapshot(orgId, indexes) {
   if (prev && !anyReported && customers < prev.customers * 0.95) return fail(`only ${customers} customers vs ${prev.customers} last time and disccardpromos did not report a total`);
   saveSpendSnapshot(orgId, { spent, listedNet, customers, unreadable });
   lastSnapshotReason = null;
+  setSnapshotStatus(null);
   return { ok: true, spent: Math.round(spent * 100) / 100, listedNet: Math.round(listedNet * 100) / 100, customers, unreadable };
 }
 
@@ -652,8 +654,9 @@ export async function syncAllCards(orgId) {
   let spendSnapshot = { ok: false, reason: 'not attempted' };
   try {
     // only when EVERY season's pull succeeded this sweep
-    spendSnapshot = indexPullsFailed ? { ok: false, reason: `${indexPullsFailed} customer pull(s) failed` } : recordSpendSnapshot(orgId, seasonIds.map(sid => indexBySeason.get(sid)));
-  } catch (e) { console.error('[cardSync] spend snapshot failed:', e.message); }
+    if (indexPullsFailed) { spendSnapshot = { ok: false, reason: `${indexPullsFailed} customer pull(s) failed` }; setSnapshotStatus(`${indexPullsFailed} disccardpromos customer pull(s) failed this sweep`); }
+    else spendSnapshot = recordSpendSnapshot(orgId, seasonIds.map(sid => indexBySeason.get(sid)));
+  } catch (e) { console.error('[cardSync] spend snapshot failed:', e.message); setSnapshotStatus(`error while computing it: ${e.message}`); }
   invalidateAggregates();
   const cardsChecked = db.prepare(`SELECT COUNT(*) c FROM cards WHERE org_id = ? AND status IN ('assigned','activated')`).get(orgId).c;
   return { cardsChecked, spendSnapshot, transactionsSynced: totalSynced, cardsDiscovered, cardsRemoved, reconciliationFlags, unattributed, malformed, failed, indexPullsFailed, ...unlinked };

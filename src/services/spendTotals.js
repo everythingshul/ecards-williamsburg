@@ -67,6 +67,12 @@ export function saveSpendSnapshot(orgId, { spent, listedNet, customers, unreadab
     .run(orgId, round2(spent), round2(listedNet), customers, unreadable);
 }
 
+// Why the last sweep did NOT produce a snapshot (null = it did; 'not attempted yet' until the first sweep after a
+// restart). In memory only; shown on the Dashboard so nobody has to read server logs.
+let snapshotStatus = 'not attempted yet (the first sync runs about a minute after the server starts)';
+export const setSnapshotStatus = (reason) => { snapshotStatus = reason || null; };
+export const getSnapshotStatus = () => snapshotStatus;
+
 // A snapshot older than this is not trusted (the sync has been failing for hours): fall back to the ledger.
 const SNAPSHOT_MAX_AGE_SECONDS = 6 * 3600;
 
@@ -112,5 +118,5 @@ export function totalSpend(orgId, seasonId) {
   let source = spentSource(orgId);
   if (candidates[source] == null) source = 'ledger';
   const total = candidates[source];
-  return { attributed, unattributed, ledger, total, source, asOf, candidates, difference: round2(ledger - total) };
+  return { attributed, unattributed, ledger, total, source, asOf, candidates, snapshotProblem: candidates.provider == null ? snapshotStatus : null, difference: round2(ledger - total) };
 }
